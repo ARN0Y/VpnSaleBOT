@@ -1,0 +1,40 @@
+# ── secrets & runtime data (NEVER commit) ──
+.env
+.env.local
+*.env.local
+
+# ── databases (customer data / runtime) ──
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ── backups ──
+backup/
+*.zip
+
+# ── python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+logs/
+*.log
+
+# ── node / SPA build deps (dist/ IS committed for no-Node servers) ──
+admin_ui/node_modules/
+node_modules/
+*.local
+
+# ── knowledge graph (regenerable, large) ──
+graphify-out/
+
+# ── local tooling / editors ──
+.claude/
+.codex/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

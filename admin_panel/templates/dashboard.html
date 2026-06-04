@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+  {% set cards = [
+    ("کاربران", stats.users, "Users", "text-cyan-200", "bg-cyan-400/10 border-cyan-400/20", "M16 11a4 4 0 1 0-8 0 4 4 0 0 0 8 0Zm-12 9a8 8 0 0 1 16 0"),
+    ("نمایندگان", stats.agents, "باز " ~ stats.open_agents ~ " / بسته " ~ stats.closed_agents, "text-fuchsia-200", "bg-fuchsia-400/10 border-fuchsia-400/20", "M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7l8-4Z"),
+    ("درآمد تاییدشده", toman(stats.revenue) ~ " تومان", "Revenue", "text-emerald-200", "bg-emerald-400/10 border-emerald-400/20", "M12 6v12M8 10h6a3 3 0 0 1 0 6H7M16 8H9a3 3 0 0 0 0 6h7"),
+    ("حجم فروخته‌شده", stats.traffic_gb ~ " GB", "Traffic", "text-indigo-200", "bg-indigo-400/10 border-indigo-400/20", "M4 7h16M4 12h16M4 17h10"),
+    ("شارژهای معلق", stats.pending_topups, "Topups", "text-amber-200", "bg-amber-400/10 border-amber-400/20", "M3 7h18v12H3V7Zm3-4h12v4H6V3Z"),
+    ("نمایندگی معلق", stats.pending_agent_requests, "Agents", "text-rose-200", "bg-rose-400/10 border-rose-400/20", "M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7l8-4Z")
+  ] %}
+  {% for label, value, hint, color, skin, icon in cards %}
+  <div class="metric-card group p-4 transition hover:-translate-y-0.5 hover:border-cyan-300/25">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <p class="text-xs font-bold text-slate-400">{{ label }}</p>
+      </div>
+      <div class="flex h-10 w-10 items-center justify-center rounded-2xl border {{ skin }} {{ color }}">
+        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none"><path d="{{ icon }}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+    </div>
+    <p class="metric-value mt-3">{{ value }}</p>
+    <div class="mt-3 flex items-center justify-between text-xs font-bold text-slate-500">
+      <span>{{ hint }}</span>
+      <span class="text-cyan-300">Live</span>
+    </div>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="section-panel mt-6">
+  <div class="border-b border-white/10 p-5">
+    <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+      <div>
+        <p class="eyebrow">Recent orders</p>
+        <h2 class="mt-2 text-xl font-black text-white">آخرین سفارش‌ها</h2>
+        <p class="mt-1 text-sm text-slate-400">جستجو با شناسه سفارش، آیدی کاربر یا نام کانفیگ.</p>
+      </div>
+      <form method="get" class="flex min-w-0 gap-2 xl:w-[34rem]">
+        <div class="relative min-w-0 flex-1">
+          <input name="q" value="{{ q }}" class="input-base min-h-11 pe-10" placeholder="order id / user id / config name">
+          <svg class="pointer-events-none absolute end-3 top-3 h-5 w-5 text-slate-500" viewBox="0 0 24 24" fill="none"><path d="m21 21-4.3-4.3M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <button class="btn-primary">جستجو</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-white/10 text-sm">
+      <thead class="bg-slate-950/50">
+        <tr class="text-slate-400">
+          <th class="px-5 py-3 text-right font-black">شناسه</th>
+          <th class="px-5 py-3 text-right font-black">نوع</th>
+          <th class="px-5 py-3 text-right font-black">کاربر</th>
+          <th class="px-5 py-3 text-right font-black">نام کانفیگ</th>
+          <th class="px-5 py-3 text-right font-black">حجم</th>
+          <th class="px-5 py-3 text-right font-black">مبلغ</th>
+          <th class="px-5 py-3 text-right font-black">وضعیت</th>
+          <th class="px-5 py-3 text-right font-black">تاریخ</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-white/10">
+      {% for o in recent_orders %}
+        <tr class="transition hover:bg-white/[0.035]">
+          <td class="px-5 py-4"><code>{{ o.order_id }}</code></td>
+          <td class="px-5 py-4"><span class="badge {% if o.order_type == 'renewal' %}badge-warn{% endif %}">{{ o.order_type_label or "خرید جدید" }}</span></td>
+          <td class="px-5 py-4"><a class="font-black text-cyan-300 hover:text-cyan-100" href="/admin/users/{{ o.user_id }}">{{ o.user_id }}</a><div class="mt-1 text-xs text-slate-500">{{ o.first_name or "" }}</div></td>
+          <td class="px-5 py-4 text-slate-300">
+            {% if o.order_type == 'renewal' %}<span class="text-slate-500">تمدید:</span>{% endif %}
+            {{ o.subscription_name or o.client_name or "رندوم" }}
+            {% if o.subscription_id %}<div class="mt-1 text-xs text-slate-500"><a class="hover:text-cyan-200" href="/admin/subscriptions/detail?sub_id={{ o.subscription_id|urlencode }}"><code>{{ o.subscription_id }}</code></a></div>{% endif %}
+          </td>
+          <td class="px-5 py-4 text-slate-300">{{ o.gb }} × {{ o.qty }}</td>
+          <td class="px-5 py-4 font-black text-white">{{ toman(o.final_price) }} تومان</td>
+          <td class="px-5 py-4"><span class="badge">{{ o.status }}</span></td>
+          <td class="px-5 py-4 text-slate-400">{{ date(o.created_at) }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="px-5 py-10 text-center text-slate-500">سفارشی پیدا نشد.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

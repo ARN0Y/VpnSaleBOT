@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+import json
+import secrets
+
+from .agent import AgentService
+from .db import AsyncDatabase
+from .models import PaymentMethod
+from .panel import PanelClient
+from .util import now_ts
+
+TEST_CONFIG_BYTES = 200 * 1024 * 1024
+TEST_CONFIG_TTL_SECONDS = 10 * 60
+
+
+def _safe_positive_int(value, default: int = 1) -> int:
+    try:
+        return max(1, int(str(value).strip()))
+    except Exception:
+        return max(1, int(default))
+
+
+class ProvisioningService:
+    def __init__(self, db: AsyncDatabase, panel: PanelClient, agents: AgentService):
+        self.db = db
+        self.panel = panel
+        self.agents = agents
+
+    async def minimum_purchase_gb(self) -> int:
+        return _safe_positive_int(await self.db.get_setting("minimum_purchase_gb", "1"), 1)
+
+    async def buy_with_wallet(
+        self,
+        *,
+        user_id: int,
+        plan_id: int,
+        gb: int,
+        qty: int,
+        unit_price: int,
+        final_total: int,
+        client_name: str = "",
+        idempotency_key: str | None = None,
+    ) -> list[str]:
+        return await self.process_checkout(
+            user_id=user_id,
+            plan_id=plan_id,
+            gb=gb,
+            qty=qty,
+            unit_price=unit_price,
+            final_total=final_total,
+            client_name=client_name,
+            idempotency_key=idempotency_key,
+        )
+
+    async def process_checkout(
+        self,
+        *,
+        user_id: int,
+        plan_id: int,
+        gb: int,
+        qty: int,
+        unit_price: int,
+        final_total: int,
+        client_name: str = "",
+        idempotency_key: str | None = None,
+    ) -> list[str]:
+        requested_gb = int(gb)
+        requested_qty = int(qty)
+        if requested_gb <= 0:
+            raise ValueError("حجم خرید معتبر نیست.")
+        if requested_qty <= 0:
+            raise ValueError("تعداد خرید معتبر نیست.")
+
+        agent = await self.db.get_agent(user_id)
+        effective_unit_price = int(unit_price)
+        if agent and int(agent["price_per_gb"] or 0) > 0:
+            effective_unit_price = int(agent["price_per_gb"])
+        if effective_unit_price <= 0:
+            raise ValueError("تعرفه حساب شما معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.")
+
+        min_gb = await self.minimum_purchase_gb()
+        if requested_gb < min_gb:
+            raise ValueError(f"حداقل حجم مجاز برای خرید {min_gb} گیگ است.")
+
+        expected_total = requested_gb * requested_qty * effective_unit_price
+        if int(final_total) != expected_total:
+            raise ValueError("مبلغ فاکتور معتبر نیست.")
+
+        order_id = f"{user_id}-{plan_id}-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        payment_method = PaymentMethod.WALLET
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate purchase request: {existing['status']}")
+
+            agent = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            tx_effective_unit_price = int(unit_price)
+            if agent and int(agent["price_per_gb"] or 0) > 0:
+                tx_effective_unit_price = int(agent["price_per_gb"])
+            if tx_effective_unit_price <= 0:
+                raise ValueError("تعرفه حساب شما معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.")
+            tx_expected_total = requested_gb * requested_qty * tx_effective_unit_price
+            if int(final_total) != tx_expected_total or int(effective_unit_price) != tx_effective_unit_price:
+                raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
+            effective_unit_price = tx_effective_unit_price
+
+            if agent and self.db.normalize_agent_access_value(agent["access_level"]) == "open":
+                payment_method = PaymentMethod.AGENT_OPEN
+                credit_update = await conn.execute(
+                    """
+                    UPDATE agents
+                    SET credit_used_toman=credit_used_toman+?
+                    WHERE user_id=?
+                      AND credit_used_toman + ? <= credit_limit_toman
+                    """,
+                    (int(final_total), int(user_id), int(final_total)),
+                )
+                if credit_update.rowcount != 1:
+                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
+                await conn.execute(
+                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
+                )
+            else:
+                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
+                if debit.rowcount != 1:
+                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id,
+                    int(user_id),
+                    int(plan_id),
+                    requested_gb,
+                    requested_qty,
+                    int(effective_unit_price),
+                    int(effective_unit_price) * requested_gb * requested_qty,
+                    0,
+                    int(final_total),
+                    now_ts(),
+                    payment_method.value,
+                    "purchase",
+                    None,
+                    (client_name or "").strip() or None,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        provisions = []
+        try:
+            provisions = await self.panel.add_subscriptions(user_id=user_id, gb=requested_gb, qty=requested_qty, preferred_name=client_name)
+            await self.db.insert_subscriptions(provisions, order_id=order_id)
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("order approval failed after provisioning")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return [p.sub_link for p in provisions]
+        except Exception:
+            await self.db.delete_subscriptions([provision.sub_id for provision in provisions])
+            for provision in provisions:
+                try:
+                    await self.panel.delete_subscription(provision.sub_id)
+                except Exception:
+                    pass
+            if payment_method == PaymentMethod.AGENT_OPEN:
+                async with self.db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (int(final_total), int(user_id)),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
+                    )
+            else:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
+    async def buy_as_agent(
+        self,
+        *,
+        user_id: int,
+        gb: int,
+        qty: int,
+        client_name: str = "",
+        idempotency_key: str | None = None,
+    ) -> list[str]:
+        agent = await self.db.get_agent(user_id)
+        if not agent:
+            raise PermissionError("user is not an agent")
+        unit_price = int(agent["price_per_gb"] or 0)
+        if unit_price <= 0:
+            unit_price = int(await self.db.get_setting("price_per_gb", "200000") or "200000")
+        return await self.process_checkout(
+            user_id=user_id,
+            gb=gb,
+            qty=qty,
+            plan_id=0,
+            unit_price=unit_price,
+            final_total=int(gb) * int(qty) * unit_price,
+            client_name=client_name,
+            idempotency_key=idempotency_key,
+        )
+
+    async def process_agent_test_config(self, *, user_id: int, idempotency_key: str | None = None) -> str:
+        test_id = f"test-{int(user_id)}-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or test_id
+        expires_at = now_ts() + TEST_CONFIG_TTL_SECONDS
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate test config request: {existing['status']}")
+            agent = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            if not agent:
+                raise ValueError("این قابلیت فقط برای نماینده‌ها فعال است.")
+            if int(agent["disabled"] or 0):
+                raise ValueError("دسترسی نمایندگی شما غیرفعال است.")
+            try:
+                permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
+            except Exception:
+                permissions = {"buy", "test"}
+            if "test" not in permissions:
+                raise ValueError("مجوز دریافت کانفیگ تست برای حساب شما فعال نیست.")
+            daily_limit = int(agent["daily_test_limit"] or 0) if "daily_test_limit" in agent.keys() else 0
+            if daily_limit <= 0:
+                raise ValueError("سهمیه روزانه کانفیگ تست برای حساب شما تنظیم نشده است.")
+            from .util import iran_day_bounds_ts
+
+            day_start, day_end = iran_day_bounds_ts()
+            used_row = await self.db.fetchone(
+                """
+                SELECT COUNT(*) AS used
+                FROM agent_test_configs
+                WHERE user_id=?
+                  AND created_at>=?
+                  AND created_at<?
+                  AND status IN ('pending','created','active')
+                """,
+                (int(user_id), day_start, day_end),
+            )
+            if int(used_row["used"] if used_row else 0) >= daily_limit:
+                raise ValueError("سهمیه کانفیگ تست امروز شما تمام شده است.")
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), test_id, "reserved", now_ts()),
+            )
+            await conn.execute(
+                "INSERT INTO agent_test_configs(test_id,user_id,sub_id,created_at,expires_at,status) VALUES(?,?,?,?,?,'pending')",
+                (test_id, int(user_id), f"pending:{test_id}", now_ts(), expires_at),
+            )
+
+        try:
+            provision = await self.panel.add_test_subscription(
+                user_id=user_id,
+                total_bytes=TEST_CONFIG_BYTES,
+                ttl_seconds=TEST_CONFIG_TTL_SECONDS,
+            )
+            await self.db.insert_test_subscription(
+                provision,
+                test_id=test_id,
+                expires_at=expires_at,
+                total_bytes=TEST_CONFIG_BYTES,
+            )
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return provision.sub_link
+        except Exception:
+            await self.db.execute("UPDATE agent_test_configs SET status='failed' WHERE test_id=?", (test_id,))
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
+    async def process_renewal(
+        self,
+        *,
+        user_id: int,
+        sub_id: str,
+        gb: int,
+        unit_price: int,
+        final_total: int,
+        idempotency_key: str | None = None,
+    ) -> str:
+        clean_sub_id = str(sub_id or "").strip()
+        if not clean_sub_id:
+            raise ValueError("اشتراک انتخاب‌شده معتبر نیست.")
+        requested_gb = int(gb)
+        if requested_gb <= 0:
+            raise ValueError("حجم تمدید معتبر نیست.")
+        min_gb = await self.minimum_purchase_gb()
+        if requested_gb < min_gb:
+            raise ValueError(f"حداقل حجم مجاز برای تمدید {min_gb} گیگ است.")
+
+        subscription = await self.db.get_subscription_for_user(user_id, clean_sub_id)
+        if not subscription:
+            raise ValueError("اشتراک انتخاب‌شده پیدا نشد.")
+
+        agent = await self.db.get_agent(user_id)
+        effective_unit_price = int(unit_price)
+        if agent and int(agent["price_per_gb"] or 0) > 0:
+            effective_unit_price = int(agent["price_per_gb"])
+        if effective_unit_price <= 0:
+            raise ValueError("تعرفه حساب شما معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.")
+
+        expected_total = requested_gb * effective_unit_price
+        if int(final_total) != expected_total:
+            raise ValueError("مبلغ فاکتور تمدید معتبر نیست.")
+
+        order_id = f"{user_id}-renew-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        payment_method = PaymentMethod.WALLET
+        client_name = str(subscription.get("client_email") or clean_sub_id)
+
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate renewal request: {existing['status']}")
+
+            subscription = await self.db.fetchone(
+                "SELECT * FROM subscriptions WHERE user_id=? AND sub_id=?",
+                (int(user_id), clean_sub_id),
+            )
+            if not subscription:
+                raise ValueError("اشتراک انتخاب‌شده پیدا نشد.")
+
+            agent = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            tx_effective_unit_price = int(unit_price)
+            if agent and int(agent["price_per_gb"] or 0) > 0:
+                tx_effective_unit_price = int(agent["price_per_gb"])
+            if tx_effective_unit_price <= 0:
+                raise ValueError("تعرفه حساب شما معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.")
+            tx_expected_total = requested_gb * tx_effective_unit_price
+            if int(final_total) != tx_expected_total or int(effective_unit_price) != tx_effective_unit_price:
+                raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً تمدید را دوباره ثبت کنید.")
+            effective_unit_price = tx_effective_unit_price
+
+            if agent and self.db.normalize_agent_access_value(agent["access_level"]) == "open":
+                payment_method = PaymentMethod.AGENT_OPEN
+                credit_update = await conn.execute(
+                    """
+                    UPDATE agents
+                    SET credit_used_toman=credit_used_toman+?
+                    WHERE user_id=?
+                      AND credit_used_toman + ? <= credit_limit_toman
+                    """,
+                    (int(final_total), int(user_id), int(final_total)),
+                )
+                if credit_update.rowcount != 1:
+                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
+                await conn.execute(
+                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                    (int(user_id), int(final_total), "renewal_credit_reserve", order_id, now_ts()),
+                )
+            else:
+                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
+                if debit.rowcount != 1:
+                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id,
+                    int(user_id),
+                    -1,
+                    requested_gb,
+                    1,
+                    int(effective_unit_price),
+                    int(effective_unit_price) * requested_gb,
+                    0,
+                    int(final_total),
+                    now_ts(),
+                    payment_method.value,
+                    "renewal",
+                    clean_sub_id,
+                    client_name,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        try:
+            detail = await self.panel.renew_subscription(clean_sub_id, requested_gb)
+            await self.db.update_subscription_panel_snapshot(detail)
+            await self.db.execute(
+                "UPDATE subscriptions SET renewed_count=renewed_count+1,last_renewed_at=? WHERE sub_id=?",
+                (now_ts(), clean_sub_id),
+            )
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("renewal order approval failed after panel update")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return detail.sub_link
+        except Exception:
+            if payment_method == PaymentMethod.AGENT_OPEN:
+                async with self.db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (int(final_total), int(user_id)),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (int(user_id), -int(final_total), "renewal_credit_refund", f"{order_id}:refund", now_ts()),
+                    )
+            else:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise

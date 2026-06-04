@@ -1,0 +1,54 @@
+<tr id="topup-row-{{ t.topup_id }}" class="transition hover:bg-white/[0.035]">
+  <td class="px-5 py-4 align-top">
+    <code>{{ t.topup_id }}</code>
+    <div class="mt-2 text-xs text-slate-500">{{ date(t.created_at) }}</div>
+  </td>
+  <td class="px-5 py-4 align-top">
+    <a class="font-black text-cyan-300 hover:text-cyan-100" href="/admin/users/{{ t.user_id }}">{{ t.user_id }}</a>
+    <div class="mt-1 text-xs text-slate-500">{{ t.first_name or "-" }}</div>
+  </td>
+  <td class="px-5 py-4 align-top">
+    <span class="badge">{{ t.method }}</span>
+    {% if t.txid %}<div class="mt-2"><code>{{ t.txid }}</code></div>{% endif %}
+  </td>
+  <td class="px-5 py-4 align-top font-black text-white">{{ toman(t.amount_toman) }} تومان</td>
+  <td class="px-5 py-4 align-top">
+    <span class="badge {% if t.status == 'pending' %}badge-warn{% elif t.status == 'approved' %}badge-ok{% else %}badge-danger{% endif %}">{{ t.status }}</span>
+  </td>
+  <td class="px-5 py-4 align-top">
+    {% if t.receipt_file_id %}
+      <a href="/admin/file/{{ t.receipt_file_id }}" target="_blank" class="group block w-32 overflow-hidden rounded-xl border border-white/10 bg-slate-950">
+        <img loading="lazy" src="/admin/file/{{ t.receipt_file_id }}" class="h-24 w-full object-cover opacity-90 transition group-hover:scale-105 group-hover:opacity-100" alt="رسید پرداخت">
+      </a>
+    {% else %}
+      <span class="text-xs text-slate-500">بدون رسید</span>
+    {% endif %}
+  </td>
+  <td class="px-5 py-4 align-top">
+    {% if t.status == 'pending' %}
+      <div class="flex flex-wrap gap-2">
+        <button
+          class="btn-success hs-tooltip-toggle"
+          hx-post="/admin/topups/{{ t.topup_id }}/approve"
+          hx-target="#topup-row-{{ t.topup_id }}"
+          hx-swap="outerHTML"
+          hx-disabled-elt="this"
+        >
+          <span class="htmx-indicator ms-2 inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"></span>
+          تایید
+        </button>
+        <button
+          class="btn-danger"
+          hx-post="/admin/topups/{{ t.topup_id }}/reject"
+          hx-target="#topup-row-{{ t.topup_id }}"
+          hx-swap="outerHTML"
+          hx-disabled-elt="this"
+        >
+          رد
+        </button>
+      </div>
+    {% else %}
+      <span class="text-xs font-bold text-slate-500">انجام شد</span>
+    {% endif %}
+  </td>
+</tr>

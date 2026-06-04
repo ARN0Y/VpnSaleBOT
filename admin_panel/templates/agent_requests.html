@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-5 flex gap-2">
+  <a class="btn-soft {% if status=='pending' %}nav-active{% endif %}" href="/admin/agent-requests?status=pending">معلق</a>
+  <a class="btn-soft {% if status=='all' %}nav-active{% endif %}" href="/admin/agent-requests?status=all">همه</a>
+</div>
+
+<div class="grid gap-5 xl:grid-cols-2">
+{% for item in items %}
+  <article class="card p-5">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 class="font-black"><code>{{ item.req_id }}</code></h2>
+        <p class="mt-2 text-sm text-slate-400">کاربر <a class="font-black text-cyan-300 hover:text-cyan-100" href="/admin/users/{{ item.user_id }}">{{ item.user_id }}</a> - {{ item.first_name or "-" }}</p>
+      </div>
+      <span class="badge {% if item.status == 'pending' %}badge-warn{% elif item.status == 'approved' %}badge-ok{% else %}badge-danger{% endif %}">{{ item.status }}</span>
+    </div>
+    <p class="mt-4 whitespace-pre-wrap rounded-xl border border-slate-800 bg-slate-950/50 p-4 text-sm leading-7 text-slate-200">{{ item.text }}</p>
+    {% if item.photo_file_id %}
+      <img loading="lazy" src="/admin/file/{{ item.photo_file_id }}" class="mt-4 max-h-[30rem] w-full rounded-xl border border-slate-800 object-contain" alt="تصویر درخواست نمایندگی">
+    {% endif %}
+    {% if item.status == 'pending' %}
+    <div class="mt-5 grid gap-3 rounded-xl border border-white/10 bg-slate-950/35 p-4">
+      <form class="grid gap-3 lg:grid-cols-4" method="post" action="/admin/agent-requests/{{ item.req_id }}/approve">
+        <label class="text-sm text-slate-300">سطح دسترسی
+          <select name="access_level" class="input-base mt-2">
+            <option value="closed">نیازمند پرداخت</option>
+            <option value="open">دسترسی باز</option>
+          </select>
+        </label>
+        <label class="text-sm text-slate-300">سقف اعتبار
+          <input name="credit_limit_toman" type="number" min="0" value="{{ default_credit or 0 }}" class="input-base mt-2">
+        </label>
+        <label class="text-sm text-slate-300">تعرفه اختصاصی
+          <input name="price_per_gb" type="number" min="0" value="{{ default_price or 0 }}" class="input-base mt-2">
+        </label>
+        <div class="flex items-end">
+          <button class="btn-success w-full">تایید و ساخت نماینده</button>
+        </div>
+      </form>
+      <form method="post" action="/admin/agent-requests/{{ item.req_id }}/reject">
+        <button class="btn-danger">رد درخواست</button>
+      </form>
+    </div>
+    {% endif %}
+  </article>
+{% else %}
+  <div class="card p-8 text-center text-slate-500">درخواستی وجود ندارد.</div>
+{% endfor %}
+</div>
+{% endblock %}

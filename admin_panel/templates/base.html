@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="fa" dir="rtl" class="dark scroll-smooth">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "پنل مدیریت" }} | تسکو نتورک</title>
+  <!-- <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"> -->
+  <script src="/static/tailwind.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          fontFamily: { sans: ["Vazirmatn", "ui-sans-serif", "system-ui"] },
+          colors: {
+            surface: "#05070c",
+            panel: "#0b1220",
+            brand: "#38d7ee"
+          },
+          boxShadow: {
+            glow: "0 18px 46px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.035)"
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="/static/admin.css">
+  <script src="/static/htmx.min.js"></script>
+  <script defer src="/static/preline.min.js"></script>
+</head>
+<body
+  class="min-h-screen bg-[#05070c] font-sans text-slate-100 antialiased"
+  hx-boost="true"
+  hx-target="#content"
+  hx-select="#content"
+  hx-push-url="true"
+>
+  <header class="sticky top-0 z-40 flex h-14 items-center gap-3 border-b border-white/10 bg-[#05070c]/86 px-4 backdrop-blur-xl lg:pe-6 lg:ps-[18.5rem]">
+    <button type="button" class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] text-slate-300 transition hover:border-cyan-300/30 hover:text-white lg:hidden" data-hs-overlay="#admin-sidebar" aria-controls="admin-sidebar">
+      <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <div class="min-w-0 flex-1">
+      <div class="text-[0.68rem] font-black uppercase text-cyan-200/90">Tresco Network Console</div>
+      <div class="truncate text-sm font-black text-white">{{ title or "پنل مدیریت" }}</div>
+    </div>
+    <div class="hidden items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-[0.68rem] font-black text-emerald-200 md:flex">
+      <span class="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_18px_rgba(52,211,153,.8)]"></span>
+      Online
+    </div>
+    <div class="hidden max-w-40 truncate rounded-full border border-white/10 bg-white/[0.035] px-3 py-1.5 text-[0.68rem] font-bold text-slate-400 md:block">{{ admin_username or "admin" }}</div>
+    <div class="hidden max-w-48 truncate rounded-full border border-white/10 bg-white/[0.035] px-3 py-1.5 text-[0.68rem] font-bold text-slate-400 md:block">{{ db_name or "botok_sandbox.db" }}</div>
+    <form method="post" action="/admin/logout" class="m-0" hx-boost="false">
+      <button class="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1.5 text-[0.68rem] font-black text-slate-300 transition hover:border-rose-400/40 hover:bg-rose-400/10 hover:text-rose-100">خروج</button>
+    </form>
+  </header>
+
+  <aside id="admin-sidebar" class="hs-overlay fixed bottom-0 start-0 top-0 z-[60] hidden w-72 translate-x-full transform border-e border-white/10 bg-[#05070c]/95 p-3 transition-all duration-300 hs-overlay-open:translate-x-0 lg:end-auto lg:bottom-0 lg:block lg:translate-x-0" tabindex="-1">
+    <div class="mb-4 border border-white/10 bg-white/[0.035] p-4 shadow-glow">
+      <div class="flex items-center gap-3">
+        <div class="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-300/50 bg-cyan-300/10 text-cyan-100">
+          <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" stroke="currentColor" stroke-width="2"/><path d="M12 8v8M8.5 10l7 4M15.5 10l-7 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </div>
+        <div class="min-w-0">
+          <div class="truncate text-base font-black text-white">تسکو نتورک</div>
+          <div class="text-[0.68rem] font-bold text-cyan-200/80">Enterprise Admin</div>
+        </div>
+      </div>
+    </div>
+
+    {% set nav = [
+      ('/admin', 'داشبورد', 'M3 13h8V3H3v10Zm10 8h8V3h-8v18ZM3 21h8v-6H3v6Z'),
+      ('/admin/users', 'کاربران و نمایندگان', 'M16 11a4 4 0 1 0-8 0 4 4 0 0 0 8 0Zm-12 9a8 8 0 0 1 16 0M20 8v6M17 11h6'),
+      ('/admin/topups', 'شارژ کیف پول', 'M3 7h18v12H3V7Zm3-4h12v4H6V3Zm12 9h.01'),
+      ('/admin/subscriptions', 'کانفیگ‌ها', 'M4 7h16M4 12h16M4 17h10'),
+      ('/admin/agent-requests', 'درخواست نمایندگی', 'M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7l8-4Z'),
+      ('/admin/broadcast', 'پیام همگانی', 'M4 5h16v10H7l-3 3V5Zm4 4h8M8 12h5'),
+      ('/admin/events', 'رویدادها', 'M12 3v3M12 18v3M4.2 6.2l2.1 2.1M17.7 15.7l2.1 2.1M3 12h3M18 12h3M4.2 17.8l2.1-2.1M17.7 8.3l2.1-2.1M8 12a4 4 0 1 0 8 0 4 4 0 0 0-8 0Z'),
+      ('/admin/orders', 'سفارش‌ها', 'M6 3h12l2 4H4l2-4Zm-1 6h14v12H5V9Z'),
+      ('/admin/settings', 'تنظیمات و بکاپ', 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0-5v3M12 18v3M4.9 4.9 7 7M17 17l2.1 2.1M3 12h3M18 12h3M4.9 19.1 7 17M17 7l2.1-2.1')
+    ] %}
+    <nav class="space-y-1 text-sm font-extrabold">
+      {% for href, label, icon in nav %}
+      <a
+        href="{{ href }}"
+        data-nav-link
+        data-nav-path="{{ href }}"
+        class="group flex items-center gap-3 rounded-xl border px-3 py-2.5 transition {% if path == href or (href != '/admin' and path.startswith(href)) %}border-cyan-300/35 bg-cyan-300/10 text-cyan-100{% else %}border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.045] hover:text-white{% endif %}"
+      >
+        <svg class="h-5 w-5 shrink-0 opacity-90 transition group-hover:opacity-100" viewBox="0 0 24 24" fill="none"><path d="{{ icon }}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>{{ label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+  </aside>
+
+  <main id="content" class="min-w-0 px-4 py-5 lg:pe-6 lg:ps-[18.5rem]">
+    <div class="mx-auto max-w-[96rem]">
+      <div class="mb-5 flex flex-col gap-1 border-b border-white/10 pb-4 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p class="text-[0.68rem] font-black uppercase text-cyan-200/90">Operations</p>
+          <h1 class="mt-1 text-xl font-black tracking-normal text-white md:text-2xl">{{ title or "پنل مدیریت" }}</h1>
+        </div>
+        <div class="hidden text-xs font-bold text-slate-500 md:block">Asia/Tehran operational surface</div>
+      </div>
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+  <div id="toast" class="fixed bottom-5 left-5 z-[80] hidden rounded-2xl border border-emerald-400/20 bg-[#07130f]/95 px-4 py-3 text-sm font-bold text-emerald-100 shadow-glow"></div>
+
+  <script>
+    window.__csrfToken = "{{ csrf_token }}";
+
+    function installCsrfTokens(root) {
+      root = root || document;
+      root.querySelectorAll('form[method="post"], form[method="POST"]').forEach(function (form) {
+        if (form.querySelector('input[name="csrf_token"]')) return;
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "csrf_token";
+        input.value = window.__csrfToken || "";
+        form.appendChild(input);
+      });
+    }
+
+    function syncActiveNav() {
+      const active = ["border-cyan-300/35", "bg-cyan-300/10", "text-cyan-100"];
+      const inactive = ["border-transparent", "text-slate-400", "hover:border-white/10", "hover:bg-white/[0.045]", "hover:text-white"];
+      const pathname = window.location.pathname.replace(/\/$/, "") || "/admin";
+      document.querySelectorAll("[data-nav-link]").forEach(function (link) {
+        const href = (link.getAttribute("data-nav-path") || "").replace(/\/$/, "") || "/admin";
+        const isActive = href === "/admin" ? pathname === "/admin" : pathname === href || pathname.startsWith(href + "/");
+        link.classList.remove(...active, ...inactive);
+        link.classList.add(...(isActive ? active : inactive));
+      });
+    }
+    document.addEventListener("DOMContentLoaded", function () {
+      syncActiveNav();
+      installCsrfTokens(document);
+    });
+    window.addEventListener("popstate", syncActiveNav);
+    document.body.addEventListener("htmx:configRequest", function (event) {
+      event.detail.headers["X-CSRF-Token"] = window.__csrfToken || "";
+    });
+    document.body.addEventListener("htmx:afterSwap", function () {
+      syncActiveNav();
+      installCsrfTokens(document);
+      if (window.HSStaticMethods) window.HSStaticMethods.autoInit();
+    });
+    document.body.addEventListener("htmx:pushedIntoHistory", syncActiveNav);
+    document.body.addEventListener("htmx:afterRequest", function (event) {
+      const message = event.detail.xhr.getResponseHeader("HX-Trigger");
+      if (!message) return;
+      const toast = document.getElementById("toast");
+      toast.textContent = "عملیات با موفقیت انجام شد";
+      toast.classList.remove("hidden");
+      setTimeout(() => toast.classList.add("hidden"), 2200);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="space-y-5">
+  <form class="card flex flex-col gap-3 p-4 md:flex-row" method="get">
+    <input name="q" value="{{ q }}" class="input-base min-h-11 flex-1" placeholder="جستجو با شناسه کانفیگ، نام کانفیگ یا آیدی کاربر">
+    <button class="btn-primary">جستجو</button>
+  </form>
+  <div class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-400">
+    <span>نمایش صفحه <b class="text-white">{{ page }}</b> از <b class="text-white">{{ total_pages }}</b> | مجموع: <b class="text-cyan-200">{{ total }}</b> کانفیگ</span>
+    <div class="flex flex-wrap gap-2">
+      <a class="btn-soft {% if page <= 1 %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page=1">اول</a>
+      <a class="btn-soft {% if page <= 1 %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page={{ page - 1 if page > 1 else 1 }}">قبلی</a>
+      <a class="btn-soft {% if page >= total_pages %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page={{ page + 1 if page < total_pages else total_pages }}">بعدی</a>
+      <a class="btn-soft {% if page >= total_pages %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page={{ total_pages }}">آخر</a>
+    </div>
+  </div>
+
+  <div class="table-shell overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead>
+        <tr>
+          <th class="p-4 text-right">شناسه</th>
+          <th class="p-4 text-right">نام کانفیگ</th>
+          <th class="p-4 text-right">کاربر</th>
+          <th class="p-4 text-right">حجم</th>
+          <th class="p-4 text-right">مصرف / باقی‌مانده</th>
+          <th class="p-4 text-right">وضعیت</th>
+          <th class="p-4 text-right"></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in subs %}
+        <tr>
+          <td class="p-4"><code>{{ s.sub_id }}</code></td>
+          <td class="p-4 font-bold text-white">{{ s.client_email or "-" }}</td>
+          <td class="p-4"><a class="font-black text-cyan-300 hover:text-cyan-100" href="/admin/users/{{ s.user_id }}">{{ s.user_id }}</a><div class="text-xs text-slate-500">{{ s.first_name or "" }}</div></td>
+          <td class="p-4">{{ s.gb }} GB</td>
+          <td class="p-4">{{ gb(s.panel_used_bytes) }} / {{ gb(s.panel_remaining_bytes) }} GB</td>
+          <td class="p-4">
+            {% if s.panel_enabled == 0 %}
+              <span class="badge badge-danger">غیرفعال</span>
+            {% else %}
+              <span class="badge badge-ok">فعال</span>
+            {% endif %}
+          </td>
+          <td class="p-4"><a class="btn-soft inline-flex items-center" href="/admin/subscriptions/detail?sub_id={{ s.sub_id|urlencode }}">باز کردن</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7" class="p-8 text-center text-slate-500">کانفیگی پیدا نشد.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="flex flex-wrap justify-center gap-2">
+    <a class="btn-soft {% if page <= 1 %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page=1">اول</a>
+    <a class="btn-soft {% if page <= 1 %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page={{ page - 1 if page > 1 else 1 }}">قبلی</a>
+    <span class="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2 text-sm font-black text-white">{{ page }} / {{ total_pages }}</span>
+    <a class="btn-soft {% if page >= total_pages %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page={{ page + 1 if page < total_pages else total_pages }}">بعدی</a>
+    <a class="btn-soft {% if page >= total_pages %}pointer-events-none opacity-40{% endif %}" href="/admin/subscriptions?q={{ q|urlencode }}&page={{ total_pages }}">آخر</a>
+  </div>
+</section>
+{% endblock %}

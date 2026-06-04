@@ -1,0 +1,79 @@
+<div class="grid gap-3">
+  {% for e in events %}
+    {% set total = e.total_count or 0 %}
+    {% set done = (e.success_count or 0) + (e.failed_count or 0) %}
+    {% set pct = ((done * 100) // total) if total else (100 if e.status in ['completed','completed_with_errors','failed'] else 8) %}
+    {% set pct = 100 if pct > 100 else pct %}
+    <article class="card p-5">
+      <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-2">
+            {% if e.kind == 'bulk_enable_subscriptions' %}
+              <span class="badge badge-ok">فعال‌سازی گروهی</span>
+            {% elif e.kind == 'bulk_disable_subscriptions' %}
+              <span class="badge badge-danger">غیرفعال‌سازی گروهی</span>
+            {% elif e.kind == 'sales_status_broadcast' %}
+              <span class="badge badge-warn">اعلان فروش</span>
+            {% elif e.kind == 'manual_broadcast' %}
+              <span class="badge">پیام همگانی</span>
+            {% else %}
+              <span class="badge">{{ e.kind }}</span>
+            {% endif %}
+            <span class="rounded-full border border-white/10 px-2.5 py-1 text-xs font-black
+              {% if e.status == 'completed' %}text-emerald-200
+              {% elif e.status == 'completed_with_errors' %}text-amber-200
+              {% elif e.status == 'failed' %}text-rose-200
+              {% else %}text-cyan-200{% endif %}">
+              {{ e.status }}
+            </span>
+          </div>
+          <h3 class="mt-3 truncate text-lg font-black text-white">{{ e.title }}</h3>
+          <div class="mt-3 grid gap-2 text-xs text-slate-400 md:grid-cols-4">
+            <span>ساخته‌شده: {{ date(e.created_at) }}</span>
+            <span>شروع: {{ date(e.started_at) }}</span>
+            <span>پایان: {{ date(e.finished_at) }}</span>
+            <span>تلاش event: {{ e.attempt_count or 0 }}</span>
+          </div>
+        </div>
+        <form
+          method="post"
+          action="/admin/events/{{ e.event_id }}/dismiss?status={{ status }}"
+          hx-post="/admin/events/{{ e.event_id }}/dismiss?status={{ status }}"
+          hx-target="#events-feed"
+          hx-select="unset"
+          hx-push-url="false"
+          hx-disinherit="hx-target hx-select hx-push-url"
+          hx-swap="innerHTML"
+          class="shrink-0"
+        >
+          <button class="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 text-slate-400 transition hover:border-rose-400/40 hover:text-rose-100" title="محو کردن">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+        </form>
+      </div>
+
+      <div class="mt-4">
+        <div class="mb-2 flex justify-between text-xs font-bold text-slate-400">
+          <span>{{ done }} از {{ total or done }}</span>
+          <span>{{ pct }}%</span>
+        </div>
+        <div class="h-2 overflow-hidden rounded-full bg-slate-800">
+          <div class="h-full rounded-full {% if e.status == 'failed' %}bg-rose-400{% elif e.status == 'completed_with_errors' %}bg-amber-400{% else %}bg-cyan-300{% endif %}" style="width: {{ pct }}%"></div>
+        </div>
+        <div class="mt-3 flex flex-wrap gap-2 text-xs font-black">
+          <span class="rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-emerald-100">موفق: {{ e.success_count or 0 }}</span>
+          <span class="rounded-lg border border-rose-400/20 bg-rose-400/10 px-2 py-1 text-rose-100">ناموفق: {{ e.failed_count or 0 }}</span>
+          <code class="rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1 text-slate-400">{{ e.event_id }}</code>
+        </div>
+      </div>
+
+      {% if e.last_error %}
+        <pre class="mt-4 max-h-32 overflow-auto rounded-xl border border-rose-400/20 bg-rose-400/10 p-3 text-xs leading-6 text-rose-100">{{ e.last_error }}</pre>
+      {% endif %}
+    </article>
+  {% else %}
+    <div class="card p-10 text-center text-slate-400">
+      رویدادی برای نمایش وجود ندارد.
+    </div>
+  {% endfor %}
+</div>

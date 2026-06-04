@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid gap-5 xl:grid-cols-[22rem_1fr]">
+  <aside class="space-y-5">
+    <div class="card p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="eyebrow">User profile</p>
+          <h2 class="mt-2 text-xl font-black text-white">{{ user.user_id }}</h2>
+          <p class="mt-1 text-slate-400">
+            {% if user.username %}
+              <span dir="ltr" style="unicode-bidi:isolate">@{{ (user.username|string)|replace("@", "") }}</span>
+            {% else %}
+              <span class="text-slate-500">-</span>
+            {% endif %}
+          </p>
+        </div>
+        {% if user.user_disabled %}
+          <span class="badge badge-danger">مسدود</span>
+        {% else %}
+          <span class="badge badge-ok">فعال</span>
+        {% endif %}
+      </div>
+      <dl class="mt-5 grid gap-3 text-sm">
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">نام</dt><dd class="font-bold text-white">{{ user.first_name or "-" }}</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">کیف پول</dt><dd class="font-bold text-white">{{ toman(user.wallet_balance) }} تومان</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">کل خرید</dt><dd class="font-bold text-emerald-300">{{ toman(user.total_spent or 0) }} تومان</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">کل گیگ خریداری‌شده</dt><dd class="font-bold text-cyan-200">{{ toman(user.total_gb_purchased or 0) }} GB</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">سطح</dt><dd class="font-bold text-white">{% if user.access_level == 'open' %}نماینده باز{% elif user.access_level == 'closed' %}نماینده نیازمند پرداخت{% else %}کاربر عادی{% endif %}</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">اعتبار</dt><dd class="font-bold text-white">{{ toman(user.credit_used_toman or 0) }} / {{ toman(user.credit_limit_toman or 0) }}</dd></div>
+        {% if user.access_level %}
+        <div class="flex justify-between gap-3"><dt class="text-slate-400">تست امروز</dt><dd class="font-bold text-cyan-200">{{ user.daily_test_used or 0 }} / {{ user.daily_test_limit or 0 }}</dd></div>
+        {% endif %}
+        {% if agent_24h %}
+        <div class="mt-1 border-t border-white/10 pt-3">
+          <p class="mb-2 text-xs font-black uppercase text-amber-400">۲۴ ساعت اخیر</p>
+          <div class="flex justify-between gap-3"><dt class="text-slate-400">خرید تومانی</dt><dd class="font-bold text-amber-300">{{ toman(agent_24h.total_toman) }} تومان</dd></div>
+          <div class="mt-2 flex justify-between gap-3"><dt class="text-slate-400">خرید گیگ</dt><dd class="font-bold text-amber-300">{{ agent_24h.total_gb }} GB</dd></div>
+          <div class="mt-2 flex justify-between gap-3"><dt class="text-slate-400">تعداد سفارش</dt><dd class="font-bold text-slate-300">{{ agent_24h.order_count }}</dd></div>
+        </div>
+        {% endif %}
+      </dl>
+      {% if user.user_disabled %}
+        <div class="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">دلیل بن: {{ user.disabled_reason or "ثبت نشده" }}</div>
+      {% endif %}
+      <div class="mt-5">
+        {% if user.user_disabled %}
+          <form method="post" action="/admin/users/{{ user.user_id }}/unban"><button class="btn-success w-full">فعال‌سازی کاربر</button></form>
+        {% else %}
+          <form class="space-y-2" method="post" action="/admin/users/{{ user.user_id }}/ban">
+            <input name="reason" class="input-base" placeholder="دلیل محدودسازی">
+            <button class="btn-danger w-full">مسدودسازی کاربر</button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <form class="card p-5" method="post" action="/admin/users/{{ user.user_id }}/wallet">
+      <p class="eyebrow">Wallet</p>
+      <h2 class="mt-2 font-black text-white">ویرایش کیف پول</h2>
+      <label class="mt-4 block text-sm text-slate-300">موجودی جدید به تومان
+        <input name="wallet_balance" type="number" min="0" value="{{ user.wallet_balance or 0 }}" class="input-base mt-2">
+      </label>
+      <button class="btn-success mt-4 w-full">ذخیره و اطلاع‌رسانی</button>
+    </form>
+
+    <form class="card p-5" method="post" action="/admin/users/{{ user.user_id }}/message">
+      <p class="eyebrow">Telegram message</p>
+      <h2 class="mt-2 font-black text-white">ارسال پیام شخصی</h2>
+      <textarea name="message" rows="5" required class="input-base mt-4 leading-7" placeholder="متن پیام مدیریت برای کاربر..."></textarea>
+      <button class="btn-primary mt-4 w-full">ارسال پیام</button>
+    </form>
+
+    <div class="card border-rose-500/20 bg-rose-500/5 p-5">
+      <p class="eyebrow text-rose-300">Bulk action</p>
+      <h2 class="mt-2 font-black text-white">مدیریت گروهی کانفیگ‌ها</h2>
+      <p class="mt-2 text-sm leading-7 text-slate-400">این عملیات فقط وضعیت کانفیگ‌های خریداری‌شده را در 3x-ui تغییر می‌دهد و حساب کاربر را بن یا تمدید نمی‌کند.</p>
+      <div class="mt-4 grid gap-2">
+        <form method="post" action="/admin/users/{{ user.user_id }}/subscriptions/disable-all" onsubmit="return confirm('همه کانفیگ‌های این کاربر از پنل غیرفعال شوند؟');">
+          <button class="btn-danger w-full">مسدود کردن همه کانفیگ‌ها</button>
+        </form>
+        <form method="post" action="/admin/users/{{ user.user_id }}/subscriptions/enable-all" onsubmit="return confirm('همه کانفیگ‌های این کاربر در پنل فعال شوند؟');">
+          <button class="btn-success w-full">فعال‌سازی همه کانفیگ‌ها</button>
+        </form>
+      </div>
+    </div>
+
+    <form class="card p-5" method="post" action="/admin/users/{{ user.user_id }}/agent">
+      <p class="eyebrow">Agent settings</p>
+      {% if user.access_level %}
+      <h2 class="mt-2 font-black text-white">تنظیم نمایندگی</h2>
+      <label class="mt-4 block text-sm text-slate-300">سطح دسترسی
+        <select name="access_level" class="input-base mt-2">
+          <option value="closed" {% if user.access_level == 'closed' %}selected{% endif %}>نیاز به پرداخت</option>
+          <option value="open" {% if user.access_level == 'open' %}selected{% endif %}>دسترسی باز</option>
+        </select>
+      </label>
+      <label class="mt-3 block text-sm text-slate-300">سقف اعتبار به تومان
+        <input name="credit_limit_toman" type="number" min="0" value="{{ user.credit_limit_toman or 0 }}" class="input-base mt-2">
+      </label>
+      <label class="mt-3 block text-sm text-slate-300">اعتبار مصرف‌شده
+        <input name="credit_used_toman" type="number" min="0" value="{{ user.credit_used_toman or 0 }}" class="input-base mt-2">
+        <span class="mt-1 block text-xs text-slate-500">برای اصلاح دستی بدهی/اعتبار نماینده.</span>
+      </label>
+      <label class="mt-3 block text-sm text-slate-300">قیمت اختصاصی هر گیگ
+        <input name="price_per_gb" type="number" min="0" value="{{ user.price_per_gb or 0 }}" class="input-base mt-2">
+        <span class="mt-1 block text-xs text-slate-500">عدد 0 یعنی استفاده از تعرفه عمومی.</span>
+      </label>
+      <label class="mt-3 block text-sm text-slate-300">سقف کانفیگ تست روزانه
+        <input name="daily_test_limit" type="number" min="0" value="{{ user.daily_test_limit or 0 }}" class="input-base mt-2">
+        <span class="mt-1 block text-xs text-slate-500">مصرف امروز: {{ user.daily_test_used or 0 }} / {{ user.daily_test_limit or 0 }}</span>
+      </label>
+      <button class="btn-primary mt-4 w-full">ذخیره و اطلاع‌رسانی</button>
+      {% else %}
+      <h2 class="mt-2 font-black text-white">تبدیل به نماینده</h2>
+      <p class="mt-2 text-sm leading-7 text-slate-400">این کاربر هنوز نماینده نیست. با دکمه زیر، کاربر با تنظیمات پیش‌فرض به نماینده نیازمند پرداخت تبدیل می‌شود؛ بعد از تبدیل، فرم کامل تنظیمات نمایندگی نمایش داده خواهد شد.</p>
+      <div class="mt-4 rounded-xl border border-cyan-400/20 bg-cyan-400/10 p-4 text-sm text-cyan-100">
+        <div class="flex justify-between gap-3"><span>سطح پیش‌فرض</span><b>نیاز به پرداخت</b></div>
+        <div class="mt-2 flex justify-between gap-3"><span>سقف اعتبار</span><b>۴۰۰,۰۰۰ تومان</b></div>
+        <div class="mt-2 flex justify-between gap-3"><span>تعرفه اختصاصی</span><b>۱۸۰,۰۰۰ تومان</b></div>
+      </div>
+      <input name="access_level" type="hidden" value="closed">
+      <input name="credit_limit_toman" type="hidden" value="400000">
+      <input name="credit_used_toman" type="hidden" value="0">
+      <input name="price_per_gb" type="hidden" value="180000">
+      <input name="daily_test_limit" type="hidden" value="0">
+      <button class="btn-primary mt-4 w-full">تبدیل به نماینده</button>
+      {% endif %}
+    </form>
+  </aside>
+
+  <div class="space-y-5">
+    {% if event_queued %}
+      <div class="rounded-2xl border border-cyan-400/25 bg-cyan-400/10 p-4 text-sm font-bold text-cyan-100">
+        عملیات گروهی در صف رویدادها قرار گرفت.
+        <a class="ms-2 text-cyan-200 underline underline-offset-4 hover:text-white" href="/admin/events">مشاهده پیشرفت</a>
+      </div>
+      <div class="fixed inset-0 z-[90] grid place-items-center bg-black/60 px-4 backdrop-blur-sm" id="queued-event-modal">
+        <div class="w-full max-w-md rounded-3xl border border-cyan-400/20 bg-slate-950 p-6 shadow-glow">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="eyebrow">Queued event</p>
+              <h2 class="mt-2 text-xl font-black text-white">عملیات در صف قرار گرفت</h2>
+            </div>
+            <button type="button" class="rounded-xl border border-white/10 px-3 py-1.5 text-slate-400 hover:text-white" onclick="document.getElementById('queued-event-modal').remove()">×</button>
+          </div>
+          <p class="mt-4 text-sm leading-7 text-slate-300">
+            فعال‌سازی یا غیرفعال‌سازی همه کانفیگ‌ها در background اجرا می‌شود. رویداد retry داخلی دارد و پیشرفت آن از صفحه رویدادها قابل مشاهده است.
+          </p>
+          <div class="mt-5 flex gap-2">
+            <a class="btn-primary flex-1 text-center" href="/admin/events">رفتن به رویدادها</a>
+            <button type="button" class="btn-soft flex-1" onclick="document.getElementById('queued-event-modal').remove()">بستن</button>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+    {% if bulk_disabled is not none %}
+      <div class="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4 text-sm font-bold text-emerald-100">
+        عملیات قطع کانفیگ‌ها انجام شد: {{ bulk_disabled }} موفق{% if bulk_failed %}، {{ bulk_failed }} ناموفق{% endif %}.
+      </div>
+    {% endif %}
+    {% if bulk_enabled is not none %}
+      <div class="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4 text-sm font-bold text-emerald-100">
+        عملیات فعال‌سازی کانفیگ‌ها انجام شد: {{ bulk_enabled }} موفق{% if bulk_failed %}، {{ bulk_failed }} ناموفق{% endif %}.
+      </div>
+    {% endif %}
+    <section class="card p-5">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p class="eyebrow">Subscriptions</p>
+          <h2 class="mt-2 text-xl font-black text-white">کانفیگ‌های خریداری‌شده</h2>
+          <p class="mt-1 text-sm text-slate-400">صفحه {{ subs_page }} از {{ subs_total_pages }} | مجموع {{ subs_total }} کانفیگ. با سینک، مصرف و وضعیت واقعی از پنل 3x-ui خوانده می‌شود.</p>
+        </div>
+        <form method="post" action="/admin/users/{{ user.user_id }}/sync-subscriptions">
+          <button class="btn-primary">گرفتن اطلاعات جدید از پنل</button>
+        </form>
+      </div>
+      <div class="mb-4 flex flex-wrap gap-2">
+        <a class="btn-soft {% if subs_page <= 1 %}pointer-events-none opacity-40{% endif %}" href="/admin/users/{{ user.user_id }}?period={{ period or 'all' }}&topup_period={{ topup_period or 'all' }}&subs_page=1">اول</a>
+        <a class="btn-soft {% if subs_page <= 1 %}pointer-events-none opacity-40{% endif %}" href="/admin/users/{{ user.user_id }}?period={{ period or 'all' }}&topup_period={{ topup_period or 'all' }}&subs_page={{ subs_page - 1 if subs_page > 1 else 1 }}">قبلی</a>
+        <a class="btn-soft {% if subs_page >= subs_total_pages %}pointer-events-none opacity-40{% endif %}" href="/admin/users/{{ user.user_id }}?period={{ period or 'all' }}&topup_period={{ topup_period or 'all' }}&subs_page={{ subs_page + 1 if subs_page < subs_total_pages else subs_total_pages }}">بعدی</a>
+        <a class="btn-soft {% if subs_page >= subs_total_pages %}pointer-events-none opacity-40{% endif %}" href="/admin/users/{{ user.user_id }}?period={{ period or 'all' }}&topup_period={{ topup_period or 'all' }}&subs_page={{ subs_total_pages }}">آخر</a>
+      </div>
+      <div class="grid gap-3">
+      {% for s in subs %}
+        <a href="/admin/subscriptions/detail?sub_id={{ s.sub_id|urlencode }}" class="rounded-xl border border-slate-800 bg-slate-950/35 p-4 transition hover:border-cyan-400/40 hover:bg-cyan-400/5">
+          <div class="flex flex-wrap justify-between gap-3">
+            <div><b class="text-white">{{ s.client_email or "بدون نام" }}</b><div class="mt-1 text-xs text-slate-500"><code>{{ s.sub_id }}</code></div></div>
+            <div class="badge">{% if s.is_test %}{{ gb(s.panel_total_bytes) }} GB تست{% else %}{{ s.gb }} GB{% endif %}</div>
+          </div>
+          <div class="mt-3 grid gap-2 text-sm text-slate-400 md:grid-cols-4">
+            <span>مصرف: {{ gb(s.panel_used_bytes) }} GB</span>
+            <span>باقی‌مانده: {{ gb(s.panel_remaining_bytes) }} GB</span>
+            <span>خرید: {{ date(s.created_at) }}</span>
+            <span>سینک: {{ date(s.panel_synced_at) }}</span>
+          </div>
+        </a>
+      {% else %}<p class="text-slate-500">کانفیگی ثبت نشده.</p>{% endfor %}
+      </div>
+    </section>
+
+    <section class="card p-5">
+      <p class="eyebrow">Topup history</p>
+      {% set topup_periods = [("all", "همه"), ("24h", "۲۴ ساعت"), ("7d", "۷ روز"), ("30d", "۳۰ روز")] %}
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="mt-2 text-xl font-black text-white">تاریخچه شارژ کیف پول</h2>
+          <p class="mt-1 text-sm text-slate-400">مجموع واریزی تاییدشده در این بازه: <b class="text-emerald-300">{{ toman(topups_total or 0) }} تومان</b></p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          {% for value, label in topup_periods %}
+            <a
+              class="rounded-xl border px-3 py-2 text-xs font-black transition {% if (topup_period or 'all') == value %}border-emerald-400/60 bg-emerald-400/10 text-emerald-100{% else %}border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-white{% endif %}"
+              href="/admin/users/{{ user.user_id }}?period={{ period or 'all' }}&topup_period={{ value }}"
+            >{{ label }}</a>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="grid gap-3">
+      {% for t in topups %}
+        <div class="rounded-xl border border-slate-800 bg-slate-950/35 p-4">
+          <div class="flex flex-wrap justify-between gap-3">
+            <div>
+              <b class="text-white">{{ toman(t.amount_toman) }} تومان</b>
+              <div class="mt-1 text-xs text-slate-500">روش: {% if t.method == 'card' %}کارت به کارت{% elif t.method == 'crypto' %}رمزارز{% else %}{{ t.method }}{% endif %}</div>
+            </div>
+            <span class="badge">{{ t.status }} - {{ date(t.created_at) }}</span>
+          </div>
+          {% if t.receipt_file_id %}
+            <a href="/admin/file/{{ t.receipt_file_id }}" target="_blank"><img loading="lazy" src="/admin/file/{{ t.receipt_file_id }}" class="mt-3 max-h-[32rem] w-full rounded-xl border border-slate-800 object-contain" alt="رسید"></a>
+          {% endif %}
+        </div>
+      {% else %}<p class="text-slate-500">شارژی ثبت نشده است.</p>{% endfor %}
+      </div>
+    </section>
+
+    <section class="grid gap-5 xl:grid-cols-2">
+      <div class="card p-5">
+        <p class="eyebrow">Orders</p>
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 class="mt-2 text-xl font-black text-white">سفارش‌ها</h2>
+          {% set periods = [("all", "همه"), ("24h", "۲۴ ساعت"), ("7d", "۷ روز"), ("30d", "۳۰ روز")] %}
+          <div class="flex flex-wrap gap-2">
+            {% for value, label in periods %}
+              <a
+                class="rounded-xl border px-3 py-2 text-xs font-black transition {% if (period or 'all') == value %}border-cyan-400/60 bg-cyan-400/10 text-cyan-100{% else %}border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-white{% endif %}"
+                href="/admin/users/{{ user.user_id }}?period={{ value }}"
+              >{{ label }}</a>
+            {% endfor %}
+          </div>
+        </div>
+        {% for o in orders %}
+          <div class="border-t border-slate-800 py-3">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <code>{{ o.order_id }}</code>
+                <div class="mt-1 text-sm text-slate-400">
+                  <span class="badge {% if o.order_type == 'renewal' %}badge-warn{% endif %}">{{ o.order_type_label or "خرید جدید" }}</span>
+                  {% if o.order_type == 'renewal' %}تمدید کانفیگ:{% endif %}
+                  {{ o.subscription_name or o.client_name or "رندوم" }}
+                  {% if o.subscription_count and o.subscription_count > 1 %}
+                    <span class="text-slate-500">(+{{ o.subscription_count - 1 }} کانفیگ دیگر)</span>
+                  {% endif %}
+                </div>
+              </div>
+              {% if o.subscription_id %}
+                <a class="text-xs font-black text-cyan-300 hover:text-cyan-100" href="/admin/subscriptions/detail?sub_id={{ o.subscription_id|urlencode }}">باز کردن کانفیگ</a>
+              {% endif %}
+            </div>
+            <div class="mt-1 text-sm text-slate-400">{{ toman(o.final_price) }} تومان - {{ o.status }} - {{ date(o.created_at) }}</div>
+          </div>
+        {% else %}<p class="text-slate-500">سفارشی ثبت نشده.</p>{% endfor %}
+      </div>
+      <div class="card p-5">
+        <p class="eyebrow">Agent ledger</p>
+        <h2 class="mt-2 mb-4 text-xl font-black text-white">دفتر مالی نماینده</h2>
+        {% for l in ledger %}
+          <div class="grid gap-2 border-t border-slate-800 py-3 text-sm md:grid-cols-[1fr_auto_auto]"><span>{{ l.kind }} - <code>{{ l.ref_id }}</code></span><b class="text-white">{{ toman(l.amount_toman) }}</b><span class="text-slate-400">{{ date(l.created_at) }}</span></div>
+        {% else %}<p class="text-slate-500">گردش مالی نمایندگی ثبت نشده است.</p>{% endfor %}
+      </div>
+    </section>
+  </div>
+</section>
+{% endblock %}

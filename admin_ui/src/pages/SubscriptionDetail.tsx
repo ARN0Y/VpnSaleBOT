@@ -1,0 +1,102 @@
+import * as React from "react";
+import { Link, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowRight, RefreshCw, Power, PowerOff } from "lucide-react";
+import { api } from "@/lib/api";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Field } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { gbFromBytes, jalaliDate } from "@/lib/utils";
+
+function n(v: unknown): number { return Number(v || 0); }
+function s(v: unknown): string { return v == null ? "" : String(v); }
+
+export function SubscriptionDetail() {
+  const { subId = "" } = useParams();
+  const qc = useQueryClient();
+  const [vol, setVol] = React.useState("");
+  const { data, isLoading } = useQuery({
+    queryKey: ["sub-detail", subId],
+    queryFn: () => api.subscriptionDetail(subId),
+  });
+  const refresh = () => qc.invalidateQueries({ queryKey: ["sub-detail", subId] });
+
+  const sync = useMutation({ mutationFn: () => api.syncSub(subId), onSuccess: refresh });
+  const toggle = useMutation({ mutationFn: (en: boolean) => api.setSubEnabled(subId, en), onSuccess: refresh });
+  const setVolM = useMutation({ mutationFn: () => api.setSubVolume(subId, Number(vol) || 0), onSuccess: refresh });
+
+  if (isLoading || !data) return <Skeleton className="h-80" />;
+  const enabled = n(data.panel_enabled) === 1;
+
+  return (
+    <div className="space-y-5">
+      <Link to="/subscriptions" className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-white">
+        <ArrowRight className="h-4 w-4" /> بازگشت به کانفیگ‌ها
+      </Link>
+
+      <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>{s(data.client_email) || s(data.sub_id)}</CardTitle>
+              <Badge variant={enabled ? "success" : "muted"}>{enabled ? "فعال" : "غیرفعال"}</Badge>
+            </div>
+            <code className="text-xs text-muted-foreground">{s(data.sub_id)}</code>
+          </CardHeader>
+          <CardContent>
+            <dl className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
+              <Item k="کاربر" v={s(data.user_id)} />
+              <Item k="حجم خرید" v={`${n(data.gb)} GB`} />
+              <Item k="کل حجم پنل" v={`${gbFromBytes(data.panel_total_bytes)} GB`} />
+              <Item k="مصرف" v={`${gbFromBytes(data.panel_used_bytes)} GB`} />
+              <Item k="باقی‌مانده" v={`${gbFromBytes(data.panel_remaining_bytes)} GB`} />
+              <Item k="تاریخ خرید" v={jalaliDate(n(data.created_at))} />
+              <Item k="آخرین سینک" v={jalaliDate(n(data.panel_synced_at))} />
+            </dl>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-5">
+          <Card>
+            <CardHeader><CardTitle>اقدامات پنل</CardTitle></CardHeader>
+            <CardContent className="space-y-2">
+              <Button className="w-full" variant="outline" disabled={sync.isPending} onClick={() => sync.mutate()}>
+                <RefreshCw className="h-4 w-4" /> سینک از 3x-ui
+              </Button>
+              {enabled ? (
+                <Button className="w-full" variant="destructive" disabled={toggle.isPending} onClick={() => toggle.mutate(false)}>
+                  <PowerOff className="h-4 w-4" /> غیرفعال‌سازی
+                </Button>
+              ) : (
+                <Button className="w-full" disabled={toggle.isPending} onClick={() => toggle.mutate(true)}>
+                  <Power className="h-4 w-4" /> فعال‌سازی
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle>تنظیم حجم کل</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <Field label="حجم کل جدید (GB)" hint="نباید کمتر از مصرف فعلی باشد.">
+                <Input value={vol} onChange={(e) => setVol(e.target.value)} inputMode="numeric" placeholder={gbFromBytes(data.panel_total_bytes)} />
+              </Field>
+              <Button className="w-full" disabled={setVolM.isPending || !vol} onClick={() => setVolM.mutate()}>ذخیره</Button>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Item({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="rounded-xl border border-border bg-white/[0.02] p-3">
+      <div className="text-xs text-muted-foreground">{k}</div>
+      <div className="mt-1 font-bold text-white">{v}</div>
+    </div>
+  );
+}

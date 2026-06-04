@@ -1,0 +1,40 @@
+<tr id="user-row-{{ u.user_id }}" class="transition hover:bg-white/[0.035]">
+  <td class="px-5 py-4 font-black text-white">
+    {{ u.user_id }}
+    <div class="mt-1 text-xs font-normal text-slate-500">{{ u.first_name or "-" }}</div>
+  </td>
+  <td class="px-5 py-4 text-slate-300">
+    {% if u.username %}
+      <span dir="ltr" style="unicode-bidi:isolate">@{{ (u.username|string)|replace("@", "") }}</span>
+    {% else %}
+      <span class="text-slate-500">-</span>
+    {% endif %}
+  </td>
+  <td class="px-5 py-4 font-bold">{{ toman(u.wallet_balance) }} تومان</td>
+  <td class="px-5 py-4 font-bold text-emerald-300">{{ toman(u.total_spent) }} تومان</td>
+  <td class="px-5 py-4 font-bold text-cyan-200">{{ toman(u.total_gb_purchased or 0) }} GB</td>
+  <td class="px-5 py-4">
+    <span class="badge">
+      {% if u.access_level == 'open' %}نماینده باز{% elif u.access_level == 'closed' %}نماینده نیازمند پرداخت{% else %}کاربر عادی{% endif %}
+    </span>
+  </td>
+  <td class="px-5 py-4 text-slate-300">{{ toman(u.credit_used_toman or 0) }} / {{ toman(u.credit_limit_toman or 0) }}</td>
+  <td class="px-5 py-4">
+    {% set disabled = u.disabled if u.disabled is defined else u.user_disabled %}
+    {% if disabled %}
+      <span class="badge badge-danger">مسدود</span>
+    {% else %}
+      <span class="badge badge-ok">فعال</span>
+    {% endif %}
+  </td>
+  <td class="px-4 py-4">
+    <div class="flex gap-1.5">
+      <a class="btn-soft whitespace-nowrap px-3 py-1.5 text-xs" href="/admin/users/{{ u.user_id }}">جزئیات</a>
+      {% if disabled %}
+        <button class="btn-success whitespace-nowrap px-3 py-1.5 text-xs" hx-post="/admin/users/{{ u.user_id }}/unban" hx-target="#user-row-{{ u.user_id }}" hx-swap="outerHTML" hx-disabled-elt="this">رفع بن</button>
+      {% else %}
+        <button class="btn-danger whitespace-nowrap px-3 py-1.5 text-xs" hx-post="/admin/users/{{ u.user_id }}/ban" hx-target="#user-row-{{ u.user_id }}" hx-swap="outerHTML" hx-disabled-elt="this">بن</button>
+      {% endif %}
+    </div>
+  </td>
+</tr>

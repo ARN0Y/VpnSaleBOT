@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid gap-5 xl:grid-cols-[1fr_22rem]">
+  <div class="space-y-5">
+    <div class="card p-6">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p class="eyebrow">Subscription</p>
+          <h2 class="mt-2 text-2xl font-black text-white">{{ sub.client_email or "بدون نام" }}</h2>
+          <p class="mt-2 text-sm text-slate-500"><code>{{ sub.sub_id }}</code></p>
+        </div>
+        {% if sub.panel_enabled == 0 %}
+          <span class="badge badge-danger">غیرفعال</span>
+        {% else %}
+          <span class="badge badge-ok">فعال</span>
+        {% endif %}
+      </div>
+      <div class="mt-6 grid gap-4 md:grid-cols-3">
+        <div class="rounded-xl border border-slate-800 bg-slate-950/35 p-4"><div class="text-sm text-slate-400">حجم کل</div><div class="mt-2 text-2xl font-black text-white">{{ gb(sub.panel_total_bytes or sub.gb * 1024 * 1024 * 1024) }} GB</div></div>
+        <div class="rounded-xl border border-slate-800 bg-slate-950/35 p-4"><div class="text-sm text-slate-400">مصرف‌شده</div><div class="mt-2 text-2xl font-black text-white">{{ gb(sub.panel_used_bytes) }} GB</div></div>
+        <div class="rounded-xl border border-slate-800 bg-slate-950/35 p-4"><div class="text-sm text-slate-400">باقی‌مانده</div><div class="mt-2 text-2xl font-black text-white">{{ gb(sub.panel_remaining_bytes) }} GB</div></div>
+      </div>
+      <dl class="mt-6 grid gap-3 text-sm md:grid-cols-2">
+        <div class="flex justify-between rounded-xl border border-slate-800 p-3">
+          <dt class="text-slate-400">کاربر</dt>
+          <dd class="text-left">
+            <a class="font-bold text-cyan-300" href="/admin/users/{{ sub.user_id }}">{{ sub.user_id }}</a>
+            <div class="mt-1 text-xs text-slate-500">
+              {{ sub.first_name or "بدون نام" }}
+              {% if sub.username %}
+                - <span dir="ltr" style="unicode-bidi:isolate">@{{ (sub.username|string)|replace("@", "") }}</span>
+              {% endif %}
+            </div>
+          </dd>
+        </div>
+        <div class="flex justify-between rounded-xl border border-slate-800 p-3"><dt class="text-slate-400">UUID</dt><dd><code>{{ sub.client_uuid or "-" }}</code></dd></div>
+        <div class="flex justify-between rounded-xl border border-slate-800 p-3"><dt class="text-slate-400">آپلود</dt><dd>{{ gb(sub.panel_up_bytes) }} GB</dd></div>
+        <div class="flex justify-between rounded-xl border border-slate-800 p-3"><dt class="text-slate-400">دانلود</dt><dd>{{ gb(sub.panel_down_bytes) }} GB</dd></div>
+        <div class="flex justify-between rounded-xl border border-slate-800 p-3"><dt class="text-slate-400">تاریخ خرید</dt><dd>{{ date(sub.created_at) }}</dd></div>
+        <div class="flex justify-between rounded-xl border border-slate-800 p-3"><dt class="text-slate-400">آخرین سینک</dt><dd>{{ date(sub.panel_synced_at) }}</dd></div>
+      </dl>
+    </div>
+  </div>
+
+  <aside class="space-y-5">
+    <form class="card p-5" method="post" action="/admin/subscriptions/sync?sub_id={{ sub.sub_id|urlencode }}">
+      <button class="btn-primary w-full">گرفتن اطلاعات جدید از پنل</button>
+    </form>
+
+    <form class="card p-5" method="post" action="/admin/subscriptions/volume?sub_id={{ sub.sub_id|urlencode }}">
+      <p class="eyebrow">Volume</p>
+      <h3 class="mt-2 font-black text-white">تغییر حجم کل</h3>
+      <input name="total_gb" type="number" min="0" value="{{ sub.gb }}" class="input-base mt-4">
+      <button class="btn-soft mt-3 w-full">ثبت حجم جدید</button>
+    </form>
+
+    {% if sub.panel_enabled == 0 %}
+      <form method="post" action="/admin/subscriptions/enable?sub_id={{ sub.sub_id|urlencode }}"><button class="btn-success w-full">فعال کردن کانفیگ</button></form>
+    {% else %}
+      <form method="post" action="/admin/subscriptions/disable?sub_id={{ sub.sub_id|urlencode }}"><button class="btn-danger w-full">غیرفعال کردن کانفیگ</button></form>
+    {% endif %}
+  </aside>
+</section>
+{% endblock %}

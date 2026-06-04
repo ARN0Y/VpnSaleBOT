@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mb-5 flex flex-wrap gap-2">
+  <a class="btn-soft {% if status=='pending' %}nav-active{% endif %}" href="/admin/topups?status=pending">معلق</a>
+  <a class="btn-soft {% if status=='all' %}nav-active{% endif %}" href="/admin/topups?status=all">همه</a>
+</div>
+
+<section class="section-panel">
+  <div class="flex flex-col gap-2 border-b border-white/10 p-5 md:flex-row md:items-center md:justify-between">
+    <div>
+      <p class="eyebrow">Wallet topups</p>
+      <h2 class="mt-2 text-xl font-black text-white">درخواست‌های شارژ کیف پول</h2>
+    </div>
+    <div class="text-sm font-bold text-slate-400">{{ topups|length }} مورد</div>
+  </div>
+
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-white/10 text-sm">
+      <thead class="bg-slate-950/50">
+        <tr class="text-slate-400">
+          <th class="px-5 py-3 text-right font-black">شناسه</th>
+          <th class="px-5 py-3 text-right font-black">کاربر</th>
+          <th class="px-5 py-3 text-right font-black">روش</th>
+          <th class="px-5 py-3 text-right font-black">مبلغ</th>
+          <th class="px-5 py-3 text-right font-black">وضعیت</th>
+          <th class="px-5 py-3 text-right font-black">رسید</th>
+          <th class="px-5 py-3 text-right font-black">عملیات</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-white/10">
+      {% for t in topups %}
+        {% include "_topup_row.html" %}
+      {% else %}
+        <tr><td colspan="7" class="px-5 py-10 text-center text-slate-500">درخواستی وجود ندارد.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

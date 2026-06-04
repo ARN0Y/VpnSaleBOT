@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+{% set periods = [("all", "همه"), ("24h", "۲۴ ساعت"), ("7d", "۷ روز"), ("30d", "۳۰ روز")] %}
+<form class="card mb-5 flex flex-col gap-3 p-4 md:flex-row" method="get">
+  <input type="hidden" name="period" value="{{ period or 'all' }}">
+  <input name="q" value="{{ q }}" class="input-base min-h-11 flex-1" placeholder="جستجو با شناسه سفارش، آیدی کاربر یا نام کانفیگ">
+  <button class="btn-primary">جستجو</button>
+</form>
+
+<div class="mb-5 flex flex-wrap gap-2">
+  {% for value, label in periods %}
+    <a
+      class="rounded-xl border px-4 py-2 text-sm font-black transition {% if (period or 'all') == value %}border-cyan-400/60 bg-cyan-400/10 text-cyan-100{% else %}border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/20 hover:text-white{% endif %}"
+      href="/admin/orders?q={{ q|urlencode }}&period={{ value }}"
+    >{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="table-shell overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead>
+      <tr>
+        <th class="p-4 text-right">شناسه سفارش</th>
+        <th class="p-4 text-right">نوع</th>
+        <th class="p-4 text-right">کاربر</th>
+        <th class="p-4 text-right">کانفیگ</th>
+        <th class="p-4 text-right">حجم</th>
+        <th class="p-4 text-right">مبلغ</th>
+        <th class="p-4 text-right">روش</th>
+        <th class="p-4 text-right">وضعیت</th>
+        <th class="p-4 text-right">تاریخ</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for o in orders %}
+      <tr>
+        <td class="p-4"><code>{{ o.order_id }}</code></td>
+        <td class="p-4"><span class="badge {% if o.order_type == 'renewal' %}badge-warn{% endif %}">{{ o.order_type_label or "خرید جدید" }}</span></td>
+        <td class="p-4">
+          <a class="font-black text-cyan-300 hover:text-cyan-100" href="/admin/users/{{ o.user_id }}">{{ o.user_id }}</a>
+          <div class="mt-1 text-xs text-slate-500">{{ o.first_name or "" }}</div>
+        </td>
+        <td class="p-4">
+          {% if o.order_type == 'renewal' %}<span class="text-slate-500">تمدید:</span>{% endif %}
+          {{ o.subscription_name or o.client_name or "رندوم" }}
+          {% if o.subscription_id %}
+            <div class="mt-1">
+              <a class="text-xs font-bold text-cyan-300 hover:text-cyan-100" href="/admin/subscriptions/detail?sub_id={{ o.subscription_id|urlencode }}">باز کردن کانفیگ</a>
+              {% if o.subscription_count and o.subscription_count > 1 %}
+                <span class="me-2 text-xs text-slate-500">+{{ o.subscription_count - 1 }} کانفیگ دیگر</span>
+              {% endif %}
+            </div>
+          {% endif %}
+        </td>
+        <td class="p-4">{{ o.gb }} × {{ o.qty }}</td>
+        <td class="p-4 font-bold text-white">{{ toman(o.final_price) }} تومان</td>
+        <td class="p-4 text-slate-300">{{ o.payment_method }}</td>
+        <td class="p-4"><span class="badge">{{ o.status }}</span></td>
+        <td class="p-4 text-slate-400">{{ date(o.created_at) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="p-8 text-center text-slate-500">سفارشی وجود ندارد.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
