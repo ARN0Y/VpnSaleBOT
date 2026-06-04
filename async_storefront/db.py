@@ -780,6 +780,46 @@ class AsyncDatabase:
             (key, value),
         )
 
+    async def get_payment_cards(self) -> list[dict[str, str]]:
+        """Configured payment cards as [{number, name}, ...].
+
+        Falls back to the legacy single card (card_number/card_name) when no
+        multi-card list is set, so older configs keep working.
+        """
+        raw = await self.get_setting("payment_cards", "")
+        cards: list[dict[str, str]] = []
+        try:
+            for item in json.loads(raw or "[]"):
+                number = str((item or {}).get("number", "")).strip()
+                if number:
+                    cards.append({"number": number, "name": str((item or {}).get("name", "")).strip()})
+        except Exception:
+            cards = []
+        if not cards:
+            number = (await self.get_setting("card_number", "")).strip()
+            if number:
+                cards.append({"number": number, "name": (await self.get_setting("card_name", "")).strip()})
+        return cards
+
+    async def next_payment_card(self) -> dict[str, str]:
+        """Pick the next card in round-robin order (persisted index), so deposits
+        spread evenly across the configured cards."""
+        cards = await self.get_payment_cards()
+        if not cards:
+            return {"number": "", "name": ""}
+        if len(cards) == 1:
+            return cards[0]
+        async with self.transaction() as conn:
+            row = await self.fetchone("SELECT value FROM settings WHERE key='payment_card_rr'")
+            idx = int(row["value"]) if row and str(row["value"]).isdigit() else 0
+            card = cards[idx % len(cards)]
+            await conn.execute(
+                "INSERT INTO settings(key,value) VALUES('payment_card_rr',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str((idx + 1) % len(cards)),),
+            )
+        return card
+
     async def get_admin_user_ids(self, fallback: int | None = None) -> list[int]:
         raw = await self.get_setting("admin_user_ids", "")
         ids: list[int] = []
