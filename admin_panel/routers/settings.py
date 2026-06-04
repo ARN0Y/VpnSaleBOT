@@ -254,6 +254,7 @@ async def settings_index(request: Request):
             "panel": dict(panel_settings) if panel_settings else {},
             "backup": backup,
             "sales": sales,
+            "ui_mode": all_settings.get("ui_mode", "modern"),
             "title": "تنظیمات",
         },
     )
@@ -352,6 +353,14 @@ async def update_sales_status(
         total_count=len(targets),
     )
     return RedirectResponse("/admin/settings", status_code=303)
+
+
+@router.post("/ui-mode")
+async def update_ui_mode(request: Request, ui_mode: str = Form("modern")):
+    mode = "classic" if str(ui_mode).strip().lower() == "classic" else "modern"
+    await db(request).admin_update_settings({"ui_mode": mode})
+    # Switching to modern → open the new dashboard; classic stays here.
+    return RedirectResponse("/admin/app" if mode == "modern" else "/admin/settings", status_code=303)
 
 
 @router.post("/backup/run")

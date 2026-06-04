@@ -74,12 +74,57 @@ export function Settings() {
     mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
+  const uiMode = useMutation({
+    mutationFn: (mode: "modern" | "classic") => api.setUiMode(mode),
+    onSuccess: (_r, mode) => {
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      // Switching to classic → load the classic panel; modern stays in-app.
+      if (mode === "classic") window.location.href = "/admin";
+    },
+  });
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-40" /><Skeleton className="h-72" /></div>;
 
+  const mode = items.ui_mode ?? "modern";
+
   return (
     <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>حالت نمایش پنل</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            انتخاب کنید پنل مدیریت با چه ظاهری باز شود. تغییر بلافاصله اعمال می‌شود (نیازی به ری‌استارت نیست).
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button
+              onClick={() => uiMode.mutate("modern")}
+              disabled={uiMode.isPending}
+              className={`rounded-2xl border p-4 text-right transition ${mode !== "classic" ? "border-white/30 bg-white/[0.06]" : "border-border hover:border-white/20"}`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-white">داشبورد مدرن</span>
+                {mode !== "classic" && <Badge variant="success">فعال</Badge>}
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">React/shadcn، سریع و حرفه‌ای (پیشنهادی)</p>
+            </button>
+            <button
+              onClick={() => uiMode.mutate("classic")}
+              disabled={uiMode.isPending}
+              className={`rounded-2xl border p-4 text-right transition ${mode === "classic" ? "border-white/30 bg-white/[0.06]" : "border-border hover:border-white/20"}`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-white">پنل کلاسیک</span>
+                {mode === "classic" && <Badge variant="success">فعال</Badge>}
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">نسخه‌ی قدیمی مبتنی بر صفحات سرور</p>
+            </button>
+          </div>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>کنترل فروش</CardTitle>

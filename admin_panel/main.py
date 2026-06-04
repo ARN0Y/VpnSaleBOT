@@ -6,7 +6,7 @@ import contextlib
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -128,9 +128,22 @@ def create_app() -> FastAPI:
     async def root() -> RedirectResponse:
         return RedirectResponse("/admin", status_code=303)
 
-    # New React/shadcn dashboard (served as static once built). Coexists with the
-    # legacy Jinja panel during migration; visit /admin/app to use it.
+    # New React/shadcn dashboard (served as static once built).
     _mount_spa(app)
+
+    # Single entry point: /admin serves the UI the admin chose in settings
+    # (modern SPA or classic Jinja). Registered before the dashboard router so
+    # it takes precedence for GET /admin. Switching is instant (no restart).
+    @app.get("/admin")
+    async def admin_home(request: Request):
+        mode = "modern"
+        try:
+            mode = (await request.app.state.db.get_setting("ui_mode", "modern") or "modern").strip().lower()
+        except Exception:
+            pass
+        if mode != "classic" and SPA_DIST.exists():
+            return RedirectResponse("/admin/app", status_code=307)
+        return await dashboard.overview(request)
 
     app.include_router(api.router)
     app.include_router(dashboard.router)

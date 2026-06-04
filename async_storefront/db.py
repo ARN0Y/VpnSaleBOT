@@ -645,6 +645,7 @@ class AsyncDatabase:
             "sales_status": "open",
             "sales_status_updated_at": "0",
             "sales_status_updated_by": "",
+            "ui_mode": "modern",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
         }
