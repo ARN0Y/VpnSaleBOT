@@ -300,6 +300,7 @@ class AsyncDatabase:
                 "panel_synced_at": "INTEGER NOT NULL DEFAULT 0",
                 "is_test": "INTEGER NOT NULL DEFAULT 0",
                 "test_expires_at": "INTEGER NOT NULL DEFAULT 0",
+                "is_infinite": "INTEGER NOT NULL DEFAULT 0",
             },
         )
         await self._ensure_columns(
@@ -646,6 +647,11 @@ class AsyncDatabase:
             "sales_status_updated_at": "0",
             "sales_status_updated_by": "",
             "ui_mode": "modern",
+            "infinite_enabled": "0",
+            "infinite_cap_gb": "100",
+            "infinite_duration_days": "30",
+            "infinite_price": "0",
+            "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
         }
@@ -1108,12 +1114,12 @@ class AsyncDatabase:
             )
             await conn.execute("UPDATE stats SET value=value+1 WHERE key='rejected_count'")
 
-    async def insert_subscriptions(self, rows: Iterable[Any], *, order_id: str | None = None) -> None:
+    async def insert_subscriptions(self, rows: Iterable[Any], *, order_id: str | None = None, is_infinite: bool = False) -> None:
         await self.conn.executemany(
             """
             INSERT OR REPLACE INTO subscriptions
-              (sub_id,order_id,user_id,inbound_id,gb,base_gb,qty,created_at,client_uuid,client_email,renewed_count)
-            VALUES (?,?,?,?,?,?,?,?,?,?,0)
+              (sub_id,order_id,user_id,inbound_id,gb,base_gb,qty,created_at,client_uuid,client_email,renewed_count,is_infinite)
+            VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
             """,
             [
                 (
@@ -1127,6 +1133,7 @@ class AsyncDatabase:
                     now_ts(),
                     r.client_uuid,
                     r.client_email,
+                    1 if is_infinite else 0,
                 )
                 for r in rows
             ],
@@ -1212,7 +1219,8 @@ class AsyncDatabase:
             """
             SELECT sub_id, gb, qty, created_at, client_email,
                    panel_total_bytes, panel_used_bytes, panel_remaining_bytes,
-                   panel_enabled, panel_expiry_time, panel_synced_at
+                   panel_enabled, panel_expiry_time, panel_synced_at,
+                   COALESCE(is_infinite,0) AS is_infinite
             FROM subscriptions
             WHERE user_id=?
               AND COALESCE(is_test,0)=0
@@ -1233,6 +1241,7 @@ class AsyncDatabase:
                 "panel_enabled": row["panel_enabled"],
                 "panel_expiry_time": int(row["panel_expiry_time"] or 0),
                 "panel_synced_at": int(row["panel_synced_at"] or 0),
+                "is_infinite": int(row["is_infinite"] or 0),
             }
             for row in rows
         ]
@@ -1323,7 +1332,8 @@ class AsyncDatabase:
                    panel_total_bytes, panel_used_bytes, panel_remaining_bytes,
                    panel_enabled, panel_expiry_time, panel_synced_at,
                    COALESCE(is_test,0) AS is_test,
-                   COALESCE(test_expires_at,0) AS test_expires_at
+                   COALESCE(test_expires_at,0) AS test_expires_at,
+                   COALESCE(is_infinite,0) AS is_infinite
             FROM subscriptions
             WHERE user_id=?
             ORDER BY created_at DESC

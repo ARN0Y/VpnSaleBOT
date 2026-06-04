@@ -54,14 +54,17 @@ BTN_TARIFFS = "🏷 تعرفه‌ها"
 BTN_SUPPORT = "🛟 تماس با پشتیبانی"
 BTN_TEST_CONFIG = "🆓 دریافت تست رایگان"
 BTN_AGENT_REQ = "🤝 زیرمجموعه‌گیری"
+BTN_INFINITE = "♾️ بسته‌ی بی‌نهایت"
 
-_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ})
+_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ, BTN_INFINITE})
 _nav_filter = filters.Text(list(_ALL_NAV_BTNS))
 
 WELCOME_TEXT = (
     "⚡ <b>به NavidVPN خوش آمدید</b>\n"
     "<i>نویدِ یک اینترنت آزاد و پرسرعت — هر لحظه، همه‌جا.</i>\n\n"
     "⚡️ سرعت بالا و اتصال بی‌وقفه\n"
+    "👥 کانفیگ‌های <b>۳ کاربره</b> — مناسب اشتراک‌گذاری با خانواده و دوستان\n"
+    "🇩🇪 <b>آیپی ثابت آلمان</b> — پایدار و مطمئن\n"
     "🛡 امنیت کامل و حفظ حریم خصوصی\n"
     "🎯 تحویل آنی سرویس و پشتیبانی واقعی\n\n"
     "🛟 آیدی پشتیبانی: {support}\n\n"
@@ -153,6 +156,10 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
     )
 
 
+async def infinite_enabled(db: AsyncDatabase) -> bool:
+    return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
     rows = [
@@ -166,6 +173,8 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
             InlineKeyboardButton("🪪 حساب کاربری", callback_data="menu:account"),
         ],
     ]
+    if await infinite_enabled(db):
+        rows.insert(1, [InlineKeyboardButton("♾️ بسته‌ی بی‌نهایت", callback_data="menu:infinite")])
     if agent and not int(agent["disabled"] or 0):
         try:
             permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
@@ -346,13 +355,17 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False) -> ReplyKeyboardMarkup:
     # Hero "buy" button on top (full width), then balanced icy pairs below.
     rows = [
         [KeyboardButton(BTN_BUY)],
         [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_RENEW)],
         [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_ACCOUNT)],
     ]
+    # Feature the fair-usage "infinite" package as its own full-width row right
+    # under the hero buy button so it stands out.
+    if has_infinite:
+        rows.insert(1, [KeyboardButton(BTN_INFINITE)])
     fourth = []
     if is_agent and has_test:
         fourth.append(KeyboardButton(BTN_TEST_CONFIG))
@@ -513,7 +526,8 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
             has_test = "test" in permissions
         except Exception:
             has_test = True
-    return main_reply_keyboard(is_agent=is_agent, has_test=has_test)
+    has_infinite = await infinite_enabled(db)
+    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -571,12 +585,68 @@ async def end_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
-async def effective_unit_price(db: AsyncDatabase, user_id: int, agent=None) -> int:
+async def get_price_tiers(db: AsyncDatabase) -> list[dict]:
+    """Admin-configured volume-based pricing brackets, sorted ascending by
+    ``min_gb``. Each entry is ``{"min_gb": int, "price_per_gb": int}``. The
+    applicable price for a given volume is the tier with the greatest
+    ``min_gb`` that does not exceed the requested gigabytes."""
+    raw = str(await db.get_setting("price_tiers", "") or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    tiers: list[dict] = []
+    if isinstance(data, list):
+        for item in data:
+            try:
+                mg = int(float((item or {}).get("min_gb")))
+                pp = int(float((item or {}).get("price_per_gb")))
+            except (TypeError, ValueError):
+                continue
+            if mg >= 0 and pp > 0:
+                tiers.append({"min_gb": mg, "price_per_gb": pp})
+    tiers.sort(key=lambda x: x["min_gb"])
+    return tiers
+
+
+async def unit_price_for_gb(db: AsyncDatabase, user_id: int, gb: int, agent=None) -> int:
+    """Per-gigabyte price for a specific volume.
+
+    Agents with a custom flat price always keep it. Otherwise, if the admin has
+    configured volume tiers, the matching bracket's price is used; if no tier
+    matches (volume below the smallest bracket), the smallest bracket applies.
+    Falls back to the flat ``price_per_gb`` setting when no tiers exist."""
     if agent is None:
         agent = await db.get_agent(user_id)
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     if agent_price > 0:
         return agent_price
+    tiers = await get_price_tiers(db)
+    if tiers:
+        chosen = tiers[0]["price_per_gb"]
+        for tier in tiers:
+            if int(gb) >= tier["min_gb"]:
+                chosen = tier["price_per_gb"]
+            else:
+                break
+        return int(chosen)
+    return int(await db.get_setting("price_per_gb", "200000") or "200000")
+
+
+async def effective_unit_price(db: AsyncDatabase, user_id: int, agent=None) -> int:
+    """Baseline per-gigabyte price (agent flat price, or the lowest configured
+    tier / flat price). Used for top-up suggestions and the tariff summary where
+    no specific purchase volume is known yet."""
+    if agent is None:
+        agent = await db.get_agent(user_id)
+    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    if agent_price > 0:
+        return agent_price
+    tiers = await get_price_tiers(db)
+    if tiers:
+        return int(tiers[0]["price_per_gb"])
     return int(await db.get_setting("price_per_gb", "200000") or "200000")
 
 
@@ -788,9 +858,9 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     db: AsyncDatabase = context.application.bot_data["db"]
     checkout = context.user_data.setdefault("checkout", {})
     agent = await db.get_agent(update.effective_user.id)
-    unit_price = await effective_unit_price(db, update.effective_user.id, agent)
     gb = int(checkout["gb"])
     qty = int(checkout["qty"])
+    unit_price = await unit_price_for_gb(db, update.effective_user.id, gb, agent)
     min_gb = await minimum_purchase_gb(db)
     if gb < min_gb:
         checkout.pop("gb", None)
@@ -955,6 +1025,94 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
+async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await ensure_user(update, context)
+    if update.callback_query:
+        await update.callback_query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    pkg = await provisioning.infinite_package()
+    if not pkg["enabled"]:
+        await new_flow_card(update, context, "♾️ <b>بسته‌ی بی‌نهایت</b>\n\nاین بسته در حال حاضر فعال نیست.", back_keyboard())
+        return
+    text = (
+        "♾️ <b>بسته‌ی بی‌نهایت (مصرف منصفانه)</b>\n\n"
+        f"🌊 حجم منصفانه: <b>{pkg['cap_gb']:,}</b> گیگابایت\n"
+        f"⏳ مدت اعتبار: <b>{pkg['duration_days']:,}</b> روز\n"
+        f"💰 قیمت: <b>{pkg['price']:,}</b> تومان\n\n"
+        "✅ پس از خرید، <b>لینک مستقیم کانفیگ</b> برایتان ارسال می‌شود.\n"
+        "✅ امکان خرید چند بسته وجود دارد."
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ خرید و دریافت کانفیگ", callback_data="infinite:buy")],
+            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
+        ]
+    )
+    await new_flow_card(update, context, text, kb)
+
+
+async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    if not await audience_sales_is_open(db, update.effective_user.id):
+        await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
+        return
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    panel = context.application.bot_data["panel"]
+    qr: QRService = context.application.bot_data["qr"]
+    await edit_flow_query(update, context, "⏳ <b>در حال ساخت بسته‌ی بی‌نهایت...</b>\n\nلطفاً چند لحظه صبر کنید.")
+    try:
+        links = await provisioning.process_infinite_purchase(user_id=update.effective_user.id, idempotency_key=query.id)
+    except ValueError as exc:
+        await edit_text(
+            query,
+            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")], [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")]]
+            ),
+        )
+        return
+    except Exception as exc:
+        LOG.exception("infinite purchase failed user_id=%s", update.effective_user.id)
+        await edit_text(query, f"❌ خطا در ساخت بسته:\n{html.escape(str(exc))}", back_keyboard())
+        return
+
+    uris: list[str] = []
+    for link in links:
+        try:
+            uris.extend(await panel.fetch_config_uris(link))
+        except Exception:
+            LOG.exception("fetch_config_uris failed for infinite package")
+    uris = [u for u in uris if u]
+    if not uris:
+        await edit_text(
+            query,
+            "✅ بسته ساخته شد، اما دریافت لینک کانفیگ کمی طول کشید.\n"
+            "از بخش «اشتراک‌های من» می‌توانید کانفیگ را ببینید یا با پشتیبانی تماس بگیرید.",
+            back_keyboard(),
+        )
+        return
+    await edit_text(query, "♾️ <b>بسته‌ی بی‌نهایت ساخته شد.</b>\n\nلینک کانفیگ در پیام بعدی ارسال می‌شود.")
+    for idx, uri in enumerate(uris):
+        caption = (
+            "✅ <b>بسته‌ی بی‌نهایت فعال شد!</b>\n"
+            "<i>مصرف منصفانه فعال است.</i>\n\n"
+            "🔗 <b>لینک کانفیگ شما:</b>\n"
+            f"<code>{html.escape(uri)}</code>\n\n"
+            "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+        )
+        png = await qr.png(uri)
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=BytesIO(png),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard() if idx == len(uris) - 1 else None,
+        )
+
+
 def format_join_date(ts: int) -> str:
     dt = datetime.fromtimestamp(int(ts), ZoneInfo("Asia/Tehran"))
     if jdatetime:
@@ -1035,9 +1193,19 @@ def user_identity_label(user) -> str:
 
 def subscription_status_label(sub: dict) -> str:
     enabled = sub.get("panel_enabled")
+    is_infinite = int(sub.get("is_infinite") or 0) == 1
+    total_bytes = int(sub.get("panel_total_bytes") or 0)
+    remaining = int(sub.get("panel_remaining_bytes") or 0)
+    # Infinite (fair-usage) configs are auto-disabled by the panel once the cap
+    # is reached; treat a synced & depleted infinite config as disabled even if
+    # the panel hasn't flipped the enable flag yet.
+    if is_infinite and total_bytes > 0 and remaining <= 0:
+        return "غیرفعال (سقف منصفانه)"
+    if enabled is not None and int(enabled) == 0:
+        return "غیرفعال (سقف منصفانه)" if is_infinite else "غیرفعال"
     if enabled is None:
         return "نامشخص"
-    return "فعال" if int(enabled) == 1 else "غیرفعال"
+    return "فعال"
 
 
 def subscription_remaining_label(sub: dict) -> str:
@@ -1067,21 +1235,34 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         name = html.escape(str(sub.get("client_email") or "بدون نام"))
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
+        is_infinite = int(sub.get("is_infinite") or 0) == 1
         if is_test:
             total_bytes = int(sub.get("panel_total_bytes") or 0)
             volume_label = f"{total_bytes / (1024 ** 2):.0f} MB"
             type_label = " | 🧪 تست"
+        elif is_infinite:
+            volume_label = f"{int(sub.get('gb') or 0)} گیگ"
+            type_label = " | ♾️ بی‌نهایت"
         else:
             volume_label = f"{int(sub.get('gb') or 0)} گیگ"
             type_label = ""
         lines.append(
-            f"{idx}. <b>{name}</b>\n"
+            f"{idx}. <b>{name}</b>{type_label}\n"
             f"   🆔 <code>{sub_id}</code>\n"
             f"   📦 حجم: {int(sub.get('gb') or 0)} گیگ | وضعیت: {subscription_status_label(sub)} | باقی‌مانده: {subscription_remaining_label(sub)}"
         )
 
         if is_test:
             lines.append(f"   🧪 نوع: تست | حجم واقعی: {volume_label} | اعتبار: ۱۰ دقیقه")
+        elif is_infinite:
+            sub_enabled = sub.get("panel_enabled")
+            total_b = int(sub.get("panel_total_bytes") or 0)
+            remain_b = int(sub.get("panel_remaining_bytes") or 0)
+            depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
+            if depleted:
+                lines.append("   ♾️ این کانفیگ به سقف مصرف منصفانه رسیده و غیرفعال شده است.")
+            else:
+                lines.append("   ♾️ بسته‌ی بی‌نهایت (مصرف منصفانه) — کانفیگ‌ها هنگام خرید برایتان ارسال شده‌اند.")
 
     nav: list[InlineKeyboardButton] = []
     if safe_page > 0:
@@ -1288,8 +1469,8 @@ async def build_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE
     db: AsyncDatabase = context.application.bot_data["db"]
     renewal = context.user_data.setdefault("renewal", {})
     agent = await db.get_agent(update.effective_user.id)
-    unit_price = await effective_unit_price(db, update.effective_user.id, agent)
     gb = int(renewal.get("gb") or 0)
+    unit_price = await unit_price_for_gb(db, update.effective_user.id, gb, agent)
     min_gb = await minimum_purchase_gb(db)
     if gb < min_gb:
         renewal.pop("gb", None)
@@ -1445,7 +1626,23 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.callback_query:
         await update.callback_query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
-    unit_price = await effective_unit_price(db, update.effective_user.id)
+    agent = await db.get_agent(update.effective_user.id)
+    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    tiers = await get_price_tiers(db)
+    if agent_price <= 0 and tiers:
+        lines = ["🏷 <b>تعرفه سرویس‌ها</b>", "", "💎 قیمت هر گیگابایت بر اساس حجم خرید شما:", ""]
+        for idx, tier in enumerate(tiers):
+            nxt = tiers[idx + 1]["min_gb"] if idx + 1 < len(tiers) else None
+            if nxt is not None:
+                rng = f"از {tier['min_gb']} تا {nxt - 1} گیگ"
+            else:
+                rng = f"{tier['min_gb']} گیگ به بالا"
+            lines.append(f"⚡ {rng}: هر گیگ <b>{tier['price_per_gb']:,}</b> تومان")
+        lines.append("")
+        lines.append("<i>هر چه حجم بیشتری بخرید، قیمت هر گیگ کمتر می‌شود. 📉</i>")
+        await new_flow_card(update, context, "\n".join(lines), back_keyboard())
+        return
+    unit_price = await effective_unit_price(db, update.effective_user.id, agent)
     await new_flow_card(
         update,
         context,
@@ -2180,6 +2377,9 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text == BTN_TEST_CONFIG:
         await agent_test_config(update, context)
         return ConversationHandler.END
+    if text == BTN_INFINITE:
+        await infinite_start(update, context)
+        return ConversationHandler.END
     if text == BTN_AGENT_REQ:
         return await agent_request_start(update, context)
     return ConversationHandler.END
@@ -2483,5 +2683,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(my_subscriptions_page, pattern=r"^subs:page:\d+$"))
     app.add_handler(CallbackQueryHandler(tariffs_info, pattern=r"^menu:tariffs$"))
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
+    app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
+    app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))
