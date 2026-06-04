@@ -108,6 +108,7 @@ export const api = {
   setSales: (audience: "all" | "user" | "agent", sales_status: "open" | "closed") =>
     post<Ok>("/sales", { audience, sales_status }),
   setUiMode: (mode: "modern" | "classic") => post<Ok>("/ui-mode", { mode }),
+  setPaymentCards: (cards: { number: string; name: string }[]) => post<Ok>("/payment-cards", { cards }),
 
   updateAgent: (
     id: number,

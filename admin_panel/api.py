@@ -551,6 +551,23 @@ async def set_sales(request: Request):
     return {"ok": True, "changed": True, "status": new_status, "audience": audience}
 
 
+@router.post("/payment-cards")
+async def set_payment_cards(request: Request):
+    """Save the rotating payment-card list ([{number, name}, ...], max 8)."""
+    import json as _json
+
+    body = await _json_body(request)
+    raw = body.get("cards")
+    cards: list[dict[str, str]] = []
+    if isinstance(raw, list):
+        for item in raw[:8]:
+            number = str((item or {}).get("number", "")).strip()
+            if number:
+                cards.append({"number": number, "name": str((item or {}).get("name", "")).strip()})
+    await db(request).admin_update_settings({"payment_cards": _json.dumps(cards, ensure_ascii=False)})
+    return {"ok": True, "count": len(cards)}
+
+
 @router.post("/ui-mode")
 async def set_ui_mode(request: Request):
     """Switch the panel UI between the modern SPA and the classic Jinja panel.

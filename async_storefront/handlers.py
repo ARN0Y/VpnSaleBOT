@@ -1648,8 +1648,9 @@ async def topup_amount_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
 
     db: AsyncDatabase = context.application.bot_data["db"]
     if method == "card":
-        card_number = await db.get_setting("card_number", "")
-        card_name = await db.get_setting("card_name", "")
+        card = await db.next_payment_card()
+        card_number = card.get("number", "")
+        card_name = card.get("name", "")
         await edit_text(
             query,
             "💳 <b>پرداخت کارت به کارت</b>\n\n"
