@@ -214,6 +214,111 @@ class ProvisioningService:
             idempotency_key=idempotency_key,
         )
 
+    async def infinite_package(self) -> dict:
+        """Admin-configured fair-usage 'unlimited' package settings."""
+        enabled = str(await self.db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+        return {
+            "enabled": enabled,
+            "cap_gb": _safe_positive_int(await self.db.get_setting("infinite_cap_gb", "100"), 100),
+            "duration_days": _safe_positive_int(await self.db.get_setting("infinite_duration_days", "30"), 30),
+            "price": max(0, int(str(await self.db.get_setting("infinite_price", "0") or "0").strip() or "0")),
+        }
+
+    async def process_infinite_purchase(self, *, user_id: int, client_name: str = "", idempotency_key: str | None = None) -> list[str]:
+        """Buy a fair-usage 'unlimited' config: a config capped at cap_gb traffic
+        and duration_days, charged at the admin's custom price. xray enforces the
+        cap (auto-stops at it). Users may buy several. Returns the sub_link(s) of
+        the created config(s) — the bot then delivers raw config URIs, not the sub
+        link itself.
+        """
+        pkg = await self.infinite_package()
+        if not pkg["enabled"]:
+            raise ValueError("بسته‌ی بی‌نهایت در حال حاضر فعال نیست.")
+        if pkg["price"] <= 0:
+            raise ValueError("قیمت بسته‌ی بی‌نهایت توسط مدیریت تنظیم نشده است.")
+        cap_gb = int(pkg["cap_gb"])
+        final_total = int(pkg["price"])
+
+        order_id = f"{user_id}-inf-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        payment_method = PaymentMethod.WALLET
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate purchase request: {existing['status']}")
+            agent = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            if agent and self.db.normalize_agent_access_value(agent["access_level"]) == "open":
+                payment_method = PaymentMethod.AGENT_OPEN
+                credit_update = await conn.execute(
+                    """
+                    UPDATE agents SET credit_used_toman=credit_used_toman+?
+                    WHERE user_id=? AND credit_used_toman + ? <= credit_limit_toman
+                    """,
+                    (int(final_total), int(user_id), int(final_total)),
+                )
+                if credit_update.rowcount != 1:
+                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
+                await conn.execute(
+                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
+                )
+            else:
+                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
+                if debit.rowcount != 1:
+                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
+                    int(final_total), 0, int(final_total), now_ts(),
+                    payment_method.value, "infinite", None, (client_name or "").strip() or None,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        provisions = []
+        try:
+            expiry_ms = (now_ts() + int(pkg["duration_days"]) * 86400) * 1000
+            provisions = await self.panel.add_subscriptions(
+                user_id=user_id, gb=cap_gb, qty=1, preferred_name=client_name, expiry_ms=expiry_ms
+            )
+            await self.db.insert_subscriptions(provisions, order_id=order_id, is_infinite=True)
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("infinite order approval failed after provisioning")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return [p.sub_link for p in provisions]
+        except Exception:
+            await self.db.delete_subscriptions([p.sub_id for p in provisions])
+            for provision in provisions:
+                try:
+                    await self.panel.delete_subscription(provision.sub_id)
+                except Exception:
+                    pass
+            if payment_method == PaymentMethod.AGENT_OPEN:
+                async with self.db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (int(final_total), int(user_id)),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
+                    )
+            else:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
     async def process_agent_test_config(self, *, user_id: int, idempotency_key: str | None = None) -> str:
         test_id = f"test-{int(user_id)}-{now_ts()}-{secrets.token_hex(3)}"
         idem = idempotency_key or test_id

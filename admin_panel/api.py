@@ -568,6 +568,68 @@ async def set_payment_cards(request: Request):
     return {"ok": True, "count": len(cards)}
 
 
+@router.post("/price-tiers")
+async def set_price_tiers(request: Request):
+    """Save volume-based pricing brackets: [{min_gb, price_per_gb}, ...].
+    An empty list clears tiers and reverts to the flat per-GB price."""
+    import json as _json
+
+    body = await _json_body(request)
+    raw = body.get("tiers")
+    tiers: list[dict[str, int]] = []
+    if isinstance(raw, list):
+        seen: set[int] = set()
+        for item in raw[:12]:
+            try:
+                min_gb = int(float((item or {}).get("min_gb")))
+                price = int(float((item or {}).get("price_per_gb")))
+            except (TypeError, ValueError):
+                continue
+            if min_gb < 0 or price <= 0 or min_gb in seen:
+                continue
+            seen.add(min_gb)
+            tiers.append({"min_gb": min_gb, "price_per_gb": price})
+    tiers.sort(key=lambda x: x["min_gb"])
+    await db(request).admin_update_settings(
+        {"price_tiers": _json.dumps(tiers, ensure_ascii=False) if tiers else ""}
+    )
+    return {"ok": True, "count": len(tiers), "tiers": tiers}
+
+
+@router.post("/infinite-package")
+async def set_infinite_package(request: Request):
+    """Configure the infinite (fair-usage) package: enabled flag, fair-usage cap
+    in GB, validity in days, and the custom price in Toman."""
+    body = await _json_body(request)
+
+    def _int(value, default=0, minimum=0):
+        try:
+            n = int(float(value))
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, n)
+
+    enabled = "1" if bool(body.get("enabled")) else "0"
+    cap_gb = _int(body.get("cap_gb"), default=100, minimum=1)
+    duration_days = _int(body.get("duration_days"), default=30, minimum=1)
+    price = _int(body.get("price"), default=0, minimum=0)
+    await db(request).admin_update_settings(
+        {
+            "infinite_enabled": enabled,
+            "infinite_cap_gb": str(cap_gb),
+            "infinite_duration_days": str(duration_days),
+            "infinite_price": str(price),
+        }
+    )
+    return {
+        "ok": True,
+        "enabled": enabled == "1",
+        "cap_gb": cap_gb,
+        "duration_days": duration_days,
+        "price": price,
+    }
+
+
 @router.post("/ui-mode")
 async def set_ui_mode(request: Request):
     """Switch the panel UI between the modern SPA and the classic Jinja panel.

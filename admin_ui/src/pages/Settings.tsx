@@ -55,6 +55,8 @@ export function Settings() {
 
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [cards, setCards] = React.useState<{ number: string; name: string }[]>([]);
+  const [inf, setInf] = React.useState({ enabled: false, cap_gb: "100", duration_days: "30", price: "0" });
+  const [tiers, setTiers] = React.useState<{ min_gb: string; price_per_gb: string }[]>([]);
   const inited = React.useRef(false);
   React.useEffect(() => {
     if (data && !inited.current) {
@@ -67,6 +69,20 @@ export function Settings() {
       } catch {
         setCards([]);
       }
+      setInf({
+        enabled: (items.infinite_enabled ?? "0") === "1",
+        cap_gb: items.infinite_cap_gb ?? "100",
+        duration_days: items.infinite_duration_days ?? "30",
+        price: items.infinite_price ?? "0",
+      });
+      try {
+        const pt = JSON.parse(items.price_tiers || "[]");
+        setTiers(
+          Array.isArray(pt) ? pt.map((t) => ({ min_gb: String(t.min_gb ?? ""), price_per_gb: String(t.price_per_gb ?? "") })) : [],
+        );
+      } catch {
+        setTiers([]);
+      }
       inited.current = true;
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -78,6 +94,25 @@ export function Settings() {
 
   const save = useMutation({
     mutationFn: () => api.updateSettings(form),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const saveInf = useMutation({
+    mutationFn: () =>
+      api.setInfinite({
+        enabled: inf.enabled,
+        cap_gb: Number(inf.cap_gb) || 0,
+        duration_days: Number(inf.duration_days) || 0,
+        price: Number(inf.price) || 0,
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const saveTiers = useMutation({
+    mutationFn: () =>
+      api.setPriceTiers(
+        tiers
+          .filter((t) => t.min_gb !== "" && t.price_per_gb !== "")
+          .map((t) => ({ min_gb: Number(t.min_gb) || 0, price_per_gb: Number(t.price_per_gb) || 0 })),
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
   const toggle = useMutation({
@@ -191,6 +226,94 @@ export function Settings() {
             </Button>
             <Button size="sm" disabled={saveCards.isPending} onClick={() => saveCards.mutate()}>
               {saveCards.isPending ? "در حال ذخیره…" : saveCards.isSuccess ? "ذخیره شد ✓" : "ذخیره کارت‌ها"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>تعرفه پلکانی (بر اساس حجم)</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            قیمت هر گیگ را بر اساس بازه‌ی حجم خرید تعیین کنید. مثلاً «از ۵ گیگ گیگی ۳۰٬۰۰۰»، «از ۱۰ گیگ گیگی ۲۵٬۰۰۰»، «از ۲۰ گیگ به بالا گیگی ۲۰٬۰۰۰». هر ردیف «حجم شروع بازه» و «قیمت هر گیگ» دارد؛ بازه تا شروعِ ردیف بعدی ادامه می‌یابد. خالی گذاشتن این بخش یعنی استفاده از «قیمت هر گیگ» ثابت.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {tiers.length === 0 && <p className="text-sm text-muted-foreground">هیچ بازه‌ای تعریف نشده — قیمت ثابت اعمال می‌شود.</p>}
+          {tiers.map((t, i) => (
+            <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
+              <div className="flex-1">
+                <Field label={`از این حجم به بالا (گیگ) — ردیف ${i + 1}`}>
+                  <Input
+                    value={t.min_gb}
+                    inputMode="numeric"
+                    placeholder="مثلاً 5"
+                    onChange={(e) => setTiers((xs) => xs.map((x, j) => (j === i ? { ...x, min_gb: e.target.value } : x)))}
+                  />
+                </Field>
+              </div>
+              <div className="flex-1">
+                <Field label="قیمت هر گیگ (تومان)">
+                  <Input
+                    value={t.price_per_gb}
+                    inputMode="numeric"
+                    placeholder="مثلاً 30000"
+                    onChange={(e) => setTiers((xs) => xs.map((x, j) => (j === i ? { ...x, price_per_gb: e.target.value } : x)))}
+                  />
+                </Field>
+              </div>
+              <Button variant="destructive" size="icon" onClick={() => setTiers((xs) => xs.filter((_, j) => j !== i))}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <Button variant="outline" size="sm" disabled={tiers.length >= 12} onClick={() => setTiers((xs) => [...xs, { min_gb: "", price_per_gb: "" }])}>
+              <Plus className="h-4 w-4" /> افزودن بازه
+            </Button>
+            <Button size="sm" disabled={saveTiers.isPending} onClick={() => saveTiers.mutate()}>
+              {saveTiers.isPending ? "در حال ذخیره…" : saveTiers.isSuccess ? "ذخیره شد ✓" : "ذخیره تعرفه پلکانی"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>بسته‌ی بی‌نهایت (مصرف منصفانه)</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            بسته‌ای با حجم بالا و قیمت سفارشی. وقتی مصرف کاربر به سقف منصفانه برسد، کانفیگ به‌صورت خودکار و بدون اخطار در پنل غیرفعال می‌شود و در «اشتراک‌های من» با وضعیت غیرفعال نمایش داده می‌شود. هنگام خرید، فقط لینک کانفیگ‌ها برای کاربر ارسال می‌شود (نه لینک اشتراک).
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] p-4">
+            <div className="flex items-center gap-3">
+              <span className="font-bold text-white">وضعیت بسته</span>
+              <Badge variant={inf.enabled ? "success" : "danger"}>{inf.enabled ? "فعال" : "غیرفعال"}</Badge>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: true }))}>
+                <LockOpen className="h-4 w-4" /> فعال
+              </Button>
+              <Button size="sm" variant="destructive" disabled={!inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: false }))}>
+                <Lock className="h-4 w-4" /> غیرفعال
+              </Button>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="سقف مصرف منصفانه (گیگ)" hint="بعد از این حجم، کانفیگ غیرفعال می‌شود">
+              <Input value={inf.cap_gb} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, cap_gb: e.target.value }))} />
+            </Field>
+            <Field label="مدت اعتبار (روز)">
+              <Input value={inf.duration_days} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, duration_days: e.target.value }))} />
+            </Field>
+            <Field label="قیمت سفارشی (تومان)">
+              <Input value={inf.price} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, price: e.target.value }))} />
+            </Field>
+          </div>
+          <div className="flex justify-end">
+            <Button size="sm" disabled={saveInf.isPending} onClick={() => saveInf.mutate()}>
+              {saveInf.isPending ? "در حال ذخیره…" : saveInf.isSuccess ? "ذخیره شد ✓" : "ذخیره بسته‌ی بی‌نهایت"}
             </Button>
           </div>
         </CardContent>
