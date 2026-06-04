@@ -651,6 +651,7 @@ class AsyncDatabase:
             "infinite_cap_gb": "100",
             "infinite_duration_days": "30",
             "infinite_price": "0",
+            "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
         }

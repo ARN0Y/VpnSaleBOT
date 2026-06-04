@@ -568,6 +568,34 @@ async def set_payment_cards(request: Request):
     return {"ok": True, "count": len(cards)}
 
 
+@router.post("/price-tiers")
+async def set_price_tiers(request: Request):
+    """Save volume-based pricing brackets: [{min_gb, price_per_gb}, ...].
+    An empty list clears tiers and reverts to the flat per-GB price."""
+    import json as _json
+
+    body = await _json_body(request)
+    raw = body.get("tiers")
+    tiers: list[dict[str, int]] = []
+    if isinstance(raw, list):
+        seen: set[int] = set()
+        for item in raw[:12]:
+            try:
+                min_gb = int(float((item or {}).get("min_gb")))
+                price = int(float((item or {}).get("price_per_gb")))
+            except (TypeError, ValueError):
+                continue
+            if min_gb < 0 or price <= 0 or min_gb in seen:
+                continue
+            seen.add(min_gb)
+            tiers.append({"min_gb": min_gb, "price_per_gb": price})
+    tiers.sort(key=lambda x: x["min_gb"])
+    await db(request).admin_update_settings(
+        {"price_tiers": _json.dumps(tiers, ensure_ascii=False) if tiers else ""}
+    )
+    return {"ok": True, "count": len(tiers), "tiers": tiers}
+
+
 @router.post("/infinite-package")
 async def set_infinite_package(request: Request):
     """Configure the infinite (fair-usage) package: enabled flag, fair-usage cap

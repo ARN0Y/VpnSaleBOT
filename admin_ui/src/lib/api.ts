@@ -111,6 +111,8 @@ export const api = {
   setPaymentCards: (cards: { number: string; name: string }[]) => post<Ok>("/payment-cards", { cards }),
   setInfinite: (p: { enabled: boolean; cap_gb: number; duration_days: number; price: number }) =>
     post<Ok>("/infinite-package", p),
+  setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
+    post<Ok>("/price-tiers", { tiers }),
 
   updateAgent: (
     id: number,

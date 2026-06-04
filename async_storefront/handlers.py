@@ -562,12 +562,68 @@ async def end_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
-async def effective_unit_price(db: AsyncDatabase, user_id: int, agent=None) -> int:
+async def get_price_tiers(db: AsyncDatabase) -> list[dict]:
+    """Admin-configured volume-based pricing brackets, sorted ascending by
+    ``min_gb``. Each entry is ``{"min_gb": int, "price_per_gb": int}``. The
+    applicable price for a given volume is the tier with the greatest
+    ``min_gb`` that does not exceed the requested gigabytes."""
+    raw = str(await db.get_setting("price_tiers", "") or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    tiers: list[dict] = []
+    if isinstance(data, list):
+        for item in data:
+            try:
+                mg = int(float((item or {}).get("min_gb")))
+                pp = int(float((item or {}).get("price_per_gb")))
+            except (TypeError, ValueError):
+                continue
+            if mg >= 0 and pp > 0:
+                tiers.append({"min_gb": mg, "price_per_gb": pp})
+    tiers.sort(key=lambda x: x["min_gb"])
+    return tiers
+
+
+async def unit_price_for_gb(db: AsyncDatabase, user_id: int, gb: int, agent=None) -> int:
+    """Per-gigabyte price for a specific volume.
+
+    Agents with a custom flat price always keep it. Otherwise, if the admin has
+    configured volume tiers, the matching bracket's price is used; if no tier
+    matches (volume below the smallest bracket), the smallest bracket applies.
+    Falls back to the flat ``price_per_gb`` setting when no tiers exist."""
     if agent is None:
         agent = await db.get_agent(user_id)
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     if agent_price > 0:
         return agent_price
+    tiers = await get_price_tiers(db)
+    if tiers:
+        chosen = tiers[0]["price_per_gb"]
+        for tier in tiers:
+            if int(gb) >= tier["min_gb"]:
+                chosen = tier["price_per_gb"]
+            else:
+                break
+        return int(chosen)
+    return int(await db.get_setting("price_per_gb", "200000") or "200000")
+
+
+async def effective_unit_price(db: AsyncDatabase, user_id: int, agent=None) -> int:
+    """Baseline per-gigabyte price (agent flat price, or the lowest configured
+    tier / flat price). Used for top-up suggestions and the tariff summary where
+    no specific purchase volume is known yet."""
+    if agent is None:
+        agent = await db.get_agent(user_id)
+    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    if agent_price > 0:
+        return agent_price
+    tiers = await get_price_tiers(db)
+    if tiers:
+        return int(tiers[0]["price_per_gb"])
     return int(await db.get_setting("price_per_gb", "200000") or "200000")
 
 
@@ -779,9 +835,9 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     db: AsyncDatabase = context.application.bot_data["db"]
     checkout = context.user_data.setdefault("checkout", {})
     agent = await db.get_agent(update.effective_user.id)
-    unit_price = await effective_unit_price(db, update.effective_user.id, agent)
     gb = int(checkout["gb"])
     qty = int(checkout["qty"])
+    unit_price = await unit_price_for_gb(db, update.effective_user.id, gb, agent)
     min_gb = await minimum_purchase_gb(db)
     if gb < min_gb:
         checkout.pop("gb", None)
@@ -1388,8 +1444,8 @@ async def build_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE
     db: AsyncDatabase = context.application.bot_data["db"]
     renewal = context.user_data.setdefault("renewal", {})
     agent = await db.get_agent(update.effective_user.id)
-    unit_price = await effective_unit_price(db, update.effective_user.id, agent)
     gb = int(renewal.get("gb") or 0)
+    unit_price = await unit_price_for_gb(db, update.effective_user.id, gb, agent)
     min_gb = await minimum_purchase_gb(db)
     if gb < min_gb:
         renewal.pop("gb", None)
@@ -1545,7 +1601,23 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.callback_query:
         await update.callback_query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
-    unit_price = await effective_unit_price(db, update.effective_user.id)
+    agent = await db.get_agent(update.effective_user.id)
+    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    tiers = await get_price_tiers(db)
+    if agent_price <= 0 and tiers:
+        lines = ["💡 <b>تعرفه سرویس‌ها</b>", "", "قیمت هر گیگابایت بر اساس حجم خرید شما:"]
+        for idx, tier in enumerate(tiers):
+            nxt = tiers[idx + 1]["min_gb"] if idx + 1 < len(tiers) else None
+            if nxt is not None:
+                rng = f"از {tier['min_gb']} تا {nxt - 1} گیگ"
+            else:
+                rng = f"{tier['min_gb']} گیگ به بالا"
+            lines.append(f"• {rng}: هر گیگ <b>{tier['price_per_gb']:,}</b> تومان")
+        lines.append("")
+        lines.append("هر چه حجم بیشتری بخرید، قیمت هر گیگ کمتر می‌شود. 📉")
+        await new_flow_card(update, context, "\n".join(lines), back_keyboard())
+        return
+    unit_price = await effective_unit_price(db, update.effective_user.id, agent)
     await new_flow_card(update, context, f"💡 <b>تعرفه سرویس‌ها</b>\n\nتعرفه فعلی هر گیگابایت برای شما: <b>{unit_price:,}</b> تومان", back_keyboard())
 
 
