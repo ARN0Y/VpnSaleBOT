@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LockOpen, Lock, Save } from "lucide-react";
+import { LockOpen, Lock, Save, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,10 +14,8 @@ type Audience = "all" | "user" | "agent";
 const RUNTIME_FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: "price_per_gb", label: "قیمت هر گیگ (تومان)" },
   { key: "minimum_purchase_gb", label: "حداقل خرید (گیگ)" },
-  { key: "card_number", label: "شماره کارت" },
-  { key: "card_name", label: "نام صاحب کارت" },
   { key: "crypto_address", label: "آدرس تتر" },
-  { key: "support_id", label: "آیدی پشتیبانی" },
+  { key: "support_id", label: "آیدی پشتیبانی", hint: "با @ ، مثل @YourSupport" },
   { key: "admin_user_ids", label: "ادمین‌ها", hint: "آیدی‌ها با کاما" },
   { key: "default_agent_credit_limit_toman", label: "سقف اعتبار پیش‌فرض نماینده" },
   { key: "default_agent_price_per_gb", label: "قیمت پیش‌فرض نماینده" },
@@ -56,15 +54,27 @@ export function Settings() {
   const master = items.sales_status ?? "open";
 
   const [form, setForm] = React.useState<Record<string, string>>({});
+  const [cards, setCards] = React.useState<{ number: string; name: string }[]>([]);
   const inited = React.useRef(false);
   React.useEffect(() => {
     if (data && !inited.current) {
       const f: Record<string, string> = {};
       [...RUNTIME_FIELDS, ...PANEL_FIELDS].forEach(({ key }) => (f[key] = items[key] ?? ""));
       setForm(f);
+      try {
+        const parsed = JSON.parse(items.payment_cards || "[]");
+        setCards(Array.isArray(parsed) && parsed.length ? parsed.map((c) => ({ number: String(c.number || ""), name: String(c.name || "") })) : []);
+      } catch {
+        setCards([]);
+      }
       inited.current = true;
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveCards = useMutation({
+    mutationFn: () => api.setPaymentCards(cards.filter((c) => c.number.trim())),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
 
   const save = useMutation({
     mutationFn: () => api.updateSettings(form),
@@ -136,6 +146,52 @@ export function Settings() {
           <div className="flex justify-end gap-2 pt-1">
             <Button size="sm" variant="subtle" disabled={toggle.isPending} onClick={() => toggle.mutate({ a: "all", s: "open" })}>باز کردن همه</Button>
             <Button size="sm" variant="subtle" disabled={toggle.isPending} onClick={() => toggle.mutate({ a: "all", s: "closed" })}>بستن همه</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>کارت‌های پرداخت (چرخشی)</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            تا ۸ کارت اضافه کنید؛ ربات برای هر واریز به‌ترتیب چرخشی (round-robin) یکی را نشان می‌دهد و بار روی کارت‌ها پخش می‌شود.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {cards.length === 0 && <p className="text-sm text-muted-foreground">هیچ کارتی اضافه نشده — از دکمه‌ی پایین اضافه کنید.</p>}
+          {cards.map((c, i) => (
+            <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
+              <div className="flex-1">
+                <Field label={`شماره کارت ${i + 1}`}>
+                  <Input
+                    value={c.number}
+                    inputMode="numeric"
+                    placeholder="6037-xxxx-xxxx-xxxx"
+                    onChange={(e) => setCards((xs) => xs.map((x, j) => (j === i ? { ...x, number: e.target.value } : x)))}
+                  />
+                </Field>
+              </div>
+              <div className="flex-1">
+                <Field label="به نام">
+                  <Input
+                    value={c.name}
+                    placeholder="نام صاحب کارت"
+                    onChange={(e) => setCards((xs) => xs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
+                  />
+                </Field>
+              </div>
+              <Button variant="destructive" size="icon" onClick={() => setCards((xs) => xs.filter((_, j) => j !== i))}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <Button variant="outline" size="sm" disabled={cards.length >= 8} onClick={() => setCards((xs) => [...xs, { number: "", name: "" }])}>
+              <Plus className="h-4 w-4" /> افزودن کارت
+            </Button>
+            <Button size="sm" disabled={saveCards.isPending} onClick={() => saveCards.mutate()}>
+              {saveCards.isPending ? "در حال ذخیره…" : saveCards.isSuccess ? "ذخیره شد ✓" : "ذخیره کارت‌ها"}
+            </Button>
           </div>
         </CardContent>
       </Card>
