@@ -1,4 +1,4 @@
-# ❄️ ElsaVPN Bot
+# ❄️ NavidVPN Bot
 
 ربات فروش VPN روی تلگرام به‌همراه پنل وب مدیریت.
 فروش بر اساس حجم (گیگ)، کیف پول، پرداخت کارت‌به‌کارت و تتر، سیستم نمایندگی،
@@ -44,32 +44,32 @@ python -m admin_panel.main
 ## اجرای دائمی با systemd (نمونه)
 
 ```ini
-# /etc/systemd/system/elsavpn-bot.service
+# /etc/systemd/system/navidvpn-bot.service
 [Unit]
-Description=ElsaVPN Telegram Bot
+Description=NavidVPN Telegram Bot
 After=network.target
 
 [Service]
-WorkingDirectory=/root/ElsaVPN_Bot
-ExecStart=/root/ElsaVPN_Bot/.venv/bin/python -m async_storefront.app
+WorkingDirectory=/root/NavidVPN_Bot
+ExecStart=/root/NavidVPN_Bot/.venv/bin/python -m async_storefront.app
 Restart=always
-EnvironmentFile=/root/ElsaVPN_Bot/.env
+EnvironmentFile=/root/NavidVPN_Bot/.env
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```ini
-# /etc/systemd/system/elsavpn-admin.service
+# /etc/systemd/system/navidvpn-admin.service
 [Unit]
-Description=ElsaVPN Admin Panel
+Description=NavidVPN Admin Panel
 After=network.target
 
 [Service]
-WorkingDirectory=/root/ElsaVPN_Bot
-ExecStart=/root/ElsaVPN_Bot/.venv/bin/python -m admin_panel.main
+WorkingDirectory=/root/NavidVPN_Bot
+ExecStart=/root/NavidVPN_Bot/.venv/bin/python -m admin_panel.main
 Restart=always
-EnvironmentFile=/root/ElsaVPN_Bot/.env
+EnvironmentFile=/root/NavidVPN_Bot/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -77,7 +77,7 @@ WantedBy=multi-user.target
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now elsavpn-bot elsavpn-admin
+systemctl enable --now navidvpn-bot navidvpn-admin
 ```
 
 ## امکانات کلیدی

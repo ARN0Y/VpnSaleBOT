@@ -31,7 +31,7 @@ class Settings:
             bot_token=token,
             admin_id=int(os.getenv("ADMIN_ID", "0") or "0"),
             bot_username=os.getenv("BOT_USERNAME", "").strip(),
-            db_path=Path(os.getenv("BOT_DB_PATH", str(base_dir / "elsavpn.db"))).resolve(),
+            db_path=Path(os.getenv("BOT_DB_PATH", str(base_dir / "navidvpn.db"))).resolve(),
             backup_dir=Path(os.getenv("BOT_BACKUP_DIR", str(base_dir / "backup"))).resolve(),
             logs_dir=Path(os.getenv("BOT_LOGS_DIR", str(base_dir / "logs"))).resolve(),
             proxy_url=proxy,

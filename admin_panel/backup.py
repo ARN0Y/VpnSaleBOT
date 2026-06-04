@@ -82,7 +82,7 @@ async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> 
     if result.xui_path:
         includes.append("دیتابیس x-ui")
     caption = (
-        f"🗄 <b>{source_label} ElsaVPN</b>\n\n"
+        f"🗄 <b>{source_label} NavidVPN</b>\n\n"
         f"⏱ زمان تهران: <b>{_tehran_now_label()}</b>\n"
         f"📦 محتوا: <b>{' + '.join(includes) or 'نامشخص'}</b>\n"
         f"🧾 وضعیت: <b>{status_label}</b>\n"

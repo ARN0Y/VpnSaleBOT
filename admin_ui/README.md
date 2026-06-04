@@ -1,4 +1,4 @@
-# ElsaVPN Admin UI (React + shadcn/Radix)
+# NavidVPN Admin UI (React + shadcn/Radix)
 
 داشبورد جدید مدیریت روی **React + Vite + TypeScript + TailwindCSS + Radix/shadcn + Lucide + TanStack Query/Table + Recharts**.
 این SPA با همان نشستِ کوکیِ پنل از API جیسونِ `/admin/api/v1` داده می‌گیرد.
@@ -35,7 +35,7 @@ http://<سرور>:8080/admin/app
 ## ساختار
 ```
 src/
-  brand.ts              ← نام/تم برند (تنها فرق دو نسخه‌ی ElsaVPN و تسکو)
+  brand.ts              ← نام/تم برند (تنها فرق دو نسخه‌ی NavidVPN و تسکو)
   lib/        api.ts, types.ts, status.ts, utils.ts
   components/ ui/ (button,card,input,badge,table,skeleton) + layout/
   auth/       AuthContext.tsx

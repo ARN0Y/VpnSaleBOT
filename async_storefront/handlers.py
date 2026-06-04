@@ -45,9 +45,9 @@ FLOW_PROMPT_KEY = "_flow_prompt_message_id"
 HOME_MESSAGE_KEY = "_home_message_id"
 FLOW_STATE_KEYS = {"checkout", "topup", "agent_request", "renewal", FLOW_PROMPT_KEY}
 
-BTN_BUY = "❄️ خرید سرویس پرسرعت"
-BTN_RENEW = "🧊 تمدید سرویس"
-BTN_SUBS = "🔹 سرویس‌های من"
+BTN_BUY = "⚡ خرید سرویس پرسرعت"
+BTN_RENEW = "🔄 تمدید سرویس"
+BTN_SUBS = "📦 سرویس‌های من"
 BTN_ACCOUNT = "🪪 حساب کاربری"
 BTN_WALLET = "💎 کیف پول من"
 BTN_TARIFFS = "🏷 تعرفه‌ها"
@@ -59,12 +59,12 @@ _ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET
 _nav_filter = filters.Text(list(_ALL_NAV_BTNS))
 
 WELCOME_TEXT = (
-    "❄️ <b>به ElsaVPN خوش آمدید</b>\n"
-    "<i>اینترنت آزاد، پایدار و پرسرعت — هر لحظه، همه‌جا.</i>\n\n"
+    "⚡ <b>به NavidVPN خوش آمدید</b>\n"
+    "<i>نویدِ یک اینترنت آزاد و پرسرعت — هر لحظه، همه‌جا.</i>\n\n"
     "⚡️ سرعت بالا و اتصال بی‌وقفه\n"
     "🛡 امنیت کامل و حفظ حریم خصوصی\n"
     "🎯 تحویل آنی سرویس و پشتیبانی واقعی\n\n"
-    "🛟 آیدی پشتیبانی: @elsaVPN\n\n"
+    "🛟 آیدی پشتیبانی: @NavidVPN\n\n"
     "برای شروع، یکی از گزینه‌های زیر را انتخاب کنید 👇"
 )
 
@@ -148,10 +148,10 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
     rows = [
-        [InlineKeyboardButton("❄️ خرید سرویس پرسرعت", callback_data="menu:buy")],
+        [InlineKeyboardButton("⚡ خرید سرویس پرسرعت", callback_data="menu:buy")],
         [
-            InlineKeyboardButton("🔹 سرویس‌های من", callback_data="menu:subs"),
-            InlineKeyboardButton("🧊 تمدید سرویس", callback_data="menu:renew"),
+            InlineKeyboardButton("📦 سرویس‌های من", callback_data="menu:subs"),
+            InlineKeyboardButton("🔄 تمدید سرویس", callback_data="menu:renew"),
         ],
         [
             InlineKeyboardButton("💎 کیف پول من", callback_data="menu:wallet"),
@@ -921,7 +921,7 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
         return ConversationHandler.END
 
-    await edit_text(query, "❄️ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
+    await edit_text(query, "⚡ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
     for idx, sub_link in enumerate(links):
         safe_link = html.escape(sub_link)
         caption = (
@@ -1456,7 +1456,7 @@ async def support_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await new_flow_card(
         update,
         context,
-        "🛟 <b>پشتیبانی ElsaVPN</b>\n\n"
+        "🛟 <b>پشتیبانی NavidVPN</b>\n\n"
         f"برای ارتباط مستقیم با تیم پشتیبانی به آیدی زیر پیام دهید:\n👈 {html.escape(support_id)}\n\n"
         "<i>پاسخگوی شما هستیم — سریع و دقیق.</i>",
         back_keyboard(),

@@ -47,7 +47,7 @@ class PanelClient:
             limits=limits,
             follow_redirects=False,
             trust_env=False,
-            headers={"User-Agent": "ElsaVPN-Bot/1.0"},
+            headers={"User-Agent": "NavidVPN-Bot/1.0"},
         )
         self._login_lock = asyncio.Lock()
         self._inbounds_cache_lock = asyncio.Lock()
