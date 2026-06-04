@@ -54,8 +54,9 @@ BTN_TARIFFS = "💡 تعرفه‌ها"
 BTN_SUPPORT = "👨‍💻 پشتیبانی"
 BTN_TEST_CONFIG = "🧪 کانفیگ تست"
 BTN_AGENT_REQ = "🤝 نمایندگی"
+BTN_INFINITE = "♾️ بسته بی‌نهایت"
 
-_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ})
+_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ, BTN_INFINITE})
 _nav_filter = filters.Text(list(_ALL_NAV_BTNS))
 
 WELCOME_TEXT = (
@@ -152,6 +153,10 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
     )
 
 
+async def infinite_enabled(db: AsyncDatabase) -> bool:
+    return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
     rows = [
@@ -163,6 +168,8 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
         [InlineKeyboardButton("💳 کیف پول", callback_data="menu:wallet")],
         [InlineKeyboardButton("👨🏻‍💻 تماس با پشتیبانی", callback_data="menu:support")],
     ]
+    if await infinite_enabled(db):
+        rows.insert(1, [InlineKeyboardButton("♾️ بسته‌ی بی‌نهایت", callback_data="menu:infinite")])
     if agent and not int(agent["disabled"] or 0):
         try:
             permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
@@ -330,12 +337,14 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(BTN_BUY), KeyboardButton(BTN_RENEW)],
         [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_ACCOUNT)],
         [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_TARIFFS)],
     ]
+    if has_infinite:
+        rows.insert(1, [KeyboardButton(BTN_INFINITE)])
     row_last = [KeyboardButton(BTN_SUPPORT)]
     if is_agent and has_test:
         row_last.insert(0, KeyboardButton(BTN_TEST_CONFIG))
@@ -494,7 +503,8 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
             has_test = "test" in permissions
         except Exception:
             has_test = True
-    return main_reply_keyboard(is_agent=is_agent, has_test=has_test)
+    has_infinite = await infinite_enabled(db)
+    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -934,6 +944,94 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
+async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await ensure_user(update, context)
+    if update.callback_query:
+        await update.callback_query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    pkg = await provisioning.infinite_package()
+    if not pkg["enabled"]:
+        await new_flow_card(update, context, "♾️ <b>بسته‌ی بی‌نهایت</b>\n\nاین بسته در حال حاضر فعال نیست.", back_keyboard())
+        return
+    text = (
+        "♾️ <b>بسته‌ی بی‌نهایت (مصرف منصفانه)</b>\n\n"
+        f"🌊 حجم منصفانه: <b>{pkg['cap_gb']:,}</b> گیگابایت\n"
+        f"⏳ مدت اعتبار: <b>{pkg['duration_days']:,}</b> روز\n"
+        f"💰 قیمت: <b>{pkg['price']:,}</b> تومان\n\n"
+        "✅ پس از خرید، <b>لینک مستقیم کانفیگ</b> برایتان ارسال می‌شود.\n"
+        "✅ امکان خرید چند بسته وجود دارد."
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ خرید و دریافت کانفیگ", callback_data="infinite:buy")],
+            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
+        ]
+    )
+    await new_flow_card(update, context, text, kb)
+
+
+async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    if not await audience_sales_is_open(db, update.effective_user.id):
+        await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
+        return
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    panel = context.application.bot_data["panel"]
+    qr: QRService = context.application.bot_data["qr"]
+    await edit_flow_query(update, context, "⏳ <b>در حال ساخت بسته‌ی بی‌نهایت...</b>\n\nلطفاً چند لحظه صبر کنید.")
+    try:
+        links = await provisioning.process_infinite_purchase(user_id=update.effective_user.id, idempotency_key=query.id)
+    except ValueError as exc:
+        await edit_text(
+            query,
+            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")], [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")]]
+            ),
+        )
+        return
+    except Exception as exc:
+        LOG.exception("infinite purchase failed user_id=%s", update.effective_user.id)
+        await edit_text(query, f"❌ خطا در ساخت بسته:\n{html.escape(str(exc))}", back_keyboard())
+        return
+
+    uris: list[str] = []
+    for link in links:
+        try:
+            uris.extend(await panel.fetch_config_uris(link))
+        except Exception:
+            LOG.exception("fetch_config_uris failed for infinite package")
+    uris = [u for u in uris if u]
+    if not uris:
+        await edit_text(
+            query,
+            "✅ بسته ساخته شد، اما دریافت لینک کانفیگ کمی طول کشید.\n"
+            "از بخش «اشتراک‌های من» می‌توانید کانفیگ را ببینید یا با پشتیبانی تماس بگیرید.",
+            back_keyboard(),
+        )
+        return
+    await edit_text(query, "♾️ <b>بسته‌ی بی‌نهایت ساخته شد.</b>\n\nلینک کانفیگ در پیام بعدی ارسال می‌شود.")
+    for idx, uri in enumerate(uris):
+        caption = (
+            "✅ <b>بسته‌ی بی‌نهایت فعال شد!</b>\n"
+            "<i>مصرف منصفانه فعال است.</i>\n\n"
+            "🔗 <b>لینک کانفیگ شما:</b>\n"
+            f"<code>{html.escape(uri)}</code>\n\n"
+            "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+        )
+        png = await qr.png(uri)
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=BytesIO(png),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard() if idx == len(uris) - 1 else None,
+        )
+
+
 def format_join_date(ts: int) -> str:
     dt = datetime.fromtimestamp(int(ts), ZoneInfo("Asia/Tehran"))
     if jdatetime:
@@ -1014,9 +1112,19 @@ def user_identity_label(user) -> str:
 
 def subscription_status_label(sub: dict) -> str:
     enabled = sub.get("panel_enabled")
+    is_infinite = int(sub.get("is_infinite") or 0) == 1
+    total_bytes = int(sub.get("panel_total_bytes") or 0)
+    remaining = int(sub.get("panel_remaining_bytes") or 0)
+    # Infinite (fair-usage) configs are auto-disabled by the panel once the cap
+    # is reached; treat a synced & depleted infinite config as disabled even if
+    # the panel hasn't flipped the enable flag yet.
+    if is_infinite and total_bytes > 0 and remaining <= 0:
+        return "غیرفعال (سقف منصفانه)"
+    if enabled is not None and int(enabled) == 0:
+        return "غیرفعال (سقف منصفانه)" if is_infinite else "غیرفعال"
     if enabled is None:
         return "نامشخص"
-    return "فعال" if int(enabled) == 1 else "غیرفعال"
+    return "فعال"
 
 
 def subscription_remaining_label(sub: dict) -> str:
@@ -1046,21 +1154,34 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         name = html.escape(str(sub.get("client_email") or "بدون نام"))
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
+        is_infinite = int(sub.get("is_infinite") or 0) == 1
         if is_test:
             total_bytes = int(sub.get("panel_total_bytes") or 0)
             volume_label = f"{total_bytes / (1024 ** 2):.0f} MB"
             type_label = " | 🧪 تست"
+        elif is_infinite:
+            volume_label = f"{int(sub.get('gb') or 0)} گیگ"
+            type_label = " | ♾️ بی‌نهایت"
         else:
             volume_label = f"{int(sub.get('gb') or 0)} گیگ"
             type_label = ""
         lines.append(
-            f"{idx}. <b>{name}</b>\n"
+            f"{idx}. <b>{name}</b>{type_label}\n"
             f"   🆔 <code>{sub_id}</code>\n"
             f"   📦 حجم: {int(sub.get('gb') or 0)} گیگ | وضعیت: {subscription_status_label(sub)} | باقی‌مانده: {subscription_remaining_label(sub)}"
         )
 
         if is_test:
             lines.append(f"   🧪 نوع: تست | حجم واقعی: {volume_label} | اعتبار: ۱۰ دقیقه")
+        elif is_infinite:
+            sub_enabled = sub.get("panel_enabled")
+            total_b = int(sub.get("panel_total_bytes") or 0)
+            remain_b = int(sub.get("panel_remaining_bytes") or 0)
+            depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
+            if depleted:
+                lines.append("   ♾️ این کانفیگ به سقف مصرف منصفانه رسیده و غیرفعال شده است.")
+            else:
+                lines.append("   ♾️ بسته‌ی بی‌نهایت (مصرف منصفانه) — کانفیگ‌ها هنگام خرید برایتان ارسال شده‌اند.")
 
     nav: list[InlineKeyboardButton] = []
     if safe_page > 0:
@@ -2145,6 +2266,9 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text == BTN_TEST_CONFIG:
         await agent_test_config(update, context)
         return ConversationHandler.END
+    if text == BTN_INFINITE:
+        await infinite_start(update, context)
+        return ConversationHandler.END
     if text == BTN_AGENT_REQ:
         return await agent_request_start(update, context)
     return ConversationHandler.END
@@ -2448,5 +2572,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(my_subscriptions_page, pattern=r"^subs:page:\d+$"))
     app.add_handler(CallbackQueryHandler(tariffs_info, pattern=r"^menu:tariffs$"))
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
+    app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
+    app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))

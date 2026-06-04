@@ -568,6 +568,40 @@ async def set_payment_cards(request: Request):
     return {"ok": True, "count": len(cards)}
 
 
+@router.post("/infinite-package")
+async def set_infinite_package(request: Request):
+    """Configure the infinite (fair-usage) package: enabled flag, fair-usage cap
+    in GB, validity in days, and the custom price in Toman."""
+    body = await _json_body(request)
+
+    def _int(value, default=0, minimum=0):
+        try:
+            n = int(float(value))
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, n)
+
+    enabled = "1" if bool(body.get("enabled")) else "0"
+    cap_gb = _int(body.get("cap_gb"), default=100, minimum=1)
+    duration_days = _int(body.get("duration_days"), default=30, minimum=1)
+    price = _int(body.get("price"), default=0, minimum=0)
+    await db(request).admin_update_settings(
+        {
+            "infinite_enabled": enabled,
+            "infinite_cap_gb": str(cap_gb),
+            "infinite_duration_days": str(duration_days),
+            "infinite_price": str(price),
+        }
+    )
+    return {
+        "ok": True,
+        "enabled": enabled == "1",
+        "cap_gb": cap_gb,
+        "duration_days": duration_days,
+        "price": price,
+    }
+
+
 @router.post("/ui-mode")
 async def set_ui_mode(request: Request):
     """Switch the panel UI between the modern SPA and the classic Jinja panel.

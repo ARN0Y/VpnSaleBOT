@@ -370,11 +370,12 @@ class PanelClient:
                 if still_missing:
                     raise
 
-    async def add_subscriptions(self, *, user_id: int, gb: int, qty: int, preferred_name: str | None = None) -> list[PanelClientPayload]:
+    async def add_subscriptions(self, *, user_id: int, gb: int, qty: int, preferred_name: str | None = None, expiry_ms: int = 0) -> list[PanelClientPayload]:
         settings = await self._settings()
         if settings.inbound_id <= 0:
             raise RuntimeError("panel_inbound_id is not configured.")
         total_bytes = gb_to_bytes(gb)
+        expiry_value = int(expiry_ms) if expiry_ms and int(expiry_ms) > 0 else 0
         async with self._mutation_semaphore:
             # Collect existing names uncached *inside* the mutation lock so two
             # concurrent purchases can never observe the same stale snapshot and
@@ -396,7 +397,7 @@ class PanelClient:
                         "email": email_value,
                         "limitIp": 0,
                         "totalGB": total_bytes,
-                        "expiryTime": 0,
+                        "expiryTime": expiry_value,
                         "enable": True,
                         "tgId": str(user_id),
                         "subId": sub_id,
@@ -604,3 +605,38 @@ class PanelClient:
             re.DOTALL,
         )
         return html.unescape(match.group(1)).strip() if match else ""
+
+    async def fetch_config_uris(self, sub_link: str) -> list[str]:
+        """Return the raw config URIs (vless://, vmess://, trojan://, ...) for a
+        subscription, by reading the sub endpoint as a normal client would.
+
+        Used for the infinite (fair-usage) package, where we deliver the actual
+        config links instead of the subscription URL — so the buyer cannot derive
+        the sub link from what they receive.
+        """
+        import base64
+
+        response = await self._request_with_retries(
+            "GET",
+            sub_link,
+            operation="fetch_config_uris",
+            headers={"User-Agent": "v2rayNG/1.8.18", "Accept": "*/*"},
+        )
+        response.raise_for_status()
+        text = (await asyncio.to_thread(lambda: response.text or "")).strip()
+
+        def _lines(blob: str) -> list[str]:
+            return [ln.strip() for ln in blob.splitlines() if "://" in ln]
+
+        # 3x-ui returns a base64 blob for client User-Agents.
+        try:
+            decoded = base64.b64decode(text + "=" * (-len(text) % 4)).decode("utf-8", "ignore")
+            if "://" in decoded:
+                return _lines(decoded)
+        except Exception:
+            pass
+        if "://" in text:
+            return _lines(text)
+        # HTML fallback (older panels with a textarea).
+        match = re.search(r'<textarea id="subscription-links"[^>]*>(.*?)</textarea>', text, re.DOTALL)
+        return _lines(html.unescape(match.group(1))) if match else []

@@ -55,6 +55,7 @@ export function Settings() {
 
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [cards, setCards] = React.useState<{ number: string; name: string }[]>([]);
+  const [inf, setInf] = React.useState({ enabled: false, cap_gb: "100", duration_days: "30", price: "0" });
   const inited = React.useRef(false);
   React.useEffect(() => {
     if (data && !inited.current) {
@@ -67,6 +68,12 @@ export function Settings() {
       } catch {
         setCards([]);
       }
+      setInf({
+        enabled: (items.infinite_enabled ?? "0") === "1",
+        cap_gb: items.infinite_cap_gb ?? "100",
+        duration_days: items.infinite_duration_days ?? "30",
+        price: items.infinite_price ?? "0",
+      });
       inited.current = true;
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -78,6 +85,16 @@ export function Settings() {
 
   const save = useMutation({
     mutationFn: () => api.updateSettings(form),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const saveInf = useMutation({
+    mutationFn: () =>
+      api.setInfinite({
+        enabled: inf.enabled,
+        cap_gb: Number(inf.cap_gb) || 0,
+        duration_days: Number(inf.duration_days) || 0,
+        price: Number(inf.price) || 0,
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
   const toggle = useMutation({
@@ -191,6 +208,47 @@ export function Settings() {
             </Button>
             <Button size="sm" disabled={saveCards.isPending} onClick={() => saveCards.mutate()}>
               {saveCards.isPending ? "در حال ذخیره…" : saveCards.isSuccess ? "ذخیره شد ✓" : "ذخیره کارت‌ها"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>بسته‌ی بی‌نهایت (مصرف منصفانه)</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            بسته‌ای با حجم بالا و قیمت سفارشی. وقتی مصرف کاربر به سقف منصفانه برسد، کانفیگ به‌صورت خودکار و بدون اخطار در پنل غیرفعال می‌شود و در «اشتراک‌های من» با وضعیت غیرفعال نمایش داده می‌شود. هنگام خرید، فقط لینک کانفیگ‌ها برای کاربر ارسال می‌شود (نه لینک اشتراک).
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] p-4">
+            <div className="flex items-center gap-3">
+              <span className="font-bold text-white">وضعیت بسته</span>
+              <Badge variant={inf.enabled ? "success" : "danger"}>{inf.enabled ? "فعال" : "غیرفعال"}</Badge>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: true }))}>
+                <LockOpen className="h-4 w-4" /> فعال
+              </Button>
+              <Button size="sm" variant="destructive" disabled={!inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: false }))}>
+                <Lock className="h-4 w-4" /> غیرفعال
+              </Button>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="سقف مصرف منصفانه (گیگ)" hint="بعد از این حجم، کانفیگ غیرفعال می‌شود">
+              <Input value={inf.cap_gb} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, cap_gb: e.target.value }))} />
+            </Field>
+            <Field label="مدت اعتبار (روز)">
+              <Input value={inf.duration_days} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, duration_days: e.target.value }))} />
+            </Field>
+            <Field label="قیمت سفارشی (تومان)">
+              <Input value={inf.price} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, price: e.target.value }))} />
+            </Field>
+          </div>
+          <div className="flex justify-end">
+            <Button size="sm" disabled={saveInf.isPending} onClick={() => saveInf.mutate()}>
+              {saveInf.isPending ? "در حال ذخیره…" : saveInf.isSuccess ? "ذخیره شد ✓" : "ذخیره بسته‌ی بی‌نهایت"}
             </Button>
           </div>
         </CardContent>
