@@ -112,11 +112,21 @@ class PanelClient:
             payload = await self._json(response, "login")
             if payload.get("success") is not True:
                 raise RuntimeError(f"3x-ui login failed: {payload.get('msg', 'unknown')}")
-            cookie = self._client.cookies.get("3x-ui") or response.cookies.get("3x-ui") or ""
-            if not cookie:
-                raise RuntimeError("3x-ui login succeeded but no 3x-ui cookie was returned.")
-            await self.db.update_panel_cookie(cookie, int(now_ms() / 1000))
-            self._client.cookies.set("3x-ui", cookie)
+            # Different 3x-ui builds name the session cookie "3x-ui" or "session".
+            # httpx already stored whatever Set-Cookie the panel returned, so the
+            # current process is authenticated regardless; we only persist a known
+            # name so it can survive a restart. If neither is found we don't fail —
+            # a later 401 just triggers a fresh forced login.
+            cookie = (
+                self._client.cookies.get("3x-ui")
+                or self._client.cookies.get("session")
+                or response.cookies.get("3x-ui")
+                or response.cookies.get("session")
+                or ""
+            )
+            if cookie:
+                await self.db.update_panel_cookie(cookie, int(now_ms() / 1000))
+                self._client.cookies.set("3x-ui", cookie)
             return cookie
 
     async def request(
