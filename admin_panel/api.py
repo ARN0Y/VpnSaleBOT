@@ -549,3 +549,14 @@ async def set_sales(request: Request):
         total_count=len(targets),
     )
     return {"ok": True, "changed": True, "status": new_status, "audience": audience}
+
+
+@router.post("/ui-mode")
+async def set_ui_mode(request: Request):
+    """Switch the panel UI between the modern SPA and the classic Jinja panel.
+    Applies instantly (the /admin entry point reads this on each request — no
+    restart needed)."""
+    body = await _json_body(request)
+    mode = "classic" if str(body.get("mode")) == "classic" else "modern"
+    await db(request).admin_update_settings({"ui_mode": mode})
+    return {"ok": True, "mode": mode}

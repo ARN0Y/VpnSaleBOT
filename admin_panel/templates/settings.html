@@ -1,6 +1,31 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="section-panel mb-6 p-6">
+  <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div>
+      <p class="eyebrow">Panel UI</p>
+      <h2 class="mt-2 text-xl font-black text-white">حالت نمایش پنل</h2>
+      <p class="mt-2 text-sm leading-7 text-slate-400">
+        داشبورد مدرن (React) یا پنل کلاسیک. تغییر بلافاصله اعمال می‌شود و نیازی به ری‌استارت نیست.
+        حالت فعلی: <b class="text-white">{% if ui_mode == 'classic' %}کلاسیک{% else %}مدرن{% endif %}</b>
+      </p>
+    </div>
+    <div class="grid min-w-[18rem] gap-2 sm:grid-cols-2">
+      <form method="post" action="/admin/settings/ui-mode" class="m-0" hx-boost="false">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="ui_mode" value="modern">
+        <button class="btn-primary w-full py-3">رفتن به داشبورد مدرن</button>
+      </form>
+      <form method="post" action="/admin/settings/ui-mode" class="m-0" hx-boost="false">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="ui_mode" value="classic">
+        <button class="btn-soft w-full py-3 {% if ui_mode == 'classic' %}pointer-events-none opacity-50{% endif %}">ماندن در پنل کلاسیک</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="section-panel mb-6 p-6">
   <div class="max-w-3xl">
     <p class="eyebrow">Sales Control</p>
     <h2 class="mt-2 text-2xl font-black text-white">کنترل باز یا بسته بودن فروش</h2>

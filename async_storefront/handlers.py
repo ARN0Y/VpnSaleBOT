@@ -64,9 +64,17 @@ WELCOME_TEXT = (
     "⚡️ سرعت بالا و اتصال بی‌وقفه\n"
     "🛡 امنیت کامل و حفظ حریم خصوصی\n"
     "🎯 تحویل آنی سرویس و پشتیبانی واقعی\n\n"
-    "🛟 آیدی پشتیبانی: @elsaVPN\n\n"
+    "🛟 آیدی پشتیبانی: {support}\n\n"
     "برای شروع، یکی از گزینه‌های زیر را انتخاب کنید 👇"
 )
+
+
+async def render_welcome(db: AsyncDatabase) -> str:
+    """Welcome text with the support id injected from settings (single source
+    of truth — keeps the welcome's support handle in sync with the support
+    section and the admin-configured value)."""
+    support = (await db.get_setting("support_id", "") or "").strip()
+    return WELCOME_TEXT.replace("{support}", html.escape(support) if support else "—")
 
 BAN_TEXT = (
     "⛔️ <b>دسترسی شما به ربات محدود شده است.</b>\n\n"
@@ -514,6 +522,8 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     old_home_id = context.user_data.get(HOME_MESSAGE_KEY)
     old_flow_id = context.user_data.get(FLOW_PROMPT_KEY)
     clear_flow_state(context)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    welcome = await render_welcome(db)
     if update.callback_query:
         keyboard = await menu_for_user(update, context)
         query = update.callback_query
@@ -521,7 +531,7 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         msg = query.message
         if msg and not msg.photo and not msg.document and not msg.video and not msg.audio:
             try:
-                await query.edit_message_text(WELCOME_TEXT, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                await query.edit_message_text(welcome, reply_markup=keyboard, parse_mode=ParseMode.HTML)
                 new_id = msg.message_id
                 context.user_data[HOME_MESSAGE_KEY] = new_id
                 if old_home_id and old_home_id != new_id:
@@ -536,17 +546,16 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await retire_clicked_keyboard(update, context)
         await remove_keyboard(context, chat_id, old_home_id)
         await remove_keyboard(context, chat_id, old_flow_id)
-        message = await send_chat_message(update, context, WELCOME_TEXT, keyboard)
+        message = await send_chat_message(update, context, welcome, keyboard)
         context.user_data[HOME_MESSAGE_KEY] = message.message_id
         return
     # Text-triggered: send reply keyboard (persists at bottom of chat)
     await remove_keyboard(context, chat_id, old_home_id)
     await remove_keyboard(context, chat_id, old_flow_id)
-    db: AsyncDatabase = context.application.bot_data["db"]
     reply_kb = await _build_reply_keyboard(update.effective_user.id, db)
     message = await context.bot.send_message(
         chat_id=chat_id,
-        text=WELCOME_TEXT,
+        text=welcome,
         reply_markup=reply_kb,
         parse_mode=ParseMode.HTML,
     )
