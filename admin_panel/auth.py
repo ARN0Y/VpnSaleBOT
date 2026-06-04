@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
-COOKIE_NAME = "tresco_admin_session"
+COOKIE_NAME = "elsavpn_admin_session"
 CSRF_HEADER = "x-csrf-token"
 
 

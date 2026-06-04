@@ -113,10 +113,10 @@ def _mount_spa(app: FastAPI) -> None:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Tresco Network Admin", docs_url=None, redoc_url=None, lifespan=lifespan)
+    app = FastAPI(title="ElsaVPN Admin", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     install_auth(app, AuthConfig.from_env())
-    app.state.db_path = Path(os.getenv("BOT_DB_PATH", "botok_sandbox.db")).resolve()
+    app.state.db_path = Path(os.getenv("BOT_DB_PATH", "elsavpn.db")).resolve()
     app.state.bot_token = os.getenv("BOT_TOKEN", "").strip()
     app.state.proxy_url = os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")).strip()
     app.state.panel_timeout_seconds = _float_env("ADMIN_PANEL_TIMEOUT_SECONDS", 45.0)

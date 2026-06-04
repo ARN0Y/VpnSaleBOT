@@ -27,6 +27,7 @@ logs/
 admin_ui/node_modules/
 node_modules/
 *.local
+*.tsbuildinfo
 
 # ── knowledge graph (regenerable, large) ──
 graphify-out/

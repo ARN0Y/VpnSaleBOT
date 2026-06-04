@@ -45,25 +45,27 @@ FLOW_PROMPT_KEY = "_flow_prompt_message_id"
 HOME_MESSAGE_KEY = "_home_message_id"
 FLOW_STATE_KEYS = {"checkout", "topup", "agent_request", "renewal", FLOW_PROMPT_KEY}
 
-BTN_BUY = "🚀 خرید سرویس"
-BTN_RENEW = "🔁 تمدید"
-BTN_SUBS = "📋 اشتراک‌های من"
-BTN_ACCOUNT = "💰 حساب من"
-BTN_WALLET = "💳 کیف پول"
-BTN_TARIFFS = "💡 تعرفه‌ها"
-BTN_SUPPORT = "👨‍💻 پشتیبانی"
-BTN_TEST_CONFIG = "🧪 کانفیگ تست"
-BTN_AGENT_REQ = "🤝 نمایندگی"
+BTN_BUY = "❄️ خرید سرویس پرسرعت"
+BTN_RENEW = "🧊 تمدید سرویس"
+BTN_SUBS = "🔹 سرویس‌های من"
+BTN_ACCOUNT = "🪪 حساب کاربری"
+BTN_WALLET = "💎 کیف پول من"
+BTN_TARIFFS = "🏷 تعرفه‌ها"
+BTN_SUPPORT = "🛟 تماس با پشتیبانی"
+BTN_TEST_CONFIG = "🆓 دریافت تست رایگان"
+BTN_AGENT_REQ = "🤝 زیرمجموعه‌گیری"
 
 _ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ})
 _nav_filter = filters.Text(list(_ALL_NAV_BTNS))
 
 WELCOME_TEXT = (
-    "✨ <b>به تسکو نتورک خوش آمدید</b>\n\n"
-    "🚀 سرویس‌های پرسرعت با اتصال پایدار\n"
-    "🛡 ویژه کاربران و همکاران خوب ما\n"
-    "💯 کیفیت حرفه‌ای، پشتیبانی دقیق، تحویل فوری\n\n"
-    "از منوی زیر گزینه موردنظرتان را انتخاب کنید:"
+    "❄️ <b>به ElsaVPN خوش آمدید</b>\n"
+    "<i>اینترنت آزاد، پایدار و پرسرعت — هر لحظه، همه‌جا.</i>\n\n"
+    "⚡️ سرعت بالا و اتصال بی‌وقفه\n"
+    "🛡 امنیت کامل و حفظ حریم خصوصی\n"
+    "🎯 تحویل آنی سرویس و پشتیبانی واقعی\n\n"
+    "🛟 آیدی پشتیبانی: @elsaVPN\n\n"
+    "برای شروع، یکی از گزینه‌های زیر را انتخاب کنید 👇"
 )
 
 BAN_TEXT = (
@@ -146,13 +148,15 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
     rows = [
-        [InlineKeyboardButton("🚀 خرید سرویس", callback_data="menu:buy")],
-        [InlineKeyboardButton("🔁 تمدید اشتراک", callback_data="menu:renew")],
-        [InlineKeyboardButton("💡 تعرفه سرویس‌ها", callback_data="menu:tariffs")],
-        [InlineKeyboardButton("📋 اشتراک‌های من", callback_data="menu:subs")],
-        [InlineKeyboardButton("💰 حساب من", callback_data="menu:account")],
-        [InlineKeyboardButton("💳 کیف پول", callback_data="menu:wallet")],
-        [InlineKeyboardButton("👨🏻‍💻 تماس با پشتیبانی", callback_data="menu:support")],
+        [InlineKeyboardButton("❄️ خرید سرویس پرسرعت", callback_data="menu:buy")],
+        [
+            InlineKeyboardButton("🔹 سرویس‌های من", callback_data="menu:subs"),
+            InlineKeyboardButton("🧊 تمدید سرویس", callback_data="menu:renew"),
+        ],
+        [
+            InlineKeyboardButton("💎 کیف پول من", callback_data="menu:wallet"),
+            InlineKeyboardButton("🪪 حساب کاربری", callback_data="menu:account"),
+        ],
     ]
     if agent and not int(agent["disabled"] or 0):
         try:
@@ -160,9 +164,22 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
         except Exception:
             permissions = {"buy", "test"}
         if "test" in permissions:
-            rows.insert(2, [InlineKeyboardButton("🧪 کانفیگ تست", callback_data="menu:test_config")])
-    if not agent:
-        rows.append([InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu:agent_request")])
+            rows.append(
+                [
+                    InlineKeyboardButton("🆓 دریافت تست رایگان", callback_data="menu:test_config"),
+                    InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
+                ]
+            )
+        else:
+            rows.append([InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs")])
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton("🤝 زیرمجموعه‌گیری", callback_data="menu:agent_request"),
+                InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
+            ]
+        )
+    rows.append([InlineKeyboardButton("🛟 تماس با پشتیبانی", callback_data="menu:support")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -322,17 +339,20 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False) -> ReplyKeyboardMarkup:
+    # Hero "buy" button on top (full width), then balanced icy pairs below.
     rows = [
-        [KeyboardButton(BTN_BUY), KeyboardButton(BTN_RENEW)],
-        [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_ACCOUNT)],
-        [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_TARIFFS)],
+        [KeyboardButton(BTN_BUY)],
+        [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_RENEW)],
+        [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_ACCOUNT)],
     ]
-    row_last = [KeyboardButton(BTN_SUPPORT)]
+    fourth = []
     if is_agent and has_test:
-        row_last.insert(0, KeyboardButton(BTN_TEST_CONFIG))
+        fourth.append(KeyboardButton(BTN_TEST_CONFIG))
     if not is_agent:
-        row_last.append(KeyboardButton(BTN_AGENT_REQ))
-    rows.append(row_last)
+        fourth.append(KeyboardButton(BTN_AGENT_REQ))
+    fourth.append(KeyboardButton(BTN_TARIFFS))
+    rows.append(fourth)
+    rows.append([KeyboardButton(BTN_SUPPORT)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -901,16 +921,18 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
         return ConversationHandler.END
 
-    await edit_text(query, "✅ <b>سرویس ساخته شد.</b>\n\nلینک و QR Code در پیام بعدی ارسال می‌شود.")
+    await edit_text(query, "❄️ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
     for idx, sub_link in enumerate(links):
         safe_link = html.escape(sub_link)
         caption = (
-            "✅ <b>پرداخت با موفقیت انجام شد!</b>\n\n"
-            f"📊 حجم هر اشتراک: {gb} گیگ × {qty} عدد\n"
-            f"💰 مبلغ ثبت‌شده: {total:,} تومان\n"
-            f"🟢 روش ثبت: {html.escape(method_label)}\n\n"
-            "🔗 لینک اشتراک شما:\n"
-            f"<code>{safe_link}</code>"
+            "✅ <b>پرداخت با موفقیت انجام شد!</b>\n"
+            "<i>از خرید شما سپاسگزاریم 🌟</i>\n\n"
+            f"📦 حجم هر اشتراک: <b>{gb}</b> گیگ × <b>{qty}</b> عدد\n"
+            f"💰 مبلغ پرداختی: <b>{total:,}</b> تومان\n"
+            f"💳 روش پرداخت: {html.escape(method_label)}\n\n"
+            "🔗 <b>لینک اشتراک شما:</b>\n"
+            f"<code>{safe_link}</code>\n\n"
+            "برای اتصال، لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
         )
         is_last = idx == len(links) - 1
         png = await qr.png(sub_link)
@@ -1415,7 +1437,14 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.callback_query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
     unit_price = await effective_unit_price(db, update.effective_user.id)
-    await new_flow_card(update, context, f"💡 <b>تعرفه سرویس‌ها</b>\n\nتعرفه فعلی هر گیگابایت برای شما: <b>{unit_price:,}</b> تومان", back_keyboard())
+    await new_flow_card(
+        update,
+        context,
+        "🏷 <b>تعرفه سرویس‌ها</b>\n\n"
+        f"💎 قیمت هر گیگابایت برای شما: <b>{unit_price:,}</b> تومان\n\n"
+        "<i>پرداخت بر اساس حجم مصرفی — بدون محدودیت زمانی.</i>",
+        back_keyboard(),
+    )
 
 
 async def support_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1424,7 +1453,14 @@ async def support_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.callback_query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
     support_id = await db.get_setting("support_id", "@Admin")
-    await new_flow_card(update, context, f"👨🏻‍💻 برای ارتباط با پشتیبانی به آیدی {html.escape(support_id)} پیام دهید.", back_keyboard())
+    await new_flow_card(
+        update,
+        context,
+        "🛟 <b>پشتیبانی ElsaVPN</b>\n\n"
+        f"برای ارتباط مستقیم با تیم پشتیبانی به آیدی زیر پیام دهید:\n👈 {html.escape(support_id)}\n\n"
+        "<i>پاسخگوی شما هستیم — سریع و دقیق.</i>",
+        back_keyboard(),
+    )
 
 
 async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -142,7 +142,7 @@ def backup_values_from_form(form) -> dict[str, str]:
         "backup_interval_days": str(interval_value),
         "backup_xui_timeout_seconds": str(xui_timeout_seconds),
         "backup_send_to_telegram": "1",
-        "backup_telegram_chat_id": str(form.get("backup_telegram_chat_id", "-1003940678338") or "-1003940678338").strip(),
+        "backup_telegram_chat_id": str(form.get("backup_telegram_chat_id", "") or "").strip(),
     }
 
 
@@ -226,7 +226,7 @@ async def settings_index(request: Request):
         "xui_timeout_seconds": all_settings.get("backup_xui_timeout_seconds", str(DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS)),
         "include_bot": all_settings.get("backup_include_bot", "1"),
         "include_xui": all_settings.get("backup_include_xui", "1"),
-        "telegram_chat_id": all_settings.get("backup_telegram_chat_id", "-1003940678338"),
+        "telegram_chat_id": all_settings.get("backup_telegram_chat_id", ""),
         "last_run_ts": all_settings.get("backup_last_run_ts", "0"),
         "last_status": all_settings.get("backup_last_status", "never"),
         "last_file": all_settings.get("backup_last_file", ""),

@@ -1,6 +1,8 @@
+// Single source of truth for brand identity. The two deployments differ only
+// in this file — everything else (API, components, theme) is shared.
 export const BRAND = {
-  name: "تسکو نتورک",
-  emoji: "🛰",
-  tagline: "اینترنت پرسرعت و پایدار",
-  console: "Tresco Network Console",
+  name: "ElsaVPN",
+  emoji: "❄️",
+  tagline: "اینترنت آزاد، پایدار و پرسرعت",
+  console: "ElsaVPN Console",
 } as const;

@@ -1,49 +1,95 @@
-# VpnSaleBOT
+# ❄️ ElsaVPN Bot
 
-ربات فروش VPN روی تلگرام + پنل وب مدیریت (FastAPI) + داشبورد مدرن React/shadcn.
-اتصال مستقیم به پنل **3x-ui (xray)**؛ فروش بر اساس حجم، کیف پول، کارت‌به‌کارت و تتر،
-سیستم نمایندگی، کانفیگ تست، ساخت کانفیگِ ضد-تکرار، و کنترل جداگانه‌ی فروش
-برای کاربر/نماینده.
+ربات فروش VPN روی تلگرام به‌همراه پنل وب مدیریت.
+فروش بر اساس حجم (گیگ)، کیف پول، پرداخت کارت‌به‌کارت و تتر، سیستم نمایندگی،
+کانفیگ تست، و اتصال مستقیم به پنل **3x-ui (xray)**.
 
-## برنچ‌ها (دو برند، یک کدبیس)
-- **`main`** → برند «تسکو نتورک».
-- **`elsa`** → برند «ElsaVPN».
-تفاوت دو برنچ فقط چند فایلِ برندینگ است (`brand.ts`، متن‌های ربات، عنوان پنل، پیش‌فرض‌ها).
-بهبودهای کدِ مشترک را روی `main` بزنید و با `git merge main` به `elsa` منتقل کنید.
+---
 
-## ساختار
-```
-async_storefront/   ربات تلگرام (python-telegram-bot)
-admin_panel/        پنل وب FastAPI + API جیسون (/admin/api/v1) + پنل کلاسیک Jinja
-admin_ui/           داشبورد React + Vite + shadcn/Radix (خروجی build در admin_ui/dist)
-requirements-async.txt
-.env.example        نمونه‌ی پیکربندی (فایل واقعی .env هرگز commit نمی‌شود)
-```
+## پیش‌نیازها
+- Python 3.11+
+- یک پنل 3x-ui فعال و در دسترس
+- یک توکن ربات از [@BotFather](https://t.me/BotFather)
 
-## راه‌اندازی
+## نصب
+
 ```bash
-python -m venv .venv && source .venv/bin/activate   # ویندوز: .venv\Scripts\activate
+# ۱) ساخت محیط مجازی و نصب وابستگی‌ها
+python -m venv .venv
+source .venv/bin/activate        # ویندوز: .venv\Scripts\activate
 pip install -r requirements-async.txt
-cp .env.example .env      # مقادیر را پر کنید
-python -m async_storefront.app     # ربات
-python -m admin_panel.main         # پنل وب  →  http://<ip>:8080/admin  و داشبورد جدید: /admin/app
+
+# ۲) ساخت فایل تنظیمات و پر کردن مقادیر
+cp .env.example .env
+nano .env                        # مقادیر <...> را با اطلاعات واقعی پر کنید
 ```
 
-> دیتابیس در اولین اجرا خودکار ساخته می‌شود. `.env` و `*.db` و `backup/` در `.gitignore`
-> هستند و هرگز در مخزن قرار نمی‌گیرند.
+> دیتابیس به‌صورت خودکار در اولین اجرا ساخته می‌شود (نیازی به دیتابیس قبلی نیست — این یک نصب تازه است).
 
-## داشبورد جدید (admin_ui)
-خروجی build شده (`admin_ui/dist/`) داخل مخزن هست تا سرور **بدون نیاز به Node** فقط با
-`git pull` به‌روز شود. برای تغییر فرانت‌اند، روی یک ماشین دارای Node:
+## اجرا
+
+دو سرویس مستقل دارد که هرکدام را در یک پراسس جدا اجرا کنید:
+
 ```bash
-cd admin_ui && npm install && npm run build
+# ربات تلگرام
+python -m async_storefront.app
+
+# پنل وب مدیریت (روی ADMIN_HOST:ADMIN_PORT از فایل .env)
+python -m admin_panel.main
+```
+
+پنل مدیریت روی `http://<آی‌پی-سرور>:8080/admin` در دسترس است و با
+`ADMIN_PANEL_USERNAME` / `ADMIN_PANEL_PASSWORD` وارد می‌شوید.
+
+## اجرای دائمی با systemd (نمونه)
+
+```ini
+# /etc/systemd/system/elsavpn-bot.service
+[Unit]
+Description=ElsaVPN Telegram Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/root/ElsaVPN_Bot
+ExecStart=/root/ElsaVPN_Bot/.venv/bin/python -m async_storefront.app
+Restart=always
+EnvironmentFile=/root/ElsaVPN_Bot/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/elsavpn-admin.service
+[Unit]
+Description=ElsaVPN Admin Panel
+After=network.target
+
+[Service]
+WorkingDirectory=/root/ElsaVPN_Bot
+ExecStart=/root/ElsaVPN_Bot/.venv/bin/python -m admin_panel.main
+Restart=always
+EnvironmentFile=/root/ElsaVPN_Bot/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now elsavpn-bot elsavpn-admin
 ```
 
 ## امکانات کلیدی
-- 🛒 خرید/تمدید بر اساس حجم با تحویل آنی لینک + QR
-- 💳 کیف پول، کارت‌به‌کارت و تتر
-- 🤝 نمایندگی (اعتباری/کیف‌پولی) + کانفیگ تست
-- 🔐 ساخت کانفیگ **idempotent** (بدون هم‌نام شدن / خطای user already exists)
-- 🔀 کنترل جداگانه‌ی باز/بسته بودن فروش برای کاربر و نماینده
-- 📊 داشبورد مدرن: کاربران، سفارش‌ها، کانفیگ‌ها، شارژها، نمایندگی، پیام همگانی، رویدادها، تنظیمات
-- 🗄 بکاپ خودکار دیتابیس ربات و x-ui
+- 🛒 خرید/تمدید سرویس بر اساس حجم با تحویل آنی لینک + QR
+- 💎 کیف پول، کارت‌به‌کارت و تتر
+- 🤝 سیستم نمایندگی با اعتبار باز یا کیف‌پولی + کانفیگ تست
+- 🔐 ساخت کانفیگ **ضد-تکرار**: هیچ‌گاه دو کانفیگ هم‌نام ساخته نمی‌شود و خطای
+  `user already exists` پنل به‌صورت idempotent مدیریت می‌شود.
+- 🔀 کنترل **جداگانه‌ی باز/بسته بودن فروش** برای کاربران عادی و نماینده‌ها
+- 🗄 بکاپ خودکار دیتابیس ربات و x-ui با ارسال به تلگرام
+
+## تنظیمات قابل تغییر از پنل وب
+قیمت، حداقل خرید، اطلاعات پرداخت، آیدی پشتیبانی، اتصال پنل 3x-ui،
+وضعیت فروش (عادی/نماینده)، و زمان‌بندی بکاپ — همه از مسیر
+`/admin/settings` بدون نیاز به تغییر کد قابل مدیریت‌اند.

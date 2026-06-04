@@ -72,7 +72,7 @@ def render(request: Request, template: str, context: dict[str, Any]):
         "gb": gb_from_bytes,
         "date": jalaliish,
         "path": request.url.path,
-        "db_name": getattr(db_path, "name", "botok_sandbox.db"),
+        "db_name": getattr(db_path, "name", "elsavpn.db"),
         "csrf_token": csrf_token(request),
         "admin_username": current_admin_username(request),
     }

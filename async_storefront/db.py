@@ -637,7 +637,7 @@ class AsyncDatabase:
             "backup_last_file": "",
             "backup_last_error": "",
             "backup_send_to_telegram": "1",
-            "backup_telegram_chat_id": "-1003940678338",
+            "backup_telegram_chat_id": "",
             "backup_defaults_v2_applied": "0",
             "admin_user_ids": "",
             "default_agent_credit_limit_toman": "0",
@@ -666,7 +666,7 @@ class AsyncDatabase:
                     "backup_include_xui": "1",
                     "backup_xui_timeout_seconds": "180",
                     "backup_send_to_telegram": "1",
-                    "backup_telegram_chat_id": "-1003940678338",
+                    "backup_telegram_chat_id": "",
                     "backup_defaults_v2_applied": "1",
                 }.items(),
             )

@@ -24,14 +24,14 @@ class Settings:
         base_dir = Path(os.getenv("BOT_BASE_DIR", ".")).resolve()
         token = os.getenv("BOT_TOKEN", "").strip()
         if not token:
-            raise RuntimeError("BOT_TOKEN must be provided via environment for the sandbox bot.")
+            raise RuntimeError("BOT_TOKEN must be provided via environment (.env) before starting the bot.")
 
         proxy = os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")).strip()
         return cls(
             bot_token=token,
-            admin_id=int(os.getenv("ADMIN_ID", "6089986728") or "6089986728"),
+            admin_id=int(os.getenv("ADMIN_ID", "0") or "0"),
             bot_username=os.getenv("BOT_USERNAME", "").strip(),
-            db_path=Path(os.getenv("BOT_DB_PATH", str(base_dir / "botok.db"))).resolve(),
+            db_path=Path(os.getenv("BOT_DB_PATH", str(base_dir / "elsavpn.db"))).resolve(),
             backup_dir=Path(os.getenv("BOT_BACKUP_DIR", str(base_dir / "backup"))).resolve(),
             logs_dir=Path(os.getenv("BOT_LOGS_DIR", str(base_dir / "logs"))).resolve(),
             proxy_url=proxy,

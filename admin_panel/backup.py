@@ -63,7 +63,7 @@ def _tehran_now_label() -> str:
 async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> None:
     db: AsyncDatabase = app.state.db
     token = str(getattr(app.state, "bot_token", "") or "").strip()
-    chat_id = str(await db.get_setting("backup_telegram_chat_id", "-1003940678338") or "-1003940678338").strip()
+    chat_id = str(await db.get_setting("backup_telegram_chat_id", "") or "").strip()
     if not token:
         raise RuntimeError("BOT_TOKEN is not configured; cannot send backup to Telegram")
     if not chat_id:
@@ -82,7 +82,7 @@ async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> 
     if result.xui_path:
         includes.append("دیتابیس x-ui")
     caption = (
-        f"🗄 <b>{source_label} تسکو نتورک</b>\n\n"
+        f"🗄 <b>{source_label} ElsaVPN</b>\n\n"
         f"⏱ زمان تهران: <b>{_tehran_now_label()}</b>\n"
         f"📦 محتوا: <b>{' + '.join(includes) or 'نامشخص'}</b>\n"
         f"🧾 وضعیت: <b>{status_label}</b>\n"
