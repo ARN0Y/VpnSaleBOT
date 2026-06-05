@@ -53,7 +53,7 @@ BTN_WALLET = "💎 کیف پول من"
 BTN_TARIFFS = "🏷 تعرفه‌ها"
 BTN_SUPPORT = "🛟 تماس با پشتیبانی"
 BTN_TEST_CONFIG = "🆓 دریافت تست رایگان"
-BTN_AGENT_REQ = "🤝 زیرمجموعه‌گیری"
+BTN_AGENT_REQ = "🤝 درخواست نمایندگی"
 BTN_INFINITE = "♾️ بسته‌ی بی‌نهایت"
 
 _ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ, BTN_INFINITE})
@@ -112,12 +112,16 @@ def max_custom_gb(min_gb: int) -> int:
     return max(DEFAULT_CUSTOM_MAX_GB, int(min_gb) * max(GB_BUTTON_FACTORS))
 
 
-def gb_choice_keyboard(prefix: str, cancel_data: str, min_gb: int = 1) -> InlineKeyboardMarkup:
+async def gb_choice_keyboard(db: AsyncDatabase, user_id: int, prefix: str, cancel_data: str, min_gb: int = 1) -> InlineKeyboardMarkup:
     minimum = _positive_int(min_gb, 1)
-    buttons = [
-        InlineKeyboardButton(f"{minimum * factor} گیگ", callback_data=f"{prefix}:gb:{minimum * factor}")
-        for factor in GB_BUTTON_FACTORS
-    ]
+    agent = await db.get_agent(user_id)
+    buttons = []
+    for factor in GB_BUTTON_FACTORS:
+        gb = minimum * factor
+        unit = await unit_price_for_gb(db, user_id, gb, agent)
+        buttons.append(
+            InlineKeyboardButton(f"{gb} گیگ • {gb * unit:,} ت", callback_data=f"{prefix}:gb:{gb}")
+        )
     return InlineKeyboardMarkup(
         [
             buttons[:2],
@@ -190,7 +194,7 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
     else:
         rows.append(
             [
-                InlineKeyboardButton("🤝 زیرمجموعه‌گیری", callback_data="menu:agent_request"),
+                InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu:agent_request"),
                 InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
             ]
         )
@@ -732,7 +736,7 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         update,
         context,
         gb_choice_prompt("🛒 <b>خرید سرویس جدید</b>  •  مرحله ۱ از ۴", min_gb),
-        gb_choice_keyboard("buy", "buy:cancel", min_gb),
+        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
     )
     return BUY_GB
 
@@ -745,7 +749,7 @@ async def buy_gb_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context,
         "📦 لطفاً حجم را از دکمه‌های همین کارت انتخاب کنید.\n\n"
         f"حداقل حجم مجاز: <b>{min_gb}</b> گیگ. برای وارد کردن عدد، گزینه <b>حجم دلخواه</b> را بزنید.",
-        gb_choice_keyboard("buy", "buy:cancel", min_gb),
+        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
     )
     return BUY_GB
 
@@ -757,7 +761,7 @@ async def buy_gb_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     min_gb = await minimum_purchase_gb(db)
     gb = int(query.data.rsplit(":", 1)[1])
     if gb < min_gb:
-        await edit_text(query, invalid_gb_text(min_gb), gb_choice_keyboard("buy", "buy:cancel", min_gb))
+        await edit_text(query, invalid_gb_text(min_gb), await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb))
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
         return BUY_GB
     context.user_data.setdefault("checkout", {})["gb"] = gb
@@ -865,7 +869,7 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             update,
             context,
             invalid_gb_text(min_gb),
-            gb_choice_keyboard("buy", "buy:cancel", min_gb),
+            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
         )
         return BUY_GB
     total = gb * qty * unit_price
@@ -954,7 +958,7 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await edit_text(
             query,
             invalid_gb_text(min_gb),
-            gb_choice_keyboard("buy", "buy:cancel", min_gb),
+            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
         )
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
         return BUY_GB
@@ -1033,7 +1037,7 @@ async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     text = (
         "♾️ <b>بسته‌ی بی‌نهایت (مصرف منصفانه)</b>\n\n"
-        f"🌊 حجم منصفانه: <b>{pkg['cap_gb']:,}</b> گیگابایت\n"
+        "🌊 ترافیک نامحدود با سیاست مصرف منصفانه\n"
         f"⏳ مدت اعتبار: <b>{pkg['duration_days']:,}</b> روز\n"
         f"💰 قیمت: <b>{pkg['price']:,}</b> تومان\n\n"
         "✅ پس از خرید، <b>لینک مستقیم کانفیگ</b> برایتان ارسال می‌شود.\n"
@@ -1232,13 +1236,27 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
         is_infinite = int(sub.get("is_infinite") or 0) == 1
+        if is_infinite:
+            # Fair-usage "infinite" config: never reveal the volume cap or the
+            # remaining traffic — only the type and on/off status.
+            sub_enabled = sub.get("panel_enabled")
+            total_b = int(sub.get("panel_total_bytes") or 0)
+            remain_b = int(sub.get("panel_remaining_bytes") or 0)
+            depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
+            status = "غیرفعال (سقف منصفانه)" if depleted else "فعال"
+            lines.append(
+                f"{idx}. <b>{name}</b> | ♾️ بی‌نهایت\n"
+                f"   🆔 <code>{sub_id}</code>\n"
+                f"   ♾️ بسته‌ی بی‌نهایت (مصرف منصفانه) | وضعیت: {status}"
+            )
+            if depleted:
+                lines.append("   ♾️ این کانفیگ به سقف مصرف منصفانه رسیده و غیرفعال شده است.")
+            continue
+
         if is_test:
             total_bytes = int(sub.get("panel_total_bytes") or 0)
             volume_label = f"{total_bytes / (1024 ** 2):.0f} MB"
             type_label = " | 🧪 تست"
-        elif is_infinite:
-            volume_label = f"{int(sub.get('gb') or 0)} گیگ"
-            type_label = " | ♾️ بی‌نهایت"
         else:
             volume_label = f"{int(sub.get('gb') or 0)} گیگ"
             type_label = ""
@@ -1250,15 +1268,6 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
 
         if is_test:
             lines.append(f"   🧪 نوع: تست | حجم واقعی: {volume_label} | اعتبار: ۱۰ دقیقه")
-        elif is_infinite:
-            sub_enabled = sub.get("panel_enabled")
-            total_b = int(sub.get("panel_total_bytes") or 0)
-            remain_b = int(sub.get("panel_remaining_bytes") or 0)
-            depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
-            if depleted:
-                lines.append("   ♾️ این کانفیگ به سقف مصرف منصفانه رسیده و غیرفعال شده است.")
-            else:
-                lines.append("   ♾️ بسته‌ی بی‌نهایت (مصرف منصفانه) — کانفیگ‌ها هنگام خرید برایتان ارسال شده‌اند.")
 
     nav: list[InlineKeyboardButton] = []
     if safe_page > 0:
@@ -1442,7 +1451,7 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         f"کانفیگ انتخابی: <b>{html.escape(name)}</b>\n"
         f"شناسه: <code>{html.escape(sub_id)}</code>\n\n"
         f"چه مقدار حجم اضافه شود؟\nحداقل حجم مجاز: <b>{min_gb}</b> گیگ",
-        gb_choice_keyboard("renew", "renew:cancel", min_gb),
+        await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb),
     )
     context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
     return RENEW_GB
@@ -1456,7 +1465,7 @@ async def renew_gb_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context,
         "📦 لطفاً حجم تمدید را از دکمه‌ها انتخاب کنید.\n\n"
         f"حداقل حجم مجاز: <b>{min_gb}</b> گیگ. برای عدد دلخواه، گزینه <b>حجم دلخواه</b> را بزنید.",
-        gb_choice_keyboard("renew", "renew:cancel", min_gb),
+        await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb),
     )
     return RENEW_GB
 
@@ -1474,7 +1483,7 @@ async def build_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE
             update,
             context,
             invalid_gb_text(min_gb, renewal=True),
-            gb_choice_keyboard("renew", "renew:cancel", min_gb),
+            await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb),
         )
         return RENEW_GB
     total = gb * unit_price
@@ -1506,7 +1515,7 @@ async def renew_gb_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     min_gb = await minimum_purchase_gb(db)
     gb = int(query.data.rsplit(":", 1)[1])
     if gb < min_gb:
-        await edit_text(query, invalid_gb_text(min_gb, renewal=True), gb_choice_keyboard("renew", "renew:cancel", min_gb))
+        await edit_text(query, invalid_gb_text(min_gb, renewal=True), await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb))
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
         return RENEW_GB
     context.user_data.setdefault("renewal", {})["gb"] = gb
@@ -1565,7 +1574,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await edit_text(
             query,
             invalid_gb_text(min_gb, renewal=True),
-            gb_choice_keyboard("renew", "renew:cancel", min_gb),
+            await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb),
         )
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
         return RENEW_GB
@@ -1626,16 +1635,25 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     tiers = await get_price_tiers(db)
     if agent_price <= 0 and tiers:
-        lines = ["🏷 <b>تعرفه سرویس‌ها</b>", "", "💎 قیمت هر گیگابایت بر اساس حجم خرید شما:", ""]
+        lines = [
+            "❄️ <b>تعرفه پلکانی سرویس‌ها</b>",
+            "هر چه بیشتر بخرید، هر گیگ ارزان‌تر! 📉",
+            "",
+            "┏━━━━━━━━━━━━━━━━━━",
+        ]
         for idx, tier in enumerate(tiers):
             nxt = tiers[idx + 1]["min_gb"] if idx + 1 < len(tiers) else None
             if nxt is not None:
-                rng = f"از {tier['min_gb']} تا {nxt - 1} گیگ"
+                rng = f"{tier['min_gb']} تا {nxt - 1} گیگ"
             else:
                 rng = f"{tier['min_gb']} گیگ به بالا"
-            lines.append(f"❄️ {rng}: هر گیگ <b>{tier['price_per_gb']:,}</b> تومان")
+            lines.append(f"┃ 📦 <b>{rng}</b>")
+            lines.append(f"┃     هر گیگ: <b>{tier['price_per_gb']:,}</b> تومان")
+            if idx < len(tiers) - 1:
+                lines.append("┃")
+        lines.append("┗━━━━━━━━━━━━━━━━━━")
         lines.append("")
-        lines.append("<i>هر چه حجم بیشتری بخرید، قیمت هر گیگ کمتر می‌شود. 📉</i>")
+        lines.append("💳 مبلغ نهایی = حجم انتخابی × قیمت همان پله")
         await new_flow_card(update, context, "\n".join(lines), back_keyboard())
         return
     unit_price = await effective_unit_price(db, update.effective_user.id, agent)
