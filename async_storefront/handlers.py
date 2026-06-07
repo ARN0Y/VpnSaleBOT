@@ -1764,14 +1764,38 @@ async def wallet_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def _topup_uses_tiered_pricing(db: AsyncDatabase, user_id: int) -> bool:
+    """True when volume tiers are active for this user (so a single per-GB
+    suggestion is meaningless and the top-up should ask for a free amount)."""
+    agent = await db.get_agent(user_id)
+    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    if agent_price > 0:
+        return False
+    return bool(await get_price_tiers(db))
+
+
 async def topup_start(update: Update, context: ContextTypes.DEFAULT_TYPE, method: str) -> int:
     await ensure_user(update, context)
     db: AsyncDatabase = context.application.bot_data["db"]
     unit_price = await effective_unit_price(db, update.effective_user.id)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
-    context.user_data["topup"] = {"method": method, "unit_price": unit_price}
+    tier_mode = await _topup_uses_tiered_pricing(db, update.effective_user.id)
+    context.user_data["topup"] = {"method": method, "unit_price": unit_price, "tier_mode": tier_mode}
     method_label = "کارت به کارت" if method == "card" else "رمزارز (تتر)"
+    if tier_mode:
+        # Tiered pricing → no fixed per-GB amount to suggest; ask for a free
+        # amount in Toman and let the user type it.
+        await new_flow_card(
+            update,
+            context,
+            f"💳 <b>شارژ کیف پول - {method_label}</b>\n\n"
+            "💰 مبلغ مورد نظر را به تومان وارد کنید.\n"
+            "<i>مثال: 200000 تومان</i>\n\n"
+            "فقط عدد ارسال کنید 👇",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="topup:cancel")]]),
+        )
+        return TOPUP_CUSTOM_AMOUNT
     await new_flow_card(
         update,
         context,
@@ -1839,6 +1863,17 @@ async def topup_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def topup_amount_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     data = context.user_data.get("topup") or {}
     method = str(data.get("method") or "card")
+    if data.get("tier_mode"):
+        # Tiered pricing → re-ask for a free amount instead of fixed suggestions.
+        await edit_flow_query(
+            update,
+            context,
+            "💰 مبلغ مورد نظر را به تومان وارد کنید.\n"
+            "<i>مثال: 200000 تومان</i>\n\n"
+            "فقط عدد ارسال کنید 👇",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="topup:cancel")]]),
+        )
+        return TOPUP_CUSTOM_AMOUNT
     unit_price = int(data.get("unit_price") or 0)
     if unit_price <= 0:
         unit_price = await effective_unit_price(context.application.bot_data["db"], update.effective_user.id)
@@ -2635,6 +2670,7 @@ def build_main_conversation() -> ConversationHandler:
         ],
         TOPUP_CUSTOM_AMOUNT: [
             MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(topup_cancel, pattern=r"^topup:cancel$"),
             MessageHandler(filters.TEXT & ~filters.COMMAND, topup_custom_amount),
         ],
         TOPUP_AMOUNT_CONFIRM: [
