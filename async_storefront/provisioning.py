@@ -112,7 +112,7 @@ class ProvisioningService:
                     UPDATE agents
                     SET credit_used_toman=credit_used_toman+?
                     WHERE user_id=?
-                      AND credit_used_toman + ? <= credit_limit_toman
+                      AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
                     """,
                     (int(final_total), int(user_id), int(final_total)),
                 )
@@ -252,7 +252,7 @@ class ProvisioningService:
                 credit_update = await conn.execute(
                     """
                     UPDATE agents SET credit_used_toman=credit_used_toman+?
-                    WHERE user_id=? AND credit_used_toman + ? <= credit_limit_toman
+                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
                     """,
                     (int(final_total), int(user_id), int(final_total)),
                 )
@@ -455,7 +455,7 @@ class ProvisioningService:
                     UPDATE agents
                     SET credit_used_toman=credit_used_toman+?
                     WHERE user_id=?
-                      AND credit_used_toman + ? <= credit_limit_toman
+                      AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
                     """,
                     (int(final_total), int(user_id), int(final_total)),
                 )
