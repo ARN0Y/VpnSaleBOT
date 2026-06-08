@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .util import resolve_proxy_url
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -26,7 +28,7 @@ class Settings:
         if not token:
             raise RuntimeError("BOT_TOKEN must be provided via environment for the sandbox bot.")
 
-        proxy = os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")).strip()
+        proxy = resolve_proxy_url()
         return cls(
             bot_token=token,
             admin_id=int(os.getenv("ADMIN_ID", "6089986728") or "6089986728"),
