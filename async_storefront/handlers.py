@@ -1165,12 +1165,19 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         access_level = "نماینده (دسترسی باز)"
         credit_limit = int(agent["credit_limit_toman"] or 0)
         credit_used = int(agent["credit_used_toman"] or 0)
-        credit_left = max(0, credit_limit - credit_used)
-        credit_lines = (
-            f"\n💳 سقف اعتبار: {credit_limit:,} تومان"
-            f"\n📉 اعتبار مصرف‌شده: {credit_used:,} تومان"
-            f"\n✅ اعتبار باقی‌مانده: {credit_left:,} تومان"
-        )
+        if credit_limit <= 0:
+            # سقف صفر = نامحدود (هم‌راستا با منطق خرید)
+            credit_lines = (
+                f"\n💳 سقف اعتبار: نامحدود"
+                f"\n📉 اعتبار مصرف‌شده: {credit_used:,} تومان"
+            )
+        else:
+            credit_left = max(0, credit_limit - credit_used)
+            credit_lines = (
+                f"\n💳 سقف اعتبار: {credit_limit:,} تومان"
+                f"\n📉 اعتبار مصرف‌شده: {credit_used:,} تومان"
+                f"\n✅ اعتبار باقی‌مانده: {credit_left:,} تومان"
+            )
     else:
         access_level = "نماینده (نیاز به پرداخت)"
         credit_limit = int(agent["credit_limit_toman"] or 0)
