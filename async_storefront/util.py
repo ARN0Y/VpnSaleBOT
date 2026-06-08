@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import string
@@ -8,6 +9,46 @@ from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 IRAN_TZ = ZoneInfo("Asia/Tehran")
+_TRUTHY = {"1", "true", "yes", "on", "y", "t"}
+_FALSY = {"0", "false", "no", "off", "n", "f"}
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean-ish environment variable.
+
+    Empty / unset falls back to ``default``. Unknown values also fall back so a
+    typo can never silently flip behaviour. Accepts 1/true/yes/on and 0/false/no/off.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value == "":
+        return default
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    return default
+
+
+def resolve_proxy_url() -> str:
+    """Decide the proxy URL the bot should use to reach Telegram.
+
+    Behaviour is controlled by two env vars:
+      * ``BOT_PROXY_URL`` (or legacy ``TELEGRAM_PROXY``) — the proxy address.
+      * ``BOT_USE_PROXY`` — explicit on/off switch.
+
+    When ``BOT_USE_PROXY`` is unset we stay backward compatible: the proxy is
+    used whenever a URL is configured. When it is set, it wins — so an operator
+    can keep the URL on file but turn the proxy off (or on) without deleting it.
+    """
+    url = os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")).strip()
+    raw = (os.getenv("BOT_USE_PROXY") or "").strip().lower()
+    # Unset/blank or an unrecognized value → auto: use the proxy iff a URL is set.
+    if raw not in _TRUTHY and raw not in _FALSY:
+        return url
+    return url if raw in _TRUTHY else ""
 SUB_ID_CHARSET = string.ascii_letters + string.digits
 SUB_ID_LENGTH = 16
 CLIENT_EMAIL_SUFFIX_BYTES = 3

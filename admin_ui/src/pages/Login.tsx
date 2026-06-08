@@ -27,10 +27,15 @@ export function Login() {
   }
 
   return (
-    <div className="grid min-h-screen place-items-center px-4">
-      <Card className="w-full max-w-md p-6">
+    <div className="relative grid min-h-screen place-items-center overflow-hidden px-4">
+      {/* ambient brand glow behind the card */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/2 h-[34rem] w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand/10 blur-[120px]"
+      />
+      <Card className="relative z-10 w-full max-w-md p-7 shadow-glow">
         <div className="mb-6 text-center">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-white/[0.04] text-foreground">
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-brand/25 bg-brand/10 text-brand shadow-brand-glow">
             <Hexagon className="h-8 w-8" />
           </div>
           <p className="text-[0.68rem] font-black uppercase tracking-wide text-muted-foreground">

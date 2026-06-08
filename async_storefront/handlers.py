@@ -879,6 +879,10 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else "کسر از کیف پول"
     )
     client_name = str(checkout.get("client_name") or "").strip()
+    # Stable idempotency token per built invoice: a double-tap on "confirm"
+    # (possible because updates run concurrently) reuses the same key so the
+    # purchase can never be charged/provisioned twice.
+    checkout["idem"] = f"buy-{update.effective_user.id}-{secrets.token_hex(8)}"
     checkout.update(unit_price=unit_price, total=total, method_label=method_label)
     await send_flow_prompt(
         update,
@@ -984,7 +988,7 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             unit_price=unit_price,
             final_total=total,
             client_name=client_name,
-            idempotency_key=query.id,
+            idempotency_key=str(checkout.get("idem") or query.id),
         )
     except ValueError as exc:
         clear_flow_state(context)
@@ -995,6 +999,11 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
     except Exception as exc:
+        if "duplicate purchase request" in str(exc):
+            # A concurrent double-tap on confirm: the first request is already
+            # being processed, so silently ignore this one (no second charge).
+            await _answer_query(query, "این خرید در حال پردازش است…")
+            return ConversationHandler.END
         LOG.exception("provisioning failed user_id=%s", update.effective_user.id)
         clear_flow_state(context)
         await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
@@ -1043,6 +1052,9 @@ async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "✅ پس از خرید، <b>لینک مستقیم کانفیگ</b> برایتان ارسال می‌شود.\n"
         "✅ امکان خرید چند بسته وجود دارد."
     )
+    # Fresh idempotency token per shown offer → a double-tap on buy cannot
+    # charge/provision the package twice.
+    context.user_data["infinite_idem"] = f"inf-{update.effective_user.id}-{secrets.token_hex(8)}"
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✅ خرید و دریافت کانفیگ", callback_data="infinite:buy")],
@@ -1064,7 +1076,10 @@ async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     qr: QRService = context.application.bot_data["qr"]
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت بسته‌ی بی‌نهایت...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        links = await provisioning.process_infinite_purchase(user_id=update.effective_user.id, idempotency_key=query.id)
+        links = await provisioning.process_infinite_purchase(
+            user_id=update.effective_user.id,
+            idempotency_key=str(context.user_data.get("infinite_idem") or query.id),
+        )
     except ValueError as exc:
         await edit_text(
             query,
@@ -1075,6 +1090,9 @@ async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
     except Exception as exc:
+        if "duplicate purchase request" in str(exc):
+            await _answer_query(query, "این خرید در حال پردازش است…")
+            return
         LOG.exception("infinite purchase failed user_id=%s", update.effective_user.id)
         await edit_text(query, f"❌ خطا در ساخت بسته:\n{html.escape(str(exc))}", back_keyboard())
         return
@@ -1178,7 +1196,7 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"👥 زیرمجموعه‌ها: {snapshot['referral_count']}\n"
         f"📦 کل حجم خریداری‌شده: {total_gb:,} گیگ\n"
         f"💰 کل هزینه ریالی: {snapshot['total_spent']:,} تومان\n"
-        f"🎂 موجودی کیف پول: {snapshot['wallet_balance']:,} تومان"
+        f"👛 موجودی کیف پول: {snapshot['wallet_balance']:,} تومان"
         f"{credit_lines}"
     )
     await new_flow_card(update, context, text, back_keyboard())
@@ -1492,6 +1510,7 @@ async def build_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE
         if agent and db.normalize_agent_access_value(agent["access_level"]) == "open"
         else "کسر از کیف پول"
     )
+    renewal["idem"] = f"renew-{update.effective_user.id}-{secrets.token_hex(8)}"
     renewal.update(unit_price=unit_price, total=total, method_label=method_label)
     await send_flow_prompt(
         update,
@@ -1597,7 +1616,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             gb=gb,
             unit_price=unit_price,
             final_total=total,
-            idempotency_key=query.id,
+            idempotency_key=str(renewal.get("idem") or query.id),
         )
     except ValueError as exc:
         clear_flow_state(context)
@@ -1608,6 +1627,9 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return ConversationHandler.END
     except Exception as exc:
+        if "duplicate renewal request" in str(exc):
+            await _answer_query(query, "این تمدید در حال پردازش است…")
+            return ConversationHandler.END
         LOG.exception("renewal failed user_id=%s sub_id=%s", update.effective_user.id, sub_id)
         clear_flow_state(context)
         await edit_text(query, f"❌ خطا در تمدید اشتراک:\n{html.escape(str(exc))}", back_keyboard())
