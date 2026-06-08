@@ -12,15 +12,15 @@ function RailLink({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
           {/* active indicator bar on the inner edge (RTL → right) */}
           <span
             className={cn(
-              "absolute right-0 h-6 w-[3px] rounded-full transition-all",
-              isActive ? "bg-foreground opacity-100" : "opacity-0",
+              "absolute right-0 h-6 w-[3px] rounded-full bg-brand shadow-[0_0_12px_hsl(var(--brand))] transition-all",
+              isActive ? "opacity-100" : "opacity-0",
             )}
           />
           <span
             className={cn(
-              "flex h-11 w-11 items-center justify-center rounded-xl border transition-colors",
+              "flex h-11 w-11 items-center justify-center rounded-xl border transition-all",
               isActive
-                ? "border-white/15 bg-white/[0.08] text-white"
+                ? "border-brand/30 bg-brand/15 text-white shadow-brand-glow"
                 : "border-transparent text-muted-foreground hover:bg-white/[0.04] hover:text-white",
             )}
           >
@@ -41,7 +41,7 @@ export function Rail() {
   const groups: (typeof NAV)[number]["group"][] = ["main", "ops", "system"];
   return (
     <aside className="fixed inset-y-0 right-0 z-40 hidden w-16 flex-col items-center border-l border-border bg-card/30 py-4 backdrop-blur-xl lg:flex">
-      <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-border bg-white/[0.05] text-foreground">
+      <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-brand/25 bg-brand/10 text-brand shadow-brand-glow">
         <Hexagon className="h-6 w-6" />
       </div>
       <nav className="mt-6 flex flex-1 flex-col items-center gap-1.5">

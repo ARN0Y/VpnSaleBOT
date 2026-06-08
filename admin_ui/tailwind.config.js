@@ -18,6 +18,9 @@ export default {
         destructive: { DEFAULT: "hsl(var(--destructive))", foreground: "hsl(var(--destructive-foreground))" },
         card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },
         popover: { DEFAULT: "hsl(var(--popover))", foreground: "hsl(var(--popover-foreground))" },
+        brand: { DEFAULT: "hsl(var(--brand))", foreground: "hsl(var(--brand-foreground))" },
+        success: { DEFAULT: "hsl(var(--success))" },
+        warning: { DEFAULT: "hsl(var(--warning))" },
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -25,7 +28,21 @@ export default {
         sm: "calc(var(--radius) - 4px)",
       },
       boxShadow: {
-        glow: "0 18px 46px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04)",
+        glow: "0 18px 46px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.05)",
+        card: "0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04)",
+        "brand-glow": "0 10px 30px hsl(var(--brand) / .25), inset 0 1px 0 rgba(255,255,255,.08)",
+      },
+      keyframes: {
+        "fade-in": {
+          from: { opacity: "0", transform: "translateY(6px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+        shimmer: {
+          "100%": { transform: "translateX(100%)" },
+        },
+      },
+      animation: {
+        "fade-in": "fade-in .32s cubic-bezier(.22,1,.36,1)",
       },
     },
   },

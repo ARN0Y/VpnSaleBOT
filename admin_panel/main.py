@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from async_storefront.db import AsyncDatabase
 from async_storefront.panel import PanelClient
+from async_storefront.util import resolve_proxy_url
 
 from . import api
 
@@ -118,7 +119,7 @@ def create_app() -> FastAPI:
     install_auth(app, AuthConfig.from_env())
     app.state.db_path = Path(os.getenv("BOT_DB_PATH", "navidvpn.db")).resolve()
     app.state.bot_token = os.getenv("BOT_TOKEN", "").strip()
-    app.state.proxy_url = os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")).strip()
+    app.state.proxy_url = resolve_proxy_url()
     app.state.panel_timeout_seconds = _float_env("ADMIN_PANEL_TIMEOUT_SECONDS", 45.0)
     app.state.env_path = PROJECT_ROOT / ".env"
     app.state.backup_dir = Path(os.getenv("BOT_BACKUP_DIR", str(PROJECT_ROOT / "backup"))).resolve()
