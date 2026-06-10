@@ -113,6 +113,18 @@ export const api = {
     post<Ok>("/infinite-package", p),
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
+  setPanel2: (p: {
+    enabled: boolean;
+    label: string;
+    base_url: string;
+    username: string;
+    password: string;
+    inbound_id: number;
+    sub_link_base: string;
+    use_proxy: "" | "true" | "false";
+    proxy_url: string;
+    price_per_gb: number;
+  }) => post<Ok>("/panel2", p),
 
   updateAgent: (
     id: number,

@@ -155,6 +155,8 @@ async def settings(request: Request):
         items["panel_inbound_id"] = str(panel_row["inbound_id"] or 0)
         items["sub_link_base"] = str(panel_row["sub_link_base"] or "")
     items["panel_password"] = ""
+    # Second panel password is stored in settings KV; never expose it.
+    items["panel2_password"] = ""
     return {"items": items}
 
 
@@ -628,6 +630,57 @@ async def set_infinite_package(request: Request):
         "duration_days": duration_days,
         "price": price,
     }
+
+
+@router.post("/panel2")
+async def set_panel2(request: Request):
+    """Configure the optional second 3x-ui panel (stored in settings KV, no
+    schema change). Sold in the bot as a dedicated buy option with its own price
+    and its own proxy on/off switch. Empty password keeps the current one."""
+    body = await _json_body(request)
+    database = db(request)
+    current = {row["key"]: row["value"] for row in await database.admin_list_settings()}
+
+    def _s(key: str) -> str:
+        return str(body.get(key, "") or "").strip()
+
+    def _int(value, default=0, minimum=0):
+        try:
+            n = int(float(value))
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, n)
+
+    # use_proxy tri-state: true / false / "" (auto)
+    raw_use = body.get("use_proxy", None)
+    if raw_use is True or str(raw_use).strip().lower() in {"1", "true", "on", "yes"}:
+        use_proxy = "true"
+    elif raw_use is False or str(raw_use).strip().lower() in {"0", "false", "off", "no"}:
+        use_proxy = "false"
+    else:
+        use_proxy = ""
+
+    new_base = _s("base_url")
+    values: dict[str, str] = {
+        "panel2_enabled": "1" if bool(body.get("enabled")) else "0",
+        "panel2_label": _s("label") or "سرور اختصاصی",
+        "panel2_base_url": new_base,
+        "panel2_username": _s("username"),
+        "panel2_inbound_id": str(_int(body.get("inbound_id"), 0, 0)),
+        "panel2_sub_link_base": _s("sub_link_base"),
+        "panel2_use_proxy": use_proxy,
+        "panel2_proxy_url": _s("proxy_url"),
+        "panel2_price_per_gb": str(_int(body.get("price_per_gb"), 7000, 0) or 7000),
+    }
+    password = str(body.get("password", "") or "")
+    if password.strip():
+        values["panel2_password"] = password
+    # If the base URL changed, drop the stored session cookie so the next call
+    # re-logs in against the new panel.
+    if new_base and new_base.rstrip("/") != str(current.get("panel2_base_url", "")).rstrip("/"):
+        values["panel2_cookie"] = ""
+    await database.admin_update_settings(values)
+    return {"ok": True, "enabled": values["panel2_enabled"] == "1"}
 
 
 @router.post("/ui-mode")

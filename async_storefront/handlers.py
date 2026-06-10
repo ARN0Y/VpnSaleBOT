@@ -25,8 +25,10 @@ from telegram.ext import (
 
 from .config import Settings
 from .db import AsyncDatabase
+from .panel import PanelClient
 from .provisioning import ProvisioningService
 from .qr import QRService
+from .util import resolve_proxy_value
 
 try:
     import jdatetime
@@ -55,9 +57,11 @@ BTN_SUPPORT = "🛟 تماس با پشتیبانی"
 BTN_TEST_CONFIG = "🆓 دریافت تست رایگان"
 BTN_AGENT_REQ = "🤝 درخواست نمایندگی"
 BTN_INFINITE = "♾️ بسته‌ی بی‌نهایت"
+BTN_PANEL2 = "🌐 سرور اختصاصی"
 
-_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ, BTN_INFINITE})
+_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ, BTN_INFINITE, BTN_PANEL2})
 _nav_filter = filters.Text(list(_ALL_NAV_BTNS))
+PANEL2_PRICE_DEFAULT = "7000"
 
 WELCOME_TEXT = (
     "⚡ <b>به NavidVPN خوش آمدید</b>\n"
@@ -114,13 +118,13 @@ def max_custom_gb(min_gb: int) -> int:
     return max(DEFAULT_CUSTOM_MAX_GB, int(min_gb) * max(GB_BUTTON_FACTORS))
 
 
-async def gb_choice_keyboard(db: AsyncDatabase, user_id: int, prefix: str, cancel_data: str, min_gb: int = 1) -> InlineKeyboardMarkup:
+async def gb_choice_keyboard(db: AsyncDatabase, user_id: int, prefix: str, cancel_data: str, min_gb: int = 1, *, panel2: bool = False) -> InlineKeyboardMarkup:
     minimum = _positive_int(min_gb, 1)
     agent = await db.get_agent(user_id)
     buttons = []
     for factor in GB_BUTTON_FACTORS:
         gb = minimum * factor
-        unit = await unit_price_for_gb(db, user_id, gb, agent)
+        unit = await buy_unit_price(db, user_id, gb, agent, panel2=panel2)
         buttons.append(
             InlineKeyboardButton(f"{gb} گیگ • {gb * unit:,} ت", callback_data=f"{prefix}:gb:{gb}")
         )
@@ -164,6 +168,84 @@ async def infinite_enabled(db: AsyncDatabase) -> bool:
     return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
 
 
+# ───────────────────────── Second (dedicated) 3x-ui panel ─────────────────────────
+async def panel2_available(db: AsyncDatabase) -> bool:
+    """True when the optional second panel is enabled and minimally configured."""
+    enabled = str(await db.get_setting("panel2_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    if not enabled:
+        return False
+    return bool((await db.get_setting("panel2_base_url", "")).strip())
+
+
+async def panel2_label(db: AsyncDatabase) -> str:
+    return (await db.get_setting("panel2_label", "") or "").strip() or "سرور اختصاصی"
+
+
+async def panel2_price_per_gb(db: AsyncDatabase) -> int:
+    return _positive_int(await db.get_setting("panel2_price_per_gb", PANEL2_PRICE_DEFAULT), int(PANEL2_PRICE_DEFAULT))
+
+
+async def is_panel2_subscription(db: AsyncDatabase, sub: dict) -> bool:
+    """Best-effort: a subscription belongs to the second panel when its inbound
+    matches the configured panel2 inbound (and that inbound is distinct). Used to
+    keep panel2 services out of the (panel1-only) renewal flow in v1."""
+    if not await panel2_available(db):
+        return False
+    try:
+        p2_inbound = int(str(await db.get_setting("panel2_inbound_id", "0")).strip() or "0")
+        p1_inbound = int(str(await db.get_setting("panel_inbound_id", "0")).strip() or "0")
+        sub_inbound = int(sub.get("inbound_id") or 0)
+    except Exception:
+        return False
+    return p2_inbound > 0 and sub_inbound == p2_inbound and p2_inbound != p1_inbound
+
+
+async def buy_unit_price(db: AsyncDatabase, user_id: int, gb: int, agent=None, *, panel2: bool = False) -> int:
+    """Per-GB price for the buy flow. For the dedicated second panel an agent
+    keeps their own flat rate (if set), otherwise the panel's dedicated price
+    applies; regular users always pay the dedicated price."""
+    if not panel2:
+        return await unit_price_for_gb(db, user_id, gb, agent)
+    if agent is None:
+        agent = await db.get_agent(user_id)
+    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    if agent_price > 0:
+        return agent_price
+    return await panel2_price_per_gb(db)
+
+
+async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "ProvisioningService | None":
+    """Lazily build (and cache) a ProvisioningService bound to the second panel.
+
+    The panel's proxy is resolved from its own settings (panel2_use_proxy /
+    panel2_proxy_url) at build time; changing the proxy needs a bot restart, but
+    credentials/inbound are read live on every request like the primary panel.
+    """
+    app = context.application
+    db: AsyncDatabase = app.bot_data["db"]
+    if not await panel2_available(db):
+        return None
+    prov2 = app.bot_data.get("provisioning2")
+    if prov2 is not None:
+        return prov2
+    settings: Settings = app.bot_data["settings"]
+    proxy = resolve_proxy_value(
+        await db.get_setting("panel2_proxy_url", ""),
+        await db.get_setting("panel2_use_proxy", ""),
+    )
+    panel2 = PanelClient(
+        db,
+        proxy_url=proxy,
+        pool_size=settings.panel_pool_size,
+        timeout_seconds=settings.panel_timeout_seconds,
+        kv_prefix="panel2_",
+    )
+    prov2 = ProvisioningService(db, panel2, app.bot_data["agents"])
+    app.bot_data["panel2"] = panel2
+    app.bot_data["provisioning2"] = prov2
+    return prov2
+
+
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
     rows = [
@@ -177,6 +259,8 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
             InlineKeyboardButton("🪪 حساب کاربری", callback_data="menu:account"),
         ],
     ]
+    if await panel2_available(db):
+        rows.insert(1, [InlineKeyboardButton(f"🌐 {await panel2_label(db)}", callback_data="menu:buy2")])
     if await infinite_enabled(db):
         rows.insert(1, [InlineKeyboardButton("♾️ بسته‌ی بی‌نهایت", callback_data="menu:infinite")])
     if agent and not int(agent["disabled"] or 0):
@@ -359,13 +443,17 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False, has_panel2: bool = False) -> ReplyKeyboardMarkup:
     # Hero "buy" button on top (full width), then balanced icy pairs below.
     rows = [
         [KeyboardButton(BTN_BUY)],
         [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_RENEW)],
         [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_ACCOUNT)],
     ]
+    # Dedicated second-panel buy option as its own full-width row, right under
+    # the hero buy button so it stands out.
+    if has_panel2:
+        rows.insert(1, [KeyboardButton(BTN_PANEL2)])
     # Feature the fair-usage "infinite" package as its own full-width row right
     # under the hero buy button so it stands out.
     if has_infinite:
@@ -531,7 +619,8 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
         except Exception:
             has_test = True
     has_infinite = await infinite_enabled(db)
-    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite)
+    has_panel2 = await panel2_available(db)
+    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite, has_panel2=has_panel2)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -745,15 +834,44 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return BUY_GB
 
 
+async def buy2_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start the buy flow for the dedicated second panel (same steps, own price)."""
+    await ensure_user(update, context)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    if not await panel2_available(db):
+        await new_flow_card(update, context, "🌐 این سرویس در حال حاضر در دسترس نیست.", back_keyboard())
+        return ConversationHandler.END
+    if not await audience_sales_is_open(db, update.effective_user.id):
+        await show_sales_closed(update, context)
+        return ConversationHandler.END
+    min_gb = await minimum_purchase_gb(db)
+    await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
+    clear_flow_state(context)
+    context.user_data["checkout"] = {"panel2": True}
+    label = await panel2_label(db)
+    await new_flow_card(
+        update,
+        context,
+        gb_choice_prompt(f"🌐 <b>خرید از {html.escape(label)}</b>  •  مرحله ۱ از ۴", min_gb),
+        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=True),
+    )
+    return BUY_GB
+
+
+def _checkout_is_panel2(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return bool((context.user_data.get("checkout") or {}).get("panel2"))
+
+
 async def buy_gb_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db: AsyncDatabase = context.application.bot_data["db"]
     min_gb = await minimum_purchase_gb(db)
+    p2 = _checkout_is_panel2(context)
     await send_flow_prompt(
         update,
         context,
         "📦 لطفاً حجم را از دکمه‌های همین کارت انتخاب کنید.\n\n"
         f"حداقل حجم مجاز: <b>{min_gb}</b> گیگ. برای وارد کردن عدد، گزینه <b>حجم دلخواه</b> را بزنید.",
-        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
+        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=p2),
     )
     return BUY_GB
 
@@ -765,7 +883,7 @@ async def buy_gb_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     min_gb = await minimum_purchase_gb(db)
     gb = int(query.data.rsplit(":", 1)[1])
     if gb < min_gb:
-        await edit_text(query, invalid_gb_text(min_gb), await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb))
+        await edit_text(query, invalid_gb_text(min_gb), await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=_checkout_is_panel2(context)))
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
         return BUY_GB
     context.user_data.setdefault("checkout", {})["gb"] = gb
@@ -861,10 +979,11 @@ async def buy_qty_custom_start(update: Update, context: ContextTypes.DEFAULT_TYP
 async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db: AsyncDatabase = context.application.bot_data["db"]
     checkout = context.user_data.setdefault("checkout", {})
+    p2 = bool(checkout.get("panel2"))
     agent = await db.get_agent(update.effective_user.id)
     gb = int(checkout["gb"])
     qty = int(checkout["qty"])
-    unit_price = await unit_price_for_gb(db, update.effective_user.id, gb, agent)
+    unit_price = await buy_unit_price(db, update.effective_user.id, gb, agent, panel2=p2)
     min_gb = await minimum_purchase_gb(db)
     if gb < min_gb:
         checkout.pop("gb", None)
@@ -873,7 +992,7 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             update,
             context,
             invalid_gb_text(min_gb),
-            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
+            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=p2),
         )
         return BUY_GB
     total = gb * qty * unit_price
@@ -882,6 +1001,7 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if agent and db.normalize_agent_access_value(agent["access_level"]) == "open"
         else "کسر از کیف پول"
     )
+    server_line = f"🌐 سرور: <b>{html.escape(await panel2_label(db))}</b>\n" if p2 else ""
     client_name = str(checkout.get("client_name") or "").strip()
     # Stable idempotency token per built invoice: a double-tap on "confirm"
     # (possible because updates run concurrently) reuses the same key so the
@@ -893,6 +1013,7 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context,
         "🛒 <b>مرحله ۴ از ۴ – تایید نهایی</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{server_line}"
         f"📦 حجم هر اشتراک: <b>{gb}</b> گیگ\n"
         f"🔢 تعداد: <b>{qty}</b>\n"
         f"💵 قیمت هر گیگ: <b>{unit_price:,}</b> تومان\n"
@@ -947,6 +1068,7 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     query = update.callback_query
     await query.answer()
     checkout = context.user_data.get("checkout") or {}
+    p2 = bool(checkout.get("panel2"))
     gb = int(checkout.get("gb") or 0)
     qty = int(checkout.get("qty") or 0)
     unit_price = int(checkout.get("unit_price") or 0)
@@ -966,7 +1088,7 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await edit_text(
             query,
             invalid_gb_text(min_gb),
-            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
+            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=p2),
         )
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
         return BUY_GB
@@ -980,7 +1102,14 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
-    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    if p2:
+        provisioning = await get_panel2_provisioning(context)
+        if provisioning is None:
+            clear_flow_state(context)
+            await edit_text(query, "🌐 این سرویس در حال حاضر در دسترس نیست.", back_keyboard())
+            return ConversationHandler.END
+    else:
+        provisioning = context.application.bot_data["provisioning"]
     qr: QRService = context.application.bot_data["qr"]
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
@@ -1470,6 +1599,17 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
     if not sub:
         await edit_text(query, "⚠️ این اشتراک پیدا نشد. لطفاً دوباره از لیست انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+    if await is_panel2_subscription(db, sub):
+        # v1: dedicated-panel services are buy-only from the bot; renewal of them
+        # isn't wired yet, so guide the user to support instead of failing on the
+        # primary panel.
+        await edit_text(
+            query,
+            "🌐 <b>این سرویس روی سرور اختصاصی است.</b>\n\n"
+            "تمدید این نوع سرویس فعلاً از داخل ربات فعال نیست؛ برای تمدید با پشتیبانی در ارتباط باشید.",
+            back_keyboard(),
+        )
         return ConversationHandler.END
     name = str(sub.get("client_email") or sub_id)
     min_gb = await minimum_purchase_gb(db)
@@ -2439,6 +2579,8 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     clear_flow_state(context)
     if text == BTN_BUY:
         return await buy_start(update, context)
+    if text == BTN_PANEL2:
+        return await buy2_start(update, context)
     if text == BTN_RENEW:
         return await renew_start(update, context)
     if text == BTN_SUBS:
@@ -2621,6 +2763,7 @@ def build_main_conversation() -> ConversationHandler:
     """
     entry_points = [
         CallbackQueryHandler(buy_start, pattern=r"^menu:buy$"),
+        CallbackQueryHandler(buy2_start, pattern=r"^menu:buy2$"),
         CallbackQueryHandler(renew_start, pattern=r"^menu:renew$"),
         CallbackQueryHandler(topup_c2c_start, pattern=r"^wallet:c2c$"),
         CallbackQueryHandler(topup_crypto_start, pattern=r"^wallet:crypto$"),

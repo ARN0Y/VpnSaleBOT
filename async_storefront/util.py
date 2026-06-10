@@ -43,12 +43,27 @@ def resolve_proxy_url() -> str:
     used whenever a URL is configured. When it is set, it wins — so an operator
     can keep the URL on file but turn the proxy off (or on) without deleting it.
     """
-    url = os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")).strip()
-    raw = (os.getenv("BOT_USE_PROXY") or "").strip().lower()
-    # Unset/blank or an unrecognized value → auto: use the proxy iff a URL is set.
+    return resolve_proxy_value(
+        os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")),
+        os.getenv("BOT_USE_PROXY"),
+    )
+
+
+def resolve_proxy_value(proxy_url: str | None, use_proxy_raw: str | None) -> str:
+    """Same on/off/auto logic as ``resolve_proxy_url`` but for values that come
+    from anywhere (e.g. the settings table for a second panel), not just env.
+
+    * ``use_proxy_raw`` truthy  → use the proxy URL.
+    * ``use_proxy_raw`` falsy   → no proxy (direct), even if a URL is set.
+    * unset / blank / unknown   → auto: use the proxy iff a URL is present.
+    """
+    url = (proxy_url or "").strip()
+    raw = (use_proxy_raw or "").strip().lower()
     if raw not in _TRUTHY and raw not in _FALSY:
         return url
     return url if raw in _TRUTHY else ""
+
+
 SUB_ID_CHARSET = string.ascii_letters + string.digits
 SUB_ID_LENGTH = 16
 CLIENT_EMAIL_SUFFIX_BYTES = 3

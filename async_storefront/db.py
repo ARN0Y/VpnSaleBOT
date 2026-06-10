@@ -654,6 +654,19 @@ class AsyncDatabase:
             "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
+            # ── Second 3x-ui panel (optional, stored entirely in settings KV so no
+            #    schema change). Sold as a dedicated buy option at its own price. ──
+            "panel2_enabled": "0",
+            "panel2_label": "سرور اختصاصی",
+            "panel2_base_url": "",
+            "panel2_username": "",
+            "panel2_password": "",
+            "panel2_inbound_id": "0",
+            "panel2_sub_link_base": "",
+            "panel2_use_proxy": "",
+            "panel2_proxy_url": "",
+            "panel2_price_per_gb": "7000",
+            "panel2_cookie": "",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",

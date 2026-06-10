@@ -37,10 +37,14 @@ class PanelClient:
     RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
     INBOUNDS_CACHE_TTL_SECONDS = 12.0
 
-    def __init__(self, db: AsyncDatabase, *, proxy_url: str = "", pool_size: int = 128, timeout_seconds: float = 20.0):
+    def __init__(self, db: AsyncDatabase, *, proxy_url: str = "", pool_size: int = 128, timeout_seconds: float = 20.0, kv_prefix: str | None = None):
         limits = httpx.Limits(max_connections=pool_size, max_keepalive_connections=max(8, pool_size // 2))
         timeout = self._make_timeout(timeout_seconds)
         self.db = db
+        # When set (e.g. "panel2_"), this client reads its connection settings
+        # from the settings key/value table (no schema change) instead of the
+        # primary panel_settings table — used for an optional second 3x-ui panel.
+        self._kv_prefix = kv_prefix or ""
         self._client = httpx.AsyncClient(
             proxy=proxy_url or None,
             timeout=timeout,
@@ -64,6 +68,18 @@ class PanelClient:
         await self._client.aclose()
 
     async def _settings(self) -> _PanelSettings:
+        if self._kv_prefix:
+            p = self._kv_prefix
+            base = (await self.db.get_setting(p + "base_url", "")).strip().rstrip("/")
+            custom_sub = (await self.db.get_setting(p + "sub_link_base", "")).strip().rstrip("/")
+            return _PanelSettings(
+                base_url=base,
+                username=(await self.db.get_setting(p + "username", "")).strip(),
+                password=(await self.db.get_setting(p + "password", "")).strip(),
+                inbound_id=safe_int(await self.db.get_setting(p + "inbound_id", "0")),
+                sub_link_base=(custom_sub + "/") if custom_sub else (base + "/sub/" if base else ""),
+                cookie=(await self.db.get_setting(p + "cookie", "")).strip(),
+            )
         row = await self.db.get_panel_settings()
         if row and str(row["base_url"] or "").strip():
             base = str(row["base_url"] or "").strip().rstrip("/")
@@ -125,7 +141,10 @@ class PanelClient:
                 or ""
             )
             if cookie:
-                await self.db.update_panel_cookie(cookie, int(now_ms() / 1000))
+                if self._kv_prefix:
+                    await self.db.set_setting(self._kv_prefix + "cookie", cookie)
+                else:
+                    await self.db.update_panel_cookie(cookie, int(now_ms() / 1000))
                 self._client.cookies.set("3x-ui", cookie)
             return cookie
 
