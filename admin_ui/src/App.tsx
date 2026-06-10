@@ -36,7 +36,7 @@ export function App() {
   if (!username) return <Login />;
 
   return (
-    <BrowserRouter basename="/admin/app">
+    <BrowserRouter basename="/admin">
       <Routes>
         <Route element={<AppShell />}>
           <Route

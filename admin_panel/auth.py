@@ -90,7 +90,10 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
         # The SPA shell + its static assets load without server auth; the app's
         # JavaScript authenticates itself against the protected JSON API and
-        # renders its own login screen on a 401.
+        # renders its own login screen on a 401. The shell now lives at /admin
+        # itself (assets under /admin/assets, fonts under /admin/fonts).
+        if path == "/admin" or path.startswith("/admin/assets/") or path.startswith("/admin/fonts/"):
+            return await call_next(request)
         if path == "/admin/app" or path.startswith("/admin/app/"):
             return await call_next(request)
 
@@ -242,10 +245,9 @@ def extract_csrf_from_body(body: bytes, content_type: str) -> str:
 
 
 def login_redirect(request: Request) -> RedirectResponse:
-    target = "/admin/login"
-    if request.url.path and request.url.path != "/admin/login":
-        target += "?" + urlencode({"next": request.url.path})
-    return RedirectResponse(target, status_code=303)
+    # Modern SPA is the panel: send unauthenticated requests to its shell at
+    # /admin, which renders its own login screen (no classic login page).
+    return RedirectResponse("/admin", status_code=303)
 
 
 def client_key(request: Request) -> str:

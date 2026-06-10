@@ -6,7 +6,7 @@ import contextlib
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional at import time
 from .auth import AuthConfig, install_auth
 from .backup import backup_scheduler
 from .event_worker import event_worker
-from .routers import agent_requests, broadcast, dashboard, events, files, orders, settings, subscriptions, topups, users
+from .routers import files
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
@@ -81,31 +81,39 @@ SPA_DIST = PROJECT_ROOT / "admin_ui" / "dist"
 
 
 def _mount_spa(app: FastAPI) -> None:
-    """Serve the built React SPA from admin_ui/dist if it exists.
+    """Serve the built React SPA from admin_ui/dist directly at ``/admin``.
 
-    The build is produced on any machine with Node (``npm run build`` inside
-    admin_ui/) and the resulting dist/ folder is deployed alongside the app —
-    so the server itself does not need Node. If dist/ is absent, this is a
-    no-op and the legacy Jinja panel remains the only UI.
+    The modern dashboard is the default (and only) panel UI. The build is
+    produced on any machine with Node (``npm run build`` inside admin_ui/) and
+    the resulting dist/ folder is deployed alongside the app — so the server
+    itself does not need Node. The JSON API (/admin/api/v1) and the telegram
+    file proxy (/admin/file) are registered before this so they always win; this
+    catch-all only serves real static files (assets, fonts, favicon) or the SPA
+    shell for client-side routes.
     """
     if not SPA_DIST.exists():
         return
     assets_dir = SPA_DIST / "assets"
     if assets_dir.exists():
-        app.mount("/admin/app/assets", StaticFiles(directory=str(assets_dir)), name="spa-assets")
+        app.mount("/admin/assets", StaticFiles(directory=str(assets_dir)), name="spa-assets")
 
     index_file = SPA_DIST / "index.html"
     dist_root = SPA_DIST.resolve()
 
-    @app.get("/admin/app")
+    @app.get("/admin")
     async def spa_root() -> FileResponse:
         return FileResponse(index_file)
 
-    @app.get("/admin/app/{spa_path:path}")
-    async def spa_catch_all(spa_path: str) -> FileResponse:
-        # Serve real files (favicon, etc.) when present, else the SPA shell so
-        # client-side routing works on deep links/refreshes. Resolve and confine
-        # to dist/ so a crafted path like ../../etc/passwd cannot escape.
+    @app.get("/admin/{spa_path:path}")
+    async def spa_catch_all(spa_path: str):
+        # Never hijack the API or the file proxy (they have their own routers);
+        # if one of their paths somehow falls through, 404 rather than handing
+        # back the SPA shell.
+        if spa_path.startswith("api/") or spa_path.startswith("file/"):
+            raise HTTPException(status_code=404)
+        # Serve real files (assets, fonts, favicon) when present, else the SPA
+        # shell so client-side routing works on deep links/refreshes. Resolve and
+        # confine to dist/ so a crafted path like ../../etc/passwd cannot escape.
         if spa_path:
             candidate = (SPA_DIST / spa_path).resolve()
             if candidate.is_file() and candidate.is_relative_to(dist_root):
@@ -129,34 +137,14 @@ def create_app() -> FastAPI:
     async def root() -> RedirectResponse:
         return RedirectResponse("/admin", status_code=303)
 
-    # New React/shadcn dashboard (served as static once built).
-    _mount_spa(app)
-
-    # Single entry point: /admin serves the UI the admin chose in settings
-    # (modern SPA or classic Jinja). Registered before the dashboard router so
-    # it takes precedence for GET /admin. Switching is instant (no restart).
-    @app.get("/admin")
-    async def admin_home(request: Request):
-        mode = "modern"
-        try:
-            mode = (await request.app.state.db.get_setting("ui_mode", "modern") or "modern").strip().lower()
-        except Exception:
-            pass
-        if mode != "classic" and SPA_DIST.exists():
-            return RedirectResponse("/admin/app", status_code=307)
-        return await dashboard.overview(request)
-
+    # JSON API + telegram file proxy first, so the SPA catch-all (mounted at
+    # /admin) never shadows them. The legacy Jinja page routers are retired —
+    # the modern SPA is now the single panel UI, served directly at /admin.
     app.include_router(api.router)
-    app.include_router(dashboard.router)
-    app.include_router(users.router)
-    app.include_router(topups.router)
-    app.include_router(agent_requests.router)
-    app.include_router(broadcast.router)
-    app.include_router(events.router)
-    app.include_router(orders.router)
-    app.include_router(subscriptions.router)
-    app.include_router(settings.router)
     app.include_router(files.router)
+
+    # Modern React/shadcn dashboard, served as static at /admin (default path).
+    _mount_spa(app)
     return app
 
 

@@ -97,15 +97,10 @@ export function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
   const toggle = useMutation({ mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
-  const uiMode = useMutation({
-    mutationFn: (mode: "modern" | "classic") => api.setUiMode(mode),
-    onSuccess: (_r, mode) => { qc.invalidateQueries({ queryKey: ["settings"] }); if (mode === "classic") window.location.href = "/admin"; },
-  });
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-12 w-72" /><Skeleton className="h-72" /></div>;
 
-  const mode = items.ui_mode ?? "modern";
   const TABS = [
     { v: "general", label: "عمومی" },
     { v: "sales", label: "فروش و تعرفه" },
@@ -125,33 +120,6 @@ export function Settings() {
 
       {/* ───────────── General ───────────── */}
       <TabsContent value="general" className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>حالت نمایش پنل</CardTitle>
-            <p className="text-sm text-muted-foreground">تغییر بلافاصله اعمال می‌شود (نیازی به ری‌استارت نیست).</p>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <button onClick={() => uiMode.mutate("modern")} disabled={uiMode.isPending}
-                className={`card-hover rounded-2xl border p-4 text-right transition ${mode !== "classic" ? "border-brand/40 bg-brand/[0.06]" : "border-border hover:border-white/20"}`}>
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white">داشبورد مدرن</span>
-                  {mode !== "classic" && <Badge variant="success">فعال</Badge>}
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">React/shadcn، سریع و حرفه‌ای (پیشنهادی)</p>
-              </button>
-              <button onClick={() => uiMode.mutate("classic")} disabled={uiMode.isPending}
-                className={`card-hover rounded-2xl border p-4 text-right transition ${mode === "classic" ? "border-brand/40 bg-brand/[0.06]" : "border-border hover:border-white/20"}`}>
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-white">پنل کلاسیک</span>
-                  {mode === "classic" && <Badge variant="success">فعال</Badge>}
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">نسخه‌ی قدیمی مبتنی بر صفحات سرور</p>
-              </button>
-            </div>
-          </CardContent>
-        </Card>
-
         <Card>
           <CardHeader><CardTitle>تنظیمات فروشگاه</CardTitle></CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">

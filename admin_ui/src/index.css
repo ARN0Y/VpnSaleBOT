@@ -1,10 +1,10 @@
-/* Local Vazirmatn (no external request) — served from public/fonts via base /admin/app/. */
+/* Local Vazirmatn (no external request) — served from public/fonts via base /admin/. */
 @font-face {
   font-family: "Vazirmatn";
   font-style: normal;
   font-weight: 400 900;
   font-display: swap;
-  src: url("/admin/app/fonts/Dxxo8j6PP2D_kU2muijlGMWWMmk.woff2") format("woff2");
+  src: url("/admin/fonts/Dxxo8j6PP2D_kU2muijlGMWWMmk.woff2") format("woff2");
   unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF, U+FE70-FEFF;
 }
 @font-face {
@@ -12,7 +12,7 @@
   font-style: normal;
   font-weight: 400 900;
   font-display: swap;
-  src: url("/admin/app/fonts/Dxxo8j6PP2D_kU2muijlE8WWMmk.woff2") format("woff2");
+  src: url("/admin/fonts/Dxxo8j6PP2D_kU2muijlE8WWMmk.woff2") format("woff2");
   unicode-range: U+0100-024F;
 }
 @font-face {
@@ -20,7 +20,7 @@
   font-style: normal;
   font-weight: 400 900;
   font-display: swap;
-  src: url("/admin/app/fonts/Dxxo8j6PP2D_kU2muijlHcWW.woff2") format("woff2");
+  src: url("/admin/fonts/Dxxo8j6PP2D_kU2muijlHcWW.woff2") format("woff2");
   unicode-range: U+0000-00FF;
 }
 
