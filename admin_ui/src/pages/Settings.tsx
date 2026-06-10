@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LockOpen, Lock, Save, Plus, Trash2 } from "lucide-react";
+import { LockOpen, Lock, Save, Plus, Trash2, Settings2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type Audience = "all" | "user" | "agent";
 
@@ -77,9 +78,7 @@ export function Settings() {
       });
       try {
         const pt = JSON.parse(items.price_tiers || "[]");
-        setTiers(
-          Array.isArray(pt) ? pt.map((t) => ({ min_gb: String(t.min_gb ?? ""), price_per_gb: String(t.price_per_gb ?? "") })) : [],
-        );
+        setTiers(Array.isArray(pt) ? pt.map((t) => ({ min_gb: String(t.min_gb ?? ""), price_per_gb: String(t.price_per_gb ?? "") })) : []);
       } catch {
         setTiers([]);
       }
@@ -87,268 +86,206 @@ export function Settings() {
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const saveCards = useMutation({
-    mutationFn: () => api.setPaymentCards(cards.filter((c) => c.number.trim())),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
-  });
-
-  const save = useMutation({
-    mutationFn: () => api.updateSettings(form),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
-  });
+  const saveCards = useMutation({ mutationFn: () => api.setPaymentCards(cards.filter((c) => c.number.trim())), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
+  const save = useMutation({ mutationFn: () => api.updateSettings(form), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const saveInf = useMutation({
-    mutationFn: () =>
-      api.setInfinite({
-        enabled: inf.enabled,
-        cap_gb: Number(inf.cap_gb) || 0,
-        duration_days: Number(inf.duration_days) || 0,
-        price: Number(inf.price) || 0,
-      }),
+    mutationFn: () => api.setInfinite({ enabled: inf.enabled, cap_gb: Number(inf.cap_gb) || 0, duration_days: Number(inf.duration_days) || 0, price: Number(inf.price) || 0 }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
   const saveTiers = useMutation({
-    mutationFn: () =>
-      api.setPriceTiers(
-        tiers
-          .filter((t) => t.min_gb !== "" && t.price_per_gb !== "")
-          .map((t) => ({ min_gb: Number(t.min_gb) || 0, price_per_gb: Number(t.price_per_gb) || 0 })),
-      ),
+    mutationFn: () => api.setPriceTiers(tiers.filter((t) => t.min_gb !== "" && t.price_per_gb !== "").map((t) => ({ min_gb: Number(t.min_gb) || 0, price_per_gb: Number(t.price_per_gb) || 0 }))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
-  const toggle = useMutation({
-    mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
-  });
+  const toggle = useMutation({ mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const uiMode = useMutation({
     mutationFn: (mode: "modern" | "classic") => api.setUiMode(mode),
-    onSuccess: (_r, mode) => {
-      qc.invalidateQueries({ queryKey: ["settings"] });
-      // Switching to classic → load the classic panel; modern stays in-app.
-      if (mode === "classic") window.location.href = "/admin";
-    },
+    onSuccess: (_r, mode) => { qc.invalidateQueries({ queryKey: ["settings"] }); if (mode === "classic") window.location.href = "/admin"; },
   });
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
-  if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-40" /><Skeleton className="h-72" /></div>;
+  if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-12 w-72" /><Skeleton className="h-72" /></div>;
 
   const mode = items.ui_mode ?? "modern";
+  const TABS = [
+    { v: "general", label: "عمومی" },
+    { v: "sales", label: "فروش و تعرفه" },
+    { v: "payment", label: "پرداخت" },
+    { v: "panel", label: "پنل" },
+  ];
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>حالت نمایش پنل</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            انتخاب کنید پنل مدیریت با چه ظاهری باز شود. تغییر بلافاصله اعمال می‌شود (نیازی به ری‌استارت نیست).
-          </p>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <button
-              onClick={() => uiMode.mutate("modern")}
-              disabled={uiMode.isPending}
-              className={`rounded-2xl border p-4 text-right transition ${mode !== "classic" ? "border-white/30 bg-white/[0.06]" : "border-border hover:border-white/20"}`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-white">داشبورد مدرن</span>
-                {mode !== "classic" && <Badge variant="success">فعال</Badge>}
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">React/shadcn، سریع و حرفه‌ای (پیشنهادی)</p>
-            </button>
-            <button
-              onClick={() => uiMode.mutate("classic")}
-              disabled={uiMode.isPending}
-              className={`rounded-2xl border p-4 text-right transition ${mode === "classic" ? "border-white/30 bg-white/[0.06]" : "border-border hover:border-white/20"}`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-white">پنل کلاسیک</span>
-                {mode === "classic" && <Badge variant="success">فعال</Badge>}
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">نسخه‌ی قدیمی مبتنی بر صفحات سرور</p>
-            </button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>کنترل فروش</CardTitle>
-          <p className="text-sm text-muted-foreground">فروش را برای کاربران عادی و نماینده‌ها جداگانه باز/بسته کنید.</p>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <SalesRow title="کاربران عادی" audience="user" status={items.sales_status_user ?? master} onToggle={(a, s) => toggle.mutate({ a, s })} busy={toggle.isPending} />
-          <SalesRow title="نماینده‌ها" audience="agent" status={items.sales_status_agent ?? master} onToggle={(a, s) => toggle.mutate({ a, s })} busy={toggle.isPending} />
-          <div className="flex justify-end gap-2 pt-1">
-            <Button size="sm" variant="subtle" disabled={toggle.isPending} onClick={() => toggle.mutate({ a: "all", s: "open" })}>باز کردن همه</Button>
-            <Button size="sm" variant="subtle" disabled={toggle.isPending} onClick={() => toggle.mutate({ a: "all", s: "closed" })}>بستن همه</Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>کارت‌های پرداخت (چرخشی)</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            تا ۸ کارت اضافه کنید؛ ربات برای هر واریز به‌ترتیب چرخشی (round-robin) یکی را نشان می‌دهد و بار روی کارت‌ها پخش می‌شود.
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {cards.length === 0 && <p className="text-sm text-muted-foreground">هیچ کارتی اضافه نشده — از دکمه‌ی پایین اضافه کنید.</p>}
-          {cards.map((c, i) => (
-            <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
-              <div className="flex-1">
-                <Field label={`شماره کارت ${i + 1}`}>
-                  <Input
-                    value={c.number}
-                    inputMode="numeric"
-                    placeholder="6037-xxxx-xxxx-xxxx"
-                    onChange={(e) => setCards((xs) => xs.map((x, j) => (j === i ? { ...x, number: e.target.value } : x)))}
-                  />
-                </Field>
-              </div>
-              <div className="flex-1">
-                <Field label="به نام">
-                  <Input
-                    value={c.name}
-                    placeholder="نام صاحب کارت"
-                    onChange={(e) => setCards((xs) => xs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-                  />
-                </Field>
-              </div>
-              <Button variant="destructive" size="icon" onClick={() => setCards((xs) => xs.filter((_, j) => j !== i))}>
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
+    <Tabs defaultValue="general" className="space-y-6">
+      <div className="sticky top-16 z-20 -mx-1 overflow-x-auto pb-1">
+        <TabsList className="w-full justify-start">
+          {TABS.map((t) => (
+            <TabsTrigger key={t.v} value={t.v} className="px-4 py-2 text-sm">{t.label}</TabsTrigger>
           ))}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-            <Button variant="outline" size="sm" disabled={cards.length >= 8} onClick={() => setCards((xs) => [...xs, { number: "", name: "" }])}>
-              <Plus className="h-4 w-4" /> افزودن کارت
-            </Button>
-            <Button size="sm" disabled={saveCards.isPending} onClick={() => saveCards.mutate()}>
-              {saveCards.isPending ? "در حال ذخیره…" : saveCards.isSuccess ? "ذخیره شد ✓" : "ذخیره کارت‌ها"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        </TabsList>
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>تعرفه پلکانی (بر اساس حجم)</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            قیمت هر گیگ را بر اساس بازه‌ی حجم خرید تعیین کنید. مثلاً «از ۵ گیگ گیگی ۳۰٬۰۰۰»، «از ۱۰ گیگ گیگی ۲۵٬۰۰۰»، «از ۲۰ گیگ به بالا گیگی ۲۰٬۰۰۰». هر ردیف «حجم شروع بازه» و «قیمت هر گیگ» دارد؛ بازه تا شروعِ ردیف بعدی ادامه می‌یابد. خالی گذاشتن این بخش یعنی استفاده از «قیمت هر گیگ» ثابت.
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {tiers.length === 0 && <p className="text-sm text-muted-foreground">هیچ بازه‌ای تعریف نشده — قیمت ثابت اعمال می‌شود.</p>}
-          {tiers.map((t, i) => (
-            <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
-              <div className="flex-1">
-                <Field label={`از این حجم به بالا (گیگ) — ردیف ${i + 1}`}>
-                  <Input
-                    value={t.min_gb}
-                    inputMode="numeric"
-                    placeholder="مثلاً 5"
-                    onChange={(e) => setTiers((xs) => xs.map((x, j) => (j === i ? { ...x, min_gb: e.target.value } : x)))}
-                  />
-                </Field>
+      {/* ───────────── General ───────────── */}
+      <TabsContent value="general" className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>حالت نمایش پنل</CardTitle>
+            <p className="text-sm text-muted-foreground">تغییر بلافاصله اعمال می‌شود (نیازی به ری‌استارت نیست).</p>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button onClick={() => uiMode.mutate("modern")} disabled={uiMode.isPending}
+                className={`card-hover rounded-2xl border p-4 text-right transition ${mode !== "classic" ? "border-brand/40 bg-brand/[0.06]" : "border-border hover:border-white/20"}`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white">داشبورد مدرن</span>
+                  {mode !== "classic" && <Badge variant="success">فعال</Badge>}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">React/shadcn، سریع و حرفه‌ای (پیشنهادی)</p>
+              </button>
+              <button onClick={() => uiMode.mutate("classic")} disabled={uiMode.isPending}
+                className={`card-hover rounded-2xl border p-4 text-right transition ${mode === "classic" ? "border-brand/40 bg-brand/[0.06]" : "border-border hover:border-white/20"}`}>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white">پنل کلاسیک</span>
+                  {mode === "classic" && <Badge variant="success">فعال</Badge>}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">نسخه‌ی قدیمی مبتنی بر صفحات سرور</p>
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>تنظیمات فروشگاه</CardTitle></CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2">
+            {RUNTIME_FIELDS.map(({ key, label, hint }) => (
+              <Field key={key} label={label} hint={hint}>
+                <Input value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} />
+              </Field>
+            ))}
+          </CardContent>
+        </Card>
+      </TabsContent>
+
+      {/* ───────────── Sales + Pricing ───────────── */}
+      <TabsContent value="sales" className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>کنترل فروش</CardTitle>
+            <p className="text-sm text-muted-foreground">فروش را برای کاربران عادی و نماینده‌ها جداگانه باز/بسته کنید.</p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <SalesRow title="کاربران عادی" audience="user" status={items.sales_status_user ?? master} onToggle={(a, s) => toggle.mutate({ a, s })} busy={toggle.isPending} />
+            <SalesRow title="نماینده‌ها" audience="agent" status={items.sales_status_agent ?? master} onToggle={(a, s) => toggle.mutate({ a, s })} busy={toggle.isPending} />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button size="sm" variant="subtle" disabled={toggle.isPending} onClick={() => toggle.mutate({ a: "all", s: "open" })}>باز کردن همه</Button>
+              <Button size="sm" variant="subtle" disabled={toggle.isPending} onClick={() => toggle.mutate({ a: "all", s: "closed" })}>بستن همه</Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>تعرفه پلکانی (بر اساس حجم)</CardTitle>
+            <p className="text-sm text-muted-foreground">قیمت هر گیگ را بر اساس بازه‌ی حجم خرید تعیین کنید؛ بازه تا شروع ردیف بعدی ادامه می‌یابد. خالی گذاشتن یعنی استفاده از «قیمت هر گیگ» ثابت.</p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {tiers.length === 0 && <p className="text-sm text-muted-foreground">هیچ بازه‌ای تعریف نشده — قیمت ثابت اعمال می‌شود.</p>}
+            {tiers.map((t, i) => (
+              <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
+                <div className="flex-1">
+                  <Field label={`از این حجم به بالا (گیگ) — ردیف ${i + 1}`}>
+                    <Input value={t.min_gb} inputMode="numeric" placeholder="مثلاً 5" onChange={(e) => setTiers((xs) => xs.map((x, j) => (j === i ? { ...x, min_gb: e.target.value } : x)))} />
+                  </Field>
+                </div>
+                <div className="flex-1">
+                  <Field label="قیمت هر گیگ (تومان)">
+                    <Input value={t.price_per_gb} inputMode="numeric" placeholder="مثلاً 30000" onChange={(e) => setTiers((xs) => xs.map((x, j) => (j === i ? { ...x, price_per_gb: e.target.value } : x)))} />
+                  </Field>
+                </div>
+                <Button variant="destructive" size="icon" onClick={() => setTiers((xs) => xs.filter((_, j) => j !== i))}><Trash2 className="h-4 w-4" /></Button>
               </div>
-              <div className="flex-1">
-                <Field label="قیمت هر گیگ (تومان)">
-                  <Input
-                    value={t.price_per_gb}
-                    inputMode="numeric"
-                    placeholder="مثلاً 30000"
-                    onChange={(e) => setTiers((xs) => xs.map((x, j) => (j === i ? { ...x, price_per_gb: e.target.value } : x)))}
-                  />
-                </Field>
+            ))}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <Button variant="outline" size="sm" disabled={tiers.length >= 12} onClick={() => setTiers((xs) => [...xs, { min_gb: "", price_per_gb: "" }])}><Plus className="h-4 w-4" /> افزودن بازه</Button>
+              <Button size="sm" disabled={saveTiers.isPending} onClick={() => saveTiers.mutate()}>{saveTiers.isPending ? "در حال ذخیره…" : saveTiers.isSuccess ? "ذخیره شد ✓" : "ذخیره تعرفه پلکانی"}</Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>بسته‌ی بی‌نهایت (مصرف منصفانه)</CardTitle>
+            <p className="text-sm text-muted-foreground">بسته‌ای با حجم بالا و قیمت سفارشی؛ پس از رسیدن به سقف، کانفیگ خودکار در پنل غیرفعال می‌شود.</p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] p-4">
+              <div className="flex items-center gap-3">
+                <span className="font-bold text-white">وضعیت بسته</span>
+                <Badge variant={inf.enabled ? "success" : "danger"}>{inf.enabled ? "فعال" : "غیرفعال"}</Badge>
               </div>
-              <Button variant="destructive" size="icon" onClick={() => setTiers((xs) => xs.filter((_, j) => j !== i))}>
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <div className="flex gap-2">
+                <Button size="sm" disabled={inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: true }))}><LockOpen className="h-4 w-4" /> فعال</Button>
+                <Button size="sm" variant="destructive" disabled={!inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: false }))}><Lock className="h-4 w-4" /> غیرفعال</Button>
+              </div>
             </div>
-          ))}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-            <Button variant="outline" size="sm" disabled={tiers.length >= 12} onClick={() => setTiers((xs) => [...xs, { min_gb: "", price_per_gb: "" }])}>
-              <Plus className="h-4 w-4" /> افزودن بازه
-            </Button>
-            <Button size="sm" disabled={saveTiers.isPending} onClick={() => saveTiers.mutate()}>
-              {saveTiers.isPending ? "در حال ذخیره…" : saveTiers.isSuccess ? "ذخیره شد ✓" : "ذخیره تعرفه پلکانی"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>بسته‌ی بی‌نهایت (مصرف منصفانه)</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            بسته‌ای با حجم بالا و قیمت سفارشی. وقتی مصرف کاربر به سقف منصفانه برسد، کانفیگ به‌صورت خودکار و بدون اخطار در پنل غیرفعال می‌شود و در «اشتراک‌های من» با وضعیت غیرفعال نمایش داده می‌شود. هنگام خرید، فقط لینک کانفیگ‌ها برای کاربر ارسال می‌شود (نه لینک اشتراک).
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] p-4">
-            <div className="flex items-center gap-3">
-              <span className="font-bold text-white">وضعیت بسته</span>
-              <Badge variant={inf.enabled ? "success" : "danger"}>{inf.enabled ? "فعال" : "غیرفعال"}</Badge>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Field label="سقف مصرف منصفانه (گیگ)" hint="بعد از این حجم، کانفیگ غیرفعال می‌شود">
+                <Input value={inf.cap_gb} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, cap_gb: e.target.value }))} />
+              </Field>
+              <Field label="مدت اعتبار (روز)"><Input value={inf.duration_days} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, duration_days: e.target.value }))} /></Field>
+              <Field label="قیمت سفارشی (تومان)"><Input value={inf.price} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, price: e.target.value }))} /></Field>
             </div>
-            <div className="flex gap-2">
-              <Button size="sm" disabled={inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: true }))}>
-                <LockOpen className="h-4 w-4" /> فعال
-              </Button>
-              <Button size="sm" variant="destructive" disabled={!inf.enabled} onClick={() => setInf((s) => ({ ...s, enabled: false }))}>
-                <Lock className="h-4 w-4" /> غیرفعال
-              </Button>
+            <div className="flex justify-end">
+              <Button size="sm" disabled={saveInf.isPending} onClick={() => saveInf.mutate()}>{saveInf.isPending ? "در حال ذخیره…" : saveInf.isSuccess ? "ذخیره شد ✓" : "ذخیره بسته‌ی بی‌نهایت"}</Button>
             </div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="سقف مصرف منصفانه (گیگ)" hint="بعد از این حجم، کانفیگ غیرفعال می‌شود">
-              <Input value={inf.cap_gb} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, cap_gb: e.target.value }))} />
-            </Field>
-            <Field label="مدت اعتبار (روز)">
-              <Input value={inf.duration_days} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, duration_days: e.target.value }))} />
-            </Field>
-            <Field label="قیمت سفارشی (تومان)">
-              <Input value={inf.price} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, price: e.target.value }))} />
-            </Field>
-          </div>
-          <div className="flex justify-end">
-            <Button size="sm" disabled={saveInf.isPending} onClick={() => saveInf.mutate()}>
-              {saveInf.isPending ? "در حال ذخیره…" : saveInf.isSuccess ? "ذخیره شد ✓" : "ذخیره بسته‌ی بی‌نهایت"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </TabsContent>
 
-      <Card>
-        <CardHeader><CardTitle>تنظیمات فروشگاه</CardTitle></CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
-          {RUNTIME_FIELDS.map(({ key, label, hint }) => (
-            <Field key={key} label={label} hint={hint}>
-              <Input value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} />
-            </Field>
-          ))}
-        </CardContent>
-      </Card>
+      {/* ───────────── Payment ───────────── */}
+      <TabsContent value="payment" className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>کارت‌های پرداخت (چرخشی)</CardTitle>
+            <p className="text-sm text-muted-foreground">تا ۸ کارت اضافه کنید؛ ربات برای هر واریز به‌ترتیب چرخشی یکی را نشان می‌دهد و بار روی کارت‌ها پخش می‌شود.</p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {cards.length === 0 && <p className="text-sm text-muted-foreground">هیچ کارتی اضافه نشده — از دکمه‌ی پایین اضافه کنید.</p>}
+            {cards.map((c, i) => (
+              <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
+                <div className="flex-1"><Field label={`شماره کارت ${i + 1}`}><Input value={c.number} inputMode="numeric" placeholder="6037-xxxx-xxxx-xxxx" onChange={(e) => setCards((xs) => xs.map((x, j) => (j === i ? { ...x, number: e.target.value } : x)))} /></Field></div>
+                <div className="flex-1"><Field label="به نام"><Input value={c.name} placeholder="نام صاحب کارت" onChange={(e) => setCards((xs) => xs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} /></Field></div>
+                <Button variant="destructive" size="icon" onClick={() => setCards((xs) => xs.filter((_, j) => j !== i))}><Trash2 className="h-4 w-4" /></Button>
+              </div>
+            ))}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <Button variant="outline" size="sm" disabled={cards.length >= 8} onClick={() => setCards((xs) => [...xs, { number: "", name: "" }])}><Plus className="h-4 w-4" /> افزودن کارت</Button>
+              <Button size="sm" disabled={saveCards.isPending} onClick={() => saveCards.mutate()}>{saveCards.isPending ? "در حال ذخیره…" : saveCards.isSuccess ? "ذخیره شد ✓" : "ذخیره کارت‌ها"}</Button>
+            </div>
+          </CardContent>
+        </Card>
+      </TabsContent>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>اتصال پنل 3x-ui</CardTitle>
-          <p className="text-sm text-muted-foreground">پسورد را خالی بگذارید تا تغییر نکند.</p>
-        </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
-          {PANEL_FIELDS.map(({ key, label, type }) => (
-            <Field key={key} label={label}>
-              <Input type={type || "text"} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} placeholder={type === "password" ? "بدون تغییر" : ""} />
-            </Field>
-          ))}
-        </CardContent>
-      </Card>
+      {/* ───────────── Panel ───────────── */}
+      <TabsContent value="panel" className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-muted-foreground" /> اتصال پنل 3x-ui</CardTitle>
+            <p className="text-sm text-muted-foreground">پسورد را خالی بگذارید تا تغییر نکند.</p>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2">
+            {PANEL_FIELDS.map(({ key, label, type }) => (
+              <Field key={key} label={label}>
+                <Input type={type || "text"} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} placeholder={type === "password" ? "بدون تغییر" : ""} />
+              </Field>
+            ))}
+          </CardContent>
+        </Card>
+      </TabsContent>
 
       <div className="sticky bottom-4 flex justify-end">
         <Button size="lg" disabled={save.isPending} onClick={() => save.mutate()}>
-          <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره همه تنظیمات"}
+          <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات فروشگاه و پنل"}
         </Button>
       </div>
-    </div>
+    </Tabs>
   );
 }
