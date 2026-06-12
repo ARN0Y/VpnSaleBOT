@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import logging
@@ -64,15 +65,17 @@ _nav_filter = filters.Text(list(_ALL_NAV_BTNS))
 PANEL2_PRICE_DEFAULT = "7000"
 
 WELCOME_TEXT = (
-    "⚡ <b>به NavidVPN خوش آمدید</b>\n"
-    "<i>نویدِ یک اینترنت آزاد و پرسرعت — هر لحظه، همه‌جا.</i>\n\n"
-    "⚡️ سرعت بالا و اتصال بی‌وقفه\n"
-    "👥 کانفیگ‌های <b>۳ کاربره</b> — مناسب اشتراک‌گذاری با خانواده و دوستان\n"
-    "🇩🇪 <b>آیپی ثابت آلمان</b> — پایدار و مطمئن\n"
-    "🛡 امنیت کامل و حفظ حریم خصوصی\n"
-    "🎯 تحویل آنی سرویس و پشتیبانی واقعی\n\n"
-    "🛟 آیدی پشتیبانی: {support}\n\n"
-    "برای شروع، یکی از گزینه‌های زیر را انتخاب کنید 👇"
+    "⚡️ <b>NavidVPN</b>\n"
+    "<i>نویدِ یک اینترنت آزاد و پرسرعت — هر لحظه، همه‌جا.</i>\n"
+    "<code>─────────────────────</code>\n"
+    "🚀 سرعت بالا و اتصال پایدار و بی‌وقفه\n"
+    "👥 کانفیگ <b>۳ کاربره</b> — ایده‌آل برای خانواده و دوستان\n"
+    "🇩🇪 <b>آیپی ثابت آلمان</b> — مطمئن و باکیفیت\n"
+    "🛡 امنیت کامل و حفظ کامل حریم خصوصی\n"
+    "🎯 تحویل آنی سرویس + پشتیبانی واقعی انسانی\n"
+    "<code>─────────────────────</code>\n"
+    "🛟 پشتیبانی: {support}\n\n"
+    "✨ برای شروع، یکی از گزینه‌های زیر را انتخاب کنید 👇"
 )
 
 
@@ -168,6 +171,12 @@ async def infinite_enabled(db: AsyncDatabase) -> bool:
     return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
 
 
+async def panel1_enabled(db: AsyncDatabase) -> bool:
+    """Whether the primary 3x-ui panel is offered for new purchases. The admin
+    can turn it off in settings (e.g. to sell only via the second panel)."""
+    return str(await db.get_setting("panel_enabled", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
 # ───────────────────────── Second (dedicated) 3x-ui panel ─────────────────────────
 async def panel2_available(db: AsyncDatabase) -> bool:
     """True when the optional second panel is enabled and minimally configured."""
@@ -229,17 +238,23 @@ async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "Provis
     if prov2 is not None:
         return prov2
     settings: Settings = app.bot_data["settings"]
-    proxy = resolve_proxy_value(
-        await db.get_setting("panel2_proxy_url", ""),
-        await db.get_setting("panel2_use_proxy", ""),
-    )
-    panel2 = PanelClient(
-        db,
-        proxy_url=proxy,
-        pool_size=settings.panel_pool_size,
-        timeout_seconds=settings.panel_timeout_seconds,
-        kv_prefix="panel2_",
-    )
+    try:
+        proxy = resolve_proxy_value(
+            await db.get_setting("panel2_proxy_url", ""),
+            await db.get_setting("panel2_use_proxy", ""),
+        )
+        panel2 = PanelClient(
+            db,
+            proxy_url=proxy,
+            pool_size=settings.panel_pool_size,
+            timeout_seconds=settings.panel_timeout_seconds,
+            kv_prefix="panel2_",
+        )
+    except Exception:
+        # A malformed proxy URL (or any client-construction error) must not blow
+        # up the buy flow — surface it as "unavailable" instead.
+        LOG.exception("failed to build second-panel client")
+        return None
     prov2 = ProvisioningService(db, panel2, app.bot_data["agents"])
     app.bot_data["panel2"] = panel2
     app.bot_data["provisioning2"] = prov2
@@ -248,8 +263,10 @@ async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "Provis
 
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
-    rows = [
-        [InlineKeyboardButton("⚡ خرید سرویس پرسرعت", callback_data="menu:buy")],
+    rows: list[list[InlineKeyboardButton]] = []
+    if await panel1_enabled(db):
+        rows.append([InlineKeyboardButton("⚡ خرید سرویس پرسرعت", callback_data="menu:buy")])
+    rows += [
         [
             InlineKeyboardButton("📦 سرویس‌های من", callback_data="menu:subs"),
             InlineKeyboardButton("🔄 تمدید سرویس", callback_data="menu:renew"),
@@ -443,13 +460,15 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False, has_panel2: bool = False) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False, has_panel2: bool = False, has_primary: bool = True) -> ReplyKeyboardMarkup:
     # Hero "buy" button on top (full width), then balanced icy pairs below.
     rows = [
-        [KeyboardButton(BTN_BUY)],
         [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_RENEW)],
         [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_ACCOUNT)],
     ]
+    # Hero buy button on top only when the primary panel is enabled.
+    if has_primary:
+        rows.insert(0, [KeyboardButton(BTN_BUY)])
     # Dedicated second-panel buy option as its own full-width row, right under
     # the hero buy button so it stands out.
     if has_panel2:
@@ -620,7 +639,8 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
             has_test = True
     has_infinite = await infinite_enabled(db)
     has_panel2 = await panel2_available(db)
-    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite, has_panel2=has_panel2)
+    has_primary = await panel1_enabled(db)
+    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite, has_panel2=has_panel2, has_primary=has_primary)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -818,6 +838,15 @@ async def notify_admins(
 async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await ensure_user(update, context)
     db: AsyncDatabase = context.application.bot_data["db"]
+    if not await panel1_enabled(db):
+        await new_flow_card(
+            update,
+            context,
+            "🌐 <b>فروش از سرور اصلی موقتاً غیرفعال است.</b>\n\n"
+            "لطفاً از گزینه‌های دیگرِ خرید در منو استفاده کنید یا با پشتیبانی در ارتباط باشید.",
+            back_keyboard(),
+        )
+        return ConversationHandler.END
     if not await audience_sales_is_open(db, update.effective_user.id):
         await show_sales_closed(update, context)
         return ConversationHandler.END
@@ -1011,16 +1040,17 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await send_flow_prompt(
         update,
         context,
-        "🛒 <b>مرحله ۴ از ۴ – تایید نهایی</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🧾 <b>تایید نهایی سفارش</b>  ·  مرحله ۴ از ۴\n"
+        "<code>─────────────────────</code>\n"
         f"{server_line}"
         f"📦 حجم هر اشتراک: <b>{gb}</b> گیگ\n"
-        f"🔢 تعداد: <b>{qty}</b>\n"
+        f"🔢 تعداد: <b>{qty}</b> عدد\n"
         f"💵 قیمت هر گیگ: <b>{unit_price:,}</b> تومان\n"
-        f"💰 مبلغ کل: <b>{total:,}</b> تومان\n"
         f"🪪 نام کانفیگ: <b>{html.escape(client_name) if client_name else '🎲 رندوم'}</b>\n"
-        f"💳 روش پرداخت: <b>{method_label}</b>\n\n"
-        "در صورت تایید، سرویس فوری ساخته می‌شود.",
+        f"💳 روش پرداخت: <b>{method_label}</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"💰 مبلغ قابل پرداخت: <b>{total:,}</b> تومان\n\n"
+        "✅ با تایید، سرویس شما فوری ساخته و تحویل داده می‌شود.",
         buy_confirm_keyboard(),
     )
     return BUY_CONFIRM
@@ -1109,6 +1139,10 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await edit_text(query, "🌐 این سرویس در حال حاضر در دسترس نیست.", back_keyboard())
             return ConversationHandler.END
     else:
+        if not await panel1_enabled(db):
+            clear_flow_state(context)
+            await edit_text(query, "🌐 فروش از سرور اصلی غیرفعال شده است. مبلغی کسر نشد.", back_keyboard())
+            return ConversationHandler.END
         provisioning = context.application.bot_data["provisioning"]
     qr: QRService = context.application.bot_data["qr"]
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
@@ -1147,13 +1181,15 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         safe_link = html.escape(sub_link)
         caption = (
             "✅ <b>پرداخت با موفقیت انجام شد!</b>\n"
-            "<i>از خرید شما سپاسگزاریم 🌟</i>\n\n"
+            "<i>از اعتماد شما سپاسگزاریم 🌟</i>\n"
+            "<code>─────────────────────</code>\n"
             f"📦 حجم هر اشتراک: <b>{gb}</b> گیگ × <b>{qty}</b> عدد\n"
             f"💰 مبلغ پرداختی: <b>{total:,}</b> تومان\n"
-            f"💳 روش پرداخت: {html.escape(method_label)}\n\n"
+            f"💳 روش پرداخت: {html.escape(method_label)}\n"
+            "<code>─────────────────────</code>\n"
             "🔗 <b>لینک اشتراک شما:</b>\n"
             f"<code>{safe_link}</code>\n\n"
-            "برای اتصال، لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+            "📲 لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
         )
         is_last = idx == len(links) - 1
         png = await qr.png(sub_link)
@@ -1326,17 +1362,19 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     username = (user.username or snapshot["username"] or "").strip().lstrip("@")
     username_line = f"@{html.escape(username)}" if username else "ندارد"
     text = (
-        "👤 <b>اطلاعات حساب شما</b>\n\n"
+        "👤 <b>حساب کاربری شما</b>\n"
+        "<code>─────────────────────</code>\n"
         f"🆔 یوزرآیدی: <code>{user.id}</code>\n"
         f"👤 نام: {html.escape(user.first_name or snapshot['first_name'] or '')}\n"
         f"📛 یوزرنیم: {username_line}\n"
         f"🔐 سطح دسترسی: <b>{access_level}</b>\n"
         f"📅 تاریخ عضویت: {format_join_date(snapshot['joined_at'])}\n"
+        "<code>─────────────────────</code>\n"
         f"✅ سفارش‌های تاییدشده: {snapshot['approved_orders']}\n"
         f"👥 زیرمجموعه‌ها: {snapshot['referral_count']}\n"
         f"📦 کل حجم خریداری‌شده: {total_gb:,} گیگ\n"
         f"💰 کل هزینه ریالی: {snapshot['total_spent']:,} تومان\n"
-        f"👛 موجودی کیف پول: {snapshot['wallet_balance']:,} تومان"
+        f"👛 موجودی کیف پول: <b>{snapshot['wallet_balance']:,}</b> تومان"
         f"{credit_lines}"
     )
     await new_flow_card(update, context, text, back_keyboard())
@@ -1926,9 +1964,11 @@ async def wallet_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await new_flow_card(
         update,
         context,
-        "💳 <b>کیف پول شما</b>\n\n"
-        f"موجودی فعلی: <b>{wallet:,}</b> تومان\n"
-        f"مبنای شارژ پیشنهادی: <b>{unit_price:,}</b> تومان",
+        "💎 <b>کیف پول من</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"💰 موجودی فعلی: <b>{wallet:,}</b> تومان\n"
+        f"🏷 مبنای شارژ پیشنهادی: <b>{unit_price:,}</b> تومان\n\n"
+        "برای افزایش موجودی، یکی از روش‌های زیر را انتخاب کنید 👇",
         wallet_keyboard(),
     )
 
@@ -2885,7 +2925,29 @@ def build_main_conversation() -> ConversationHandler:
     )
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global safety net: log any unhandled error and tell the user gently,
+    instead of leaving them with a silent failure. Best-effort — never raises."""
+    LOG.exception("unhandled error while processing update", exc_info=context.error)
+    try:
+        if isinstance(update, Update):
+            if update.callback_query:
+                with contextlib.suppress(Exception):
+                    await update.callback_query.answer("خطایی رخ داد. دوباره تلاش کنید.", show_alert=False)
+            chat = update.effective_chat
+            if chat is not None:
+                with contextlib.suppress(Exception):
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text="⚠️ مشکلی پیش آمد. لطفاً چند لحظه بعد دوباره تلاش کنید یا با پشتیبانی در ارتباط باشید.",
+                        parse_mode=ParseMode.HTML,
+                    )
+    except Exception:
+        LOG.exception("error handler itself failed")
+
+
 def register_handlers(app: Application) -> None:
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", start))
     # Admin custom text input (group=-1 runs before ConversationHandler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_custom_text_handler), group=-1)

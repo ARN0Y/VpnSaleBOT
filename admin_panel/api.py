@@ -632,6 +632,16 @@ async def set_infinite_package(request: Request):
     }
 
 
+@router.post("/panel-primary")
+async def set_panel_primary(request: Request):
+    """Enable/disable selling from the primary 3x-ui panel (settings KV, no
+    schema change). When off, the bot hides the main buy option."""
+    body = await _json_body(request)
+    enabled = "1" if bool(body.get("enabled")) else "0"
+    await db(request).admin_update_settings({"panel_enabled": enabled})
+    return {"ok": True, "enabled": enabled == "1"}
+
+
 @router.post("/panel2")
 async def set_panel2(request: Request):
     """Configure the optional second 3x-ui panel (stored in settings KV, no

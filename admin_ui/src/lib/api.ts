@@ -113,6 +113,7 @@ export const api = {
     post<Ok>("/infinite-package", p),
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
+  setPanelPrimary: (enabled: boolean) => post<Ok>("/panel-primary", { enabled }),
   setPanel2: (p: {
     enabled: boolean;
     label: string;

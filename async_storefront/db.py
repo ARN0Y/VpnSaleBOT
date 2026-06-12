@@ -654,6 +654,9 @@ class AsyncDatabase:
             "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
+            # Primary panel on/off (lets the admin stop selling from the main
+            # 3x-ui panel, e.g. when only the second panel should be sold).
+            "panel_enabled": "1",
             # ── Second 3x-ui panel (optional, stored entirely in settings KV so no
             #    schema change). Sold as a dedicated buy option at its own price. ──
             "panel2_enabled": "0",

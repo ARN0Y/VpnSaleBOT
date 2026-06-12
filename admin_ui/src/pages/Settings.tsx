@@ -63,6 +63,7 @@ export function Settings() {
     enabled: false, label: "سرور اختصاصی", base_url: "", username: "", password: "",
     inbound_id: "0", sub_link_base: "", use_proxy: "" as Tri, proxy_url: "", price_per_gb: "7000",
   });
+  const [p1Enabled, setP1Enabled] = React.useState(true);
   const inited = React.useRef(false);
   React.useEffect(() => {
     if (data && !inited.current) {
@@ -100,6 +101,7 @@ export function Settings() {
         proxy_url: items.panel2_proxy_url ?? "",
         price_per_gb: items.panel2_price_per_gb ?? "7000",
       });
+      setP1Enabled((items.panel_enabled ?? "1") !== "0");
       inited.current = true;
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -122,6 +124,10 @@ export function Settings() {
       price_per_gb: Number(p2.price_per_gb) || 7000,
     }),
     onSuccess: () => { setP2((s) => ({ ...s, password: "" })); qc.invalidateQueries({ queryKey: ["settings"] }); },
+  });
+  const savePanelPrimary = useMutation({
+    mutationFn: (enabled: boolean) => api.setPanelPrimary(enabled),
+    onSuccess: (_r, enabled) => { setP1Enabled(enabled); qc.invalidateQueries({ queryKey: ["settings"] }); },
   });
   const toggle = useMutation({ mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const uiMode = useMutation({
@@ -297,15 +303,27 @@ export function Settings() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-muted-foreground" /> پنل اصلی 3x-ui</CardTitle>
-            <p className="text-sm text-muted-foreground">پسورد را خالی بگذارید تا تغییر نکند.</p>
+            <p className="text-sm text-muted-foreground">پسورد را خالی بگذارید تا تغییر نکند. با خاموش‌کردن این پنل، گزینه‌ی خرید از سرور اصلی در ربات پنهان می‌شود (تمدید سرویس‌های موجود همچنان کار می‌کند).</p>
           </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            {PANEL_FIELDS.map(({ key, label, type }) => (
-              <Field key={key} label={label}>
-                <Input type={type || "text"} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} placeholder={type === "password" ? "بدون تغییر" : ""} />
-              </Field>
-            ))}
-            <div className="sm:col-span-2 flex justify-end">
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
+              <div className="flex items-center gap-3">
+                <span className="font-bold text-white">وضعیت فروش از سرور اصلی</span>
+                <Badge variant={p1Enabled ? "success" : "danger"}>{p1Enabled ? "فعال" : "غیرفعال"}</Badge>
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" disabled={p1Enabled || savePanelPrimary.isPending} onClick={() => savePanelPrimary.mutate(true)}><LockOpen className="h-4 w-4" /> فعال</Button>
+                <Button size="sm" variant="destructive" disabled={!p1Enabled || savePanelPrimary.isPending} onClick={() => savePanelPrimary.mutate(false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {PANEL_FIELDS.map(({ key, label, type }) => (
+                <Field key={key} label={label}>
+                  <Input type={type || "text"} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} placeholder={type === "password" ? "بدون تغییر" : ""} />
+                </Field>
+              ))}
+            </div>
+            <div className="flex justify-end">
               <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره پنل اصلی"}</Button>
             </div>
           </CardContent>
