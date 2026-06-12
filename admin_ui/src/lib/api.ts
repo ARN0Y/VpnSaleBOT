@@ -114,6 +114,7 @@ export const api = {
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
   setPanelPrimary: (enabled: boolean) => post<Ok>("/panel-primary", { enabled }),
+  setTexts: (p: { welcome_text?: string; labels?: Record<string, string> }) => post<Ok>("/texts", p),
   setPanel2: (p: {
     enabled: boolean;
     label: string;

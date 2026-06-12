@@ -632,6 +632,31 @@ async def set_infinite_package(request: Request):
     }
 
 
+_NAV_LABEL_ACTIONS = {
+    "buy", "renew", "subs", "account", "wallet",
+    "tariffs", "support", "test_config", "agent_request", "infinite",
+}
+
+
+@router.post("/texts")
+async def set_texts(request: Request):
+    """Edit the welcome message and the bot's menu-button labels (settings KV,
+    no schema change). Empty label = use the built-in default."""
+    body = await _json_body(request)
+    values: dict[str, str] = {}
+    if "welcome_text" in body:
+        values["welcome_text"] = str(body.get("welcome_text") or "").strip()
+    labels = body.get("labels")
+    if isinstance(labels, dict):
+        for action, label in labels.items():
+            key = str(action).strip()
+            if key in _NAV_LABEL_ACTIONS:
+                values[f"btn_{key}_label"] = str(label or "").strip()
+    if values:
+        await db(request).admin_update_settings(values)
+    return {"ok": True}
+
+
 @router.post("/panel-primary")
 async def set_panel_primary(request: Request):
     """Enable/disable selling from the primary 3x-ui panel (settings KV, no

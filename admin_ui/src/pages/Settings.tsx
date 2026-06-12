@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Field } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,6 +29,19 @@ const PANEL_FIELDS: { key: string; label: string; type?: string }[] = [
   { key: "panel_password", label: "پسورد پنل", type: "password" },
   { key: "panel_inbound_id", label: "Inbound ID" },
   { key: "sub_link_base", label: "آدرس پایه لینک اشتراک" },
+];
+// action -> default label (must match async_storefront/handlers.py NAV_ACTIONS)
+const NAV_LABEL_FIELDS: { action: string; label: string; def: string }[] = [
+  { action: "buy", label: "خرید سرویس", def: "⚡ خرید سرویس پرسرعت" },
+  { action: "renew", label: "تمدید", def: "🔄 تمدید سرویس" },
+  { action: "subs", label: "سرویس‌های من", def: "📦 سرویس‌های من" },
+  { action: "account", label: "حساب کاربری", def: "🪪 حساب کاربری" },
+  { action: "wallet", label: "کیف پول", def: "💎 کیف پول من" },
+  { action: "tariffs", label: "تعرفه‌ها", def: "🏷 تعرفه‌ها" },
+  { action: "support", label: "پشتیبانی", def: "🛟 تماس با پشتیبانی" },
+  { action: "test_config", label: "تست رایگان", def: "🆓 دریافت تست رایگان" },
+  { action: "agent_request", label: "درخواست نمایندگی", def: "🤝 درخواست نمایندگی" },
+  { action: "infinite", label: "بسته‌ی بی‌نهایت", def: "♾️ بسته‌ی بی‌نهایت" },
 ];
 
 function SalesRow({ title, audience, status, onToggle, busy }: {
@@ -64,6 +78,8 @@ export function Settings() {
     inbound_id: "0", sub_link_base: "", use_proxy: "" as Tri, proxy_url: "", price_per_gb: "7000",
   });
   const [p1Enabled, setP1Enabled] = React.useState(true);
+  const [welcome, setWelcome] = React.useState("");
+  const [navLabels, setNavLabels] = React.useState<Record<string, string>>({});
   const inited = React.useRef(false);
   React.useEffect(() => {
     if (data && !inited.current) {
@@ -102,6 +118,8 @@ export function Settings() {
         price_per_gb: items.panel2_price_per_gb ?? "7000",
       });
       setP1Enabled((items.panel_enabled ?? "1") !== "0");
+      setWelcome(items.welcome_text ?? "");
+      setNavLabels(Object.fromEntries(NAV_LABEL_FIELDS.map((f) => [f.action, items[`btn_${f.action}_label`] ?? ""])));
       inited.current = true;
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -129,6 +147,10 @@ export function Settings() {
     mutationFn: (enabled: boolean) => api.setPanelPrimary(enabled),
     onSuccess: (_r, enabled) => { setP1Enabled(enabled); qc.invalidateQueries({ queryKey: ["settings"] }); },
   });
+  const saveTexts = useMutation({
+    mutationFn: () => api.setTexts({ welcome_text: welcome, labels: navLabels }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
   const toggle = useMutation({ mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const uiMode = useMutation({
     mutationFn: (mode: "modern" | "classic") => api.setUiMode(mode),
@@ -144,6 +166,7 @@ export function Settings() {
     { v: "general", label: "عمومی" },
     { v: "sales", label: "فروش و تعرفه" },
     { v: "payment", label: "پرداخت" },
+    { v: "texts", label: "متن‌ها و دکمه‌ها" },
     { v: "panels", label: "پنل‌ها" },
   ];
 
@@ -299,6 +322,51 @@ export function Settings() {
       </TabsContent>
 
       {/* ───────────── Panels ───────────── */}
+      {/* ───────────── Texts & button labels ───────────── */}
+      <TabsContent value="texts" className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>پیام خوش‌آمدگویی</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              متن صفحه‌ی شروع ربات. می‌توانید از <code className="rounded bg-white/10 px-1">{"{support}"}</code> برای درج خودکار آیدی پشتیبانی و از تگ‌های ساده‌ی HTML تلگرام (<code className="rounded bg-white/10 px-1">&lt;b&gt;</code>، <code className="rounded bg-white/10 px-1">&lt;i&gt;</code>، <code className="rounded bg-white/10 px-1">&lt;code&gt;</code>) استفاده کنید. خالی بگذارید تا متن پیش‌فرض نمایش داده شود.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Textarea value={welcome} onChange={(e) => setWelcome(e.target.value)} rows={10} placeholder="خالی = متن پیش‌فرض" className="font-mono text-sm leading-7" dir="rtl" />
+            <div className="flex justify-end">
+              <Button size="sm" disabled={saveTexts.isPending} onClick={() => saveTexts.mutate()}>
+                <Save className="h-4 w-4" /> {saveTexts.isPending ? "در حال ذخیره…" : saveTexts.isSuccess ? "ذخیره شد ✓" : "ذخیره متن‌ها و دکمه‌ها"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>نام دکمه‌های منوی ربات</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              نام نمایشی هر دکمه‌ی منو را تغییر دهید (ایموجی هم می‌توانید بگذارید). خالی بگذارید تا نام پیش‌فرض استفاده شود. تغییرات تا چند لحظه بعد در ربات اعمال می‌شوند؛ کاربران با زدن /start منوی به‌روز را می‌بینند.
+            </p>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2">
+            {NAV_LABEL_FIELDS.map((f) => (
+              <Field key={f.action} label={f.label} hint={`پیش‌فرض: ${f.def}`}>
+                <Input
+                  value={navLabels[f.action] ?? ""}
+                  placeholder={f.def}
+                  onChange={(e) => setNavLabels((s) => ({ ...s, [f.action]: e.target.value }))}
+                />
+              </Field>
+            ))}
+            <div className="sm:col-span-2 flex justify-end">
+              <Button size="sm" disabled={saveTexts.isPending} onClick={() => saveTexts.mutate()}>
+                <Save className="h-4 w-4" /> {saveTexts.isPending ? "در حال ذخیره…" : saveTexts.isSuccess ? "ذخیره شد ✓" : "ذخیره متن‌ها و دکمه‌ها"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </TabsContent>
+
       <TabsContent value="panels" className="space-y-6">
         <Card>
           <CardHeader>

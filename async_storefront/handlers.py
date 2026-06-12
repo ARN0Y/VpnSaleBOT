@@ -60,9 +60,74 @@ BTN_AGENT_REQ = "🤝 درخواست نمایندگی"
 BTN_INFINITE = "♾️ بسته‌ی بی‌نهایت"
 BTN_PANEL2 = "🌐 سرور اختصاصی"
 
-_ALL_NAV_BTNS = frozenset({BTN_BUY, BTN_RENEW, BTN_SUBS, BTN_ACCOUNT, BTN_WALLET, BTN_TARIFFS, BTN_SUPPORT, BTN_TEST_CONFIG, BTN_AGENT_REQ, BTN_INFINITE, BTN_PANEL2})
-_nav_filter = filters.Text(list(_ALL_NAV_BTNS))
 PANEL2_PRICE_DEFAULT = "7000"
+
+# ── Editable reply-keyboard labels ────────────────────────────────────────────
+# Admins can rename the bot's menu buttons from the panel. Each action has a
+# default label and a settings key; the live label is the override or default.
+# panel2 keeps its own (panel2_label) reply button, fixed here for routing.
+NAV_ACTIONS: tuple[tuple[str, str], ...] = (
+    ("buy", BTN_BUY),
+    ("renew", BTN_RENEW),
+    ("subs", BTN_SUBS),
+    ("account", BTN_ACCOUNT),
+    ("wallet", BTN_WALLET),
+    ("tariffs", BTN_TARIFFS),
+    ("support", BTN_SUPPORT),
+    ("test_config", BTN_TEST_CONFIG),
+    ("agent_request", BTN_AGENT_REQ),
+    ("infinite", BTN_INFINITE),
+)
+NAV_DEFAULT_LABEL: dict[str, str] = {action: default for action, default in NAV_ACTIONS}
+NAV_LABEL_SETTING: dict[str, str] = {action: f"btn_{action}_label" for action, _ in NAV_ACTIONS}
+
+# Index consumed by the (sync) reply-button filter + router. Always seeded with
+# defaults so routing works even before the first DB read, and kept current as
+# keyboards are (re)built.
+_NAV_TEXT_TO_ACTION: dict[str, str] = {}
+_NAV_TEXTSET: set[str] = set()
+
+
+def _rebuild_nav_index(labels: dict[str, str]) -> None:
+    mapping: dict[str, str] = {}
+    # Defaults first (fallback so a just-renamed button's old label still routes
+    # for users whose persistent keyboard hasn't refreshed yet).
+    for action, default in NAV_DEFAULT_LABEL.items():
+        mapping[default.strip()] = action
+    for action, label in labels.items():
+        clean = (label or "").strip()
+        if clean:
+            mapping[clean] = action
+    mapping[BTN_PANEL2.strip()] = "panel2"
+    global _NAV_TEXT_TO_ACTION, _NAV_TEXTSET
+    _NAV_TEXT_TO_ACTION = mapping
+    _NAV_TEXTSET = set(mapping.keys())
+
+
+_rebuild_nav_index(dict(NAV_DEFAULT_LABEL))
+
+
+async def resolve_nav_labels(db: AsyncDatabase) -> dict[str, str]:
+    """Current label for each nav action (admin override or default). Also
+    refreshes the in-memory routing index so the reply-button filter stays in
+    sync with whatever was last shown to users."""
+    labels: dict[str, str] = {}
+    for action, default in NAV_DEFAULT_LABEL.items():
+        val = (await db.get_setting(NAV_LABEL_SETTING[action], "") or "").strip()
+        labels[action] = val or default
+    _rebuild_nav_index(labels)
+    return labels
+
+
+class _NavFilter(filters.MessageFilter):
+    """Matches a reply message whose text is one of the live menu-button labels."""
+
+    def filter(self, message) -> bool:  # sync, reads the in-memory index
+        text = (message.text or "").strip()
+        return bool(text) and text in _NAV_TEXTSET
+
+
+_nav_filter = _NavFilter()
 
 WELCOME_TEXT = (
     "⚡️ <b>NavidVPN</b>\n"
@@ -80,11 +145,12 @@ WELCOME_TEXT = (
 
 
 async def render_welcome(db: AsyncDatabase) -> str:
-    """Welcome text with the support id injected from settings (single source
-    of truth — keeps the welcome's support handle in sync with the support
-    section and the admin-configured value)."""
+    """Welcome text with the support id injected from settings. The admin can
+    override the whole message from the panel (``welcome_text``); the optional
+    ``{support}`` placeholder is still filled in. Falls back to the built-in."""
+    template = (await db.get_setting("welcome_text", "") or "").strip() or WELCOME_TEXT
     support = (await db.get_setting("support_id", "") or "").strip()
-    return WELCOME_TEXT.replace("{support}", html.escape(support) if support else "—")
+    return template.replace("{support}", html.escape(support) if support else "—")
 
 BAN_TEXT = (
     "⛔️ <b>دسترسی شما به ربات محدود شده است.</b>\n\n"
@@ -263,23 +329,24 @@ async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "Provis
 
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
+    lbl = await resolve_nav_labels(db)
     rows: list[list[InlineKeyboardButton]] = []
     if await panel1_enabled(db):
-        rows.append([InlineKeyboardButton("⚡ خرید سرویس پرسرعت", callback_data="menu:buy")])
+        rows.append([InlineKeyboardButton(lbl["buy"], callback_data="menu:buy")])
     rows += [
         [
-            InlineKeyboardButton("📦 سرویس‌های من", callback_data="menu:subs"),
-            InlineKeyboardButton("🔄 تمدید سرویس", callback_data="menu:renew"),
+            InlineKeyboardButton(lbl["subs"], callback_data="menu:subs"),
+            InlineKeyboardButton(lbl["renew"], callback_data="menu:renew"),
         ],
         [
-            InlineKeyboardButton("💎 کیف پول من", callback_data="menu:wallet"),
-            InlineKeyboardButton("🪪 حساب کاربری", callback_data="menu:account"),
+            InlineKeyboardButton(lbl["wallet"], callback_data="menu:wallet"),
+            InlineKeyboardButton(lbl["account"], callback_data="menu:account"),
         ],
     ]
     if await panel2_available(db):
         rows.insert(1, [InlineKeyboardButton(f"🌐 {await panel2_label(db)}", callback_data="menu:buy2")])
     if await infinite_enabled(db):
-        rows.insert(1, [InlineKeyboardButton("♾️ بسته‌ی بی‌نهایت", callback_data="menu:infinite")])
+        rows.insert(1, [InlineKeyboardButton(lbl["infinite"], callback_data="menu:infinite")])
     if agent and not int(agent["disabled"] or 0):
         try:
             permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
@@ -288,20 +355,20 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
         if "test" in permissions:
             rows.append(
                 [
-                    InlineKeyboardButton("🆓 دریافت تست رایگان", callback_data="menu:test_config"),
-                    InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
+                    InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config"),
+                    InlineKeyboardButton(lbl["tariffs"], callback_data="menu:tariffs"),
                 ]
             )
         else:
-            rows.append([InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs")])
+            rows.append([InlineKeyboardButton(lbl["tariffs"], callback_data="menu:tariffs")])
     else:
         rows.append(
             [
-                InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu:agent_request"),
-                InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
+                InlineKeyboardButton(lbl["agent_request"], callback_data="menu:agent_request"),
+                InlineKeyboardButton(lbl["tariffs"], callback_data="menu:tariffs"),
             ]
         )
-    rows.append([InlineKeyboardButton("🛟 تماس با پشتیبانی", callback_data="menu:support")])
+    rows.append([InlineKeyboardButton(lbl["support"], callback_data="menu:support")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -460,15 +527,18 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False, has_panel2: bool = False, has_primary: bool = True) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False, has_panel2: bool = False, has_primary: bool = True) -> ReplyKeyboardMarkup:
+    def L(action: str) -> str:
+        return labels.get(action) or NAV_DEFAULT_LABEL[action]
+
     # Hero "buy" button on top (full width), then balanced icy pairs below.
     rows = [
-        [KeyboardButton(BTN_SUBS), KeyboardButton(BTN_RENEW)],
-        [KeyboardButton(BTN_WALLET), KeyboardButton(BTN_ACCOUNT)],
+        [KeyboardButton(L("subs")), KeyboardButton(L("renew"))],
+        [KeyboardButton(L("wallet")), KeyboardButton(L("account"))],
     ]
     # Hero buy button on top only when the primary panel is enabled.
     if has_primary:
-        rows.insert(0, [KeyboardButton(BTN_BUY)])
+        rows.insert(0, [KeyboardButton(L("buy"))])
     # Dedicated second-panel buy option as its own full-width row, right under
     # the hero buy button so it stands out.
     if has_panel2:
@@ -476,15 +546,15 @@ def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_i
     # Feature the fair-usage "infinite" package as its own full-width row right
     # under the hero buy button so it stands out.
     if has_infinite:
-        rows.insert(1, [KeyboardButton(BTN_INFINITE)])
+        rows.insert(1, [KeyboardButton(L("infinite"))])
     fourth = []
     if is_agent and has_test:
-        fourth.append(KeyboardButton(BTN_TEST_CONFIG))
+        fourth.append(KeyboardButton(L("test_config")))
     if not is_agent:
-        fourth.append(KeyboardButton(BTN_AGENT_REQ))
-    fourth.append(KeyboardButton(BTN_TARIFFS))
+        fourth.append(KeyboardButton(L("agent_request")))
+    fourth.append(KeyboardButton(L("tariffs")))
     rows.append(fourth)
-    rows.append([KeyboardButton(BTN_SUPPORT)])
+    rows.append([KeyboardButton(L("support"))])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -640,7 +710,8 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
     has_infinite = await infinite_enabled(db)
     has_panel2 = await panel2_available(db)
     has_primary = await panel1_enabled(db)
-    return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite, has_panel2=has_panel2, has_primary=has_primary)
+    labels = await resolve_nav_labels(db)
+    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_infinite=has_infinite, has_panel2=has_panel2, has_primary=has_primary)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2614,37 +2685,39 @@ async def agent_admin_flow_cancel(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles reply keyboard navigation from any conversation state."""
+    """Handles reply keyboard navigation from any conversation state. Buttons are
+    matched by their live (renamable) label via the in-memory routing index."""
     text = (update.effective_message.text or "").strip()
+    action = _NAV_TEXT_TO_ACTION.get(text)
     clear_flow_state(context)
-    if text == BTN_BUY:
+    if action == "buy":
         return await buy_start(update, context)
-    if text == BTN_PANEL2:
+    if action == "panel2":
         return await buy2_start(update, context)
-    if text == BTN_RENEW:
+    if action == "renew":
         return await renew_start(update, context)
-    if text == BTN_SUBS:
+    if action == "subs":
         await my_subscriptions(update, context)
         return ConversationHandler.END
-    if text == BTN_ACCOUNT:
+    if action == "account":
         await account_info(update, context)
         return ConversationHandler.END
-    if text == BTN_WALLET:
+    if action == "wallet":
         await wallet_info(update, context)
         return ConversationHandler.END
-    if text == BTN_TARIFFS:
+    if action == "tariffs":
         await tariffs_info(update, context)
         return ConversationHandler.END
-    if text == BTN_SUPPORT:
+    if action == "support":
         await support_info(update, context)
         return ConversationHandler.END
-    if text == BTN_TEST_CONFIG:
+    if action == "test_config":
         await agent_test_config(update, context)
         return ConversationHandler.END
-    if text == BTN_INFINITE:
+    if action == "infinite":
         await infinite_start(update, context)
         return ConversationHandler.END
-    if text == BTN_AGENT_REQ:
+    if action == "agent_request":
         return await agent_request_start(update, context)
     return ConversationHandler.END
 

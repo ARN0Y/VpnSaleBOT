@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from io import BytesIO
 import warnings
 
@@ -55,6 +56,12 @@ async def post_init(app: Application) -> None:
         backup_dir=settings.backup_dir,
         backup_chat_id=0,
     )
+    # Warm the renamable menu-button routing index so custom labels route
+    # correctly even before the first keyboard is rebuilt.
+    from .handlers import resolve_nav_labels
+
+    with contextlib.suppress(Exception):
+        await resolve_nav_labels(db)
 
 
 async def post_shutdown(app: Application) -> None:
