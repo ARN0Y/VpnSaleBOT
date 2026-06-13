@@ -26,12 +26,16 @@ class PasarGuardError(RuntimeError):
 
 # Centralised endpoint templates. PasarGuard v5 (Marzban-lineage) conventions;
 # confirmed/adjusted against the live panel via the probe. `{u}` = username.
+# Confirmed against a live PasarGuard v5.0.1 panel (see pg_probe output): token
+# is /api/admin/token, current admin is /api/admin, groups/users/admins as below.
+# Single-user create/CRUD path (singular vs plural) is resolved at runtime from
+# a candidate list and cached, so it self-adapts across point releases.
 PG_API = {
-    "token_candidates": ("/api/admins/token", "/api/admin/token", "/api/token"),
-    "current_admin_candidates": ("/api/admins/current", "/api/admin", "/api/admins/me"),
+    "token_candidates": ("/api/admin/token", "/api/admins/token", "/api/token"),
+    "current_admin_candidates": ("/api/admin", "/api/admins/current", "/api/admins/me"),
     "groups": "/api/groups",
-    "users": "/api/users",
-    "user": "/api/users/{u}",
+    "users": "/api/users",          # list (GET) + create (POST) — RESTful plural
+    "user": "/api/users/{u}",       # single GET/PUT/DELETE  (fallback: /api/user/{u})
     "user_reset": "/api/users/{u}/reset",
     "admins": "/api/admins",
     "admin": "/api/admins/{u}",
