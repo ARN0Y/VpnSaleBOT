@@ -41,19 +41,15 @@ def parse_packages(raw) -> list[dict]:
 
 
 def package_price(pkg: dict, agent) -> int:
-    """Price a package for a given audience.
-    - volume   : agents pay gb × their own per-GB rate (fallback to the fixed
-                 price if they have no custom rate); everyone else pays `price`.
-    - unlimited: agents pay the package's `agent_price` (fallback `price`);
-                 everyone else pays `price`.
+    """Price a package for a given audience — fully explicit, no per-GB leakage.
+
+    Agents pay the package's ``agent_price`` when it is set (> 0); otherwise
+    everyone (users and agents) pays the package's fixed ``price``.
     """
-    agent_rate = int(agent["price_per_gb"] or 0) if agent else 0
-    if pkg["kind"] == "volume":
-        if agent and agent_rate > 0:
-            return int(pkg["gb"]) * agent_rate
-        return int(pkg["price"])
     if agent:
-        return int(pkg["agent_price"]) or int(pkg["price"])
+        agent_price = int(pkg.get("agent_price") or 0)
+        if agent_price > 0:
+            return agent_price
     return int(pkg["price"])
 
 

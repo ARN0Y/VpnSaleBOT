@@ -76,7 +76,6 @@ NAV_ACTIONS: tuple[tuple[str, str], ...] = (
     ("support", BTN_SUPPORT),
     ("test_config", BTN_TEST_CONFIG),
     ("agent_request", BTN_AGENT_REQ),
-    ("infinite", BTN_INFINITE),
 )
 NAV_DEFAULT_LABEL: dict[str, str] = {action: default for action, default in NAV_ACTIONS}
 NAV_LABEL_SETTING: dict[str, str] = {action: f"btn_{action}_label" for action, _ in NAV_ACTIONS}
@@ -527,8 +526,6 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
     ]
     if await panel2_available(db):
         rows.insert(1, [InlineKeyboardButton(f"🌐 {await panel2_label(db)}", callback_data="menu:buy2")])
-    if await infinite_enabled(db):
-        rows.insert(1, [InlineKeyboardButton(lbl["infinite"], callback_data="menu:infinite")])
     if agent and not int(agent["disabled"] or 0):
         try:
             permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
@@ -709,7 +706,7 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_infinite: bool = False, has_panel2: bool = False, has_primary: bool = True) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_panel2: bool = False, has_primary: bool = True) -> ReplyKeyboardMarkup:
     def L(action: str) -> str:
         return labels.get(action) or NAV_DEFAULT_LABEL[action]
 
@@ -725,10 +722,6 @@ def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_t
     # the hero buy button so it stands out.
     if has_panel2:
         rows.insert(1, [KeyboardButton(BTN_PANEL2)])
-    # Feature the fair-usage "infinite" package as its own full-width row right
-    # under the hero buy button so it stands out.
-    if has_infinite:
-        rows.insert(1, [KeyboardButton(L("infinite"))])
     fourth = []
     if is_agent and has_test:
         fourth.append(KeyboardButton(L("test_config")))
@@ -889,11 +882,10 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
             has_test = "test" in permissions
         except Exception:
             has_test = True
-    has_infinite = await infinite_enabled(db)
     has_panel2 = await panel2_available(db)
     has_primary = await panel1_enabled(db)
     labels = await resolve_nav_labels(db)
-    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_infinite=has_infinite, has_panel2=has_panel2, has_primary=has_primary)
+    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_panel2=has_panel2, has_primary=has_primary)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2899,9 +2891,6 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
     if action == "test_config":
         await agent_test_config(update, context)
-        return ConversationHandler.END
-    if action == "infinite":
-        await infinite_start(update, context)
         return ConversationHandler.END
     if action == "agent_request":
         return await agent_request_start(update, context)
