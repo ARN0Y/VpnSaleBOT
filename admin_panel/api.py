@@ -657,6 +657,42 @@ async def set_texts(request: Request):
     return {"ok": True}
 
 
+@router.post("/panel-packages")
+async def set_panel_packages(request: Request):
+    """Save a panel's package list (volume / fair-usage 'unlimited') as JSON in
+    settings KV. panel='1' → primary, '2' → second. Empty list clears packages
+    (panel falls back to the per-GB flow)."""
+    import json as _json
+
+    body = await _json_body(request)
+    panel = "2" if str(body.get("panel")) == "2" else "1"
+    raw = body.get("packages")
+
+    def _i(value) -> int:
+        try:
+            return max(0, int(float(value)))
+        except (TypeError, ValueError):
+            return 0
+
+    cleaned: list[dict] = []
+    if isinstance(raw, list):
+        for item in raw[:30]:
+            kind = "unlimited" if str((item or {}).get("kind")) == "unlimited" else "volume"
+            title = str((item or {}).get("title") or "").strip()[:64]
+            gb = _i((item or {}).get("gb"))
+            days = _i((item or {}).get("days"))
+            price = _i((item or {}).get("price"))
+            agent_price = _i((item or {}).get("agent_price"))
+            if not title or price <= 0:
+                continue
+            if kind == "volume" and gb <= 0:
+                continue
+            cleaned.append({"kind": kind, "title": title, "gb": gb, "days": days, "price": price, "agent_price": agent_price})
+    key = "panel2_packages" if panel == "2" else "panel_packages"
+    await db(request).admin_update_settings({key: _json.dumps(cleaned, ensure_ascii=False) if cleaned else ""})
+    return {"ok": True, "panel": panel, "count": len(cleaned)}
+
+
 @router.post("/panel-primary")
 async def set_panel_primary(request: Request):
     """Enable/disable selling from the primary 3x-ui panel (settings KV, no

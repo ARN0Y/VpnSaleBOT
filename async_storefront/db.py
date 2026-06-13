@@ -657,6 +657,10 @@ class AsyncDatabase:
             # Primary panel on/off (lets the admin stop selling from the main
             # 3x-ui panel, e.g. when only the second panel should be sold).
             "panel_enabled": "1",
+            # Per-panel package lists (JSON). When non-empty, the bot sells these
+            # packages for that panel instead of the per-GB flow.
+            "panel_packages": "",
+            "panel2_packages": "",
             # ── Second 3x-ui panel (optional, stored entirely in settings KV so no
             #    schema change). Sold as a dedicated buy option at its own price. ──
             "panel2_enabled": "0",

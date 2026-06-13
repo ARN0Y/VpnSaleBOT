@@ -13,6 +13,50 @@ TEST_CONFIG_BYTES = 200 * 1024 * 1024
 TEST_CONFIG_TTL_SECONDS = 10 * 60
 
 
+def parse_packages(raw) -> list[dict]:
+    """Parse a panel's package list (stored as JSON in settings). Each item:
+    {kind: 'volume'|'unlimited', title, gb, days, price, agent_price}. Invalid
+    rows are dropped so a malformed entry can never crash the buy flow."""
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    out: list[dict] = []
+    for item in data if isinstance(data, list) else []:
+        try:
+            kind = "unlimited" if str((item or {}).get("kind")) == "unlimited" else "volume"
+            title = str((item or {}).get("title") or "").strip()
+            gb = max(0, int(float((item or {}).get("gb") or (item or {}).get("cap_gb") or 0)))
+            days = max(0, int(float((item or {}).get("days") or 0)))
+            price = max(0, int(float((item or {}).get("price") or 0)))
+            agent_price = max(0, int(float((item or {}).get("agent_price") or 0)))
+        except (TypeError, ValueError):
+            continue
+        if not title or price <= 0:
+            continue
+        if kind == "volume" and gb <= 0:
+            continue
+        out.append({"kind": kind, "title": title, "gb": gb, "days": days, "price": price, "agent_price": agent_price})
+    return out
+
+
+def package_price(pkg: dict, agent) -> int:
+    """Price a package for a given audience.
+    - volume   : agents pay gb × their own per-GB rate (fallback to the fixed
+                 price if they have no custom rate); everyone else pays `price`.
+    - unlimited: agents pay the package's `agent_price` (fallback `price`);
+                 everyone else pays `price`.
+    """
+    agent_rate = int(agent["price_per_gb"] or 0) if agent else 0
+    if pkg["kind"] == "volume":
+        if agent and agent_rate > 0:
+            return int(pkg["gb"]) * agent_rate
+        return int(pkg["price"])
+    if agent:
+        return int(pkg["agent_price"]) or int(pkg["price"])
+    return int(pkg["price"])
+
+
 def _safe_positive_int(value, default: int = 1) -> int:
     try:
         return max(1, int(str(value).strip()))
@@ -521,6 +565,102 @@ class ProvisioningService:
                     await conn.execute(
                         "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
                         (int(user_id), -int(final_total), "renewal_credit_refund", f"{order_id}:refund", now_ts()),
+                    )
+            else:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
+    async def process_package_purchase(self, *, user_id: int, pkg: dict, idempotency_key: str | None = None) -> list[str]:
+        """Buy a per-panel package (volume or fair-usage 'unlimited') on THIS
+        provisioning instance's panel. Charges the audience-correct price, sets
+        the package's duration as the config expiry, and (for unlimited) caps
+        traffic at the admin's hidden fair-usage limit. Returns the sub link(s).
+        """
+        kind = "unlimited" if str(pkg.get("kind")) == "unlimited" else "volume"
+        days = max(0, int(pkg.get("days") or 0))
+        cap_gb = max(0, int(pkg.get("gb") or 0))  # volume = volume; unlimited = hidden cap (0 = truly unlimited)
+        if kind == "volume" and cap_gb <= 0:
+            raise ValueError("حجم این بسته نامعتبر است.")
+
+        agent = await self.db.get_agent(user_id)
+        final_total = package_price(pkg, agent)
+        if final_total <= 0:
+            raise ValueError("قیمت این بسته نامعتبر است.")
+
+        order_id = f"{user_id}-pkg-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        payment_method = PaymentMethod.WALLET
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate purchase request: {existing['status']}")
+            agent_row = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            if agent_row and self.db.normalize_agent_access_value(agent_row["access_level"]) == "open":
+                payment_method = PaymentMethod.AGENT_OPEN
+                credit_update = await conn.execute(
+                    """
+                    UPDATE agents SET credit_used_toman=credit_used_toman+?
+                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
+                    """,
+                    (int(final_total), int(user_id), int(final_total)),
+                )
+                if credit_update.rowcount != 1:
+                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
+                await conn.execute(
+                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
+                )
+            else:
+                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
+                if debit.rowcount != 1:
+                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
+                    int(final_total), 0, int(final_total), now_ts(),
+                    payment_method.value, ("infinite" if kind == "unlimited" else "purchase"), None,
+                    (str(pkg.get("title") or "").strip()[:64] or None),
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        provisions: list = []
+        try:
+            expiry_ms = (now_ts() + days * 86400) * 1000 if days > 0 else 0
+            provisions = await self.panel.add_subscriptions(user_id=user_id, gb=cap_gb, qty=1, expiry_ms=expiry_ms)
+            await self.db.insert_subscriptions(provisions, order_id=order_id, is_infinite=(kind == "unlimited"))
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("package order approval failed after provisioning")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return [p.sub_link for p in provisions]
+        except Exception:
+            await self.db.delete_subscriptions([p.sub_id for p in provisions])
+            for provision in provisions:
+                try:
+                    await self.panel.delete_subscription(provision.sub_id)
+                except Exception:
+                    pass
+            if payment_method == PaymentMethod.AGENT_OPEN:
+                async with self.db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (int(final_total), int(user_id)),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
                     )
             else:
                 await self.db.credit_wallet(user_id, final_total)

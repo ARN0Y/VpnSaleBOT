@@ -27,7 +27,7 @@ from telegram.ext import (
 from .config import Settings
 from .db import AsyncDatabase
 from .panel import PanelClient
-from .provisioning import ProvisioningService
+from .provisioning import ProvisioningService, package_price, parse_packages
 from .qr import QRService
 from .util import resolve_proxy_value
 
@@ -325,6 +325,188 @@ async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "Provis
     app.bot_data["panel2"] = panel2
     app.bot_data["provisioning2"] = prov2
     return prov2
+
+
+# ───────────────────────── Per-panel packages (plans) ─────────────────────────
+PANEL_PKG_SETTING = {"1": "panel_packages", "2": "panel2_packages"}
+
+
+async def get_panel_packages(db: AsyncDatabase, panel_key: str) -> list[dict]:
+    key = PANEL_PKG_SETTING.get(panel_key)
+    if not key:
+        return []
+    return parse_packages(await db.get_setting(key, ""))
+
+
+async def _provisioning_for_panel(context: ContextTypes.DEFAULT_TYPE, panel_key: str):
+    if panel_key == "2":
+        return await get_panel2_provisioning(context)
+    return context.application.bot_data["provisioning"]
+
+
+def _package_volume_label(pkg: dict) -> str:
+    if str(pkg.get("kind")) == "unlimited":
+        return "♾️ نامحدود (مصرف منصفانه)"
+    return f"📦 حجم: <b>{int(pkg.get('gb') or 0)}</b> گیگ"
+
+
+def _package_duration_label(pkg: dict) -> str:
+    days = int(pkg.get("days") or 0)
+    return f"⏳ مدت اعتبار: <b>{days}</b> روز" if days > 0 else "⏳ بدون محدودیت زمانی"
+
+
+async def show_packages(update: Update, context: ContextTypes.DEFAULT_TYPE, panel_key: str, server_name: str) -> None:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    agent = await db.get_agent(update.effective_user.id)
+    packages = await get_panel_packages(db, panel_key)
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, pkg in enumerate(packages):
+        price = package_price(pkg, agent)
+        rows.append([InlineKeyboardButton(f"{pkg['title']} — {price:,} ت", callback_data=f"pkg:sel:{panel_key}:{idx}")])
+    rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
+    text = (
+        f"🛒 <b>{html.escape(server_name)}</b>\n"
+        "<code>─────────────────────</code>\n"
+        "یکی از بسته‌های زیر را انتخاب کنید 👇"
+    )
+    await new_flow_card(update, context, text, InlineKeyboardMarkup(rows))
+
+
+async def pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    try:
+        _, _, panel_key, idx_s = query.data.split(":", 3)
+        idx = int(idx_s)
+    except Exception:
+        return
+    packages = await get_panel_packages(db, panel_key)
+    if idx < 0 or idx >= len(packages):
+        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.", back_keyboard())
+        return
+    pkg = packages[idx]
+    agent = await db.get_agent(update.effective_user.id)
+    price = package_price(pkg, agent)
+    context.user_data["pkg"] = {"panel": panel_key, "idx": idx, "idem": f"pkg-{update.effective_user.id}-{secrets.token_hex(8)}"}
+    text = (
+        "🧾 <b>تایید خرید بسته</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"🎁 بسته: <b>{html.escape(str(pkg['title']))}</b>\n"
+        f"{_package_volume_label(pkg)}\n"
+        f"{_package_duration_label(pkg)}\n"
+        "<code>─────────────────────</code>\n"
+        f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
+        "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{panel_key}:{idx}")],
+            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
+        ]
+    )
+    await edit_flow_query(update, context, text, kb)
+
+
+async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    try:
+        _, _, panel_key, idx_s = query.data.split(":", 3)
+        idx = int(idx_s)
+    except Exception:
+        return
+    if not await audience_sales_is_open(db, update.effective_user.id):
+        await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
+        return
+    if panel_key == "1" and not await panel1_enabled(db):
+        await edit_text(query, "🌐 فروش از این سرور موقتاً غیرفعال است.", back_keyboard())
+        return
+    packages = await get_panel_packages(db, panel_key)
+    if idx < 0 or idx >= len(packages):
+        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
+        return
+    pkg = packages[idx]
+    provisioning = await _provisioning_for_panel(context, panel_key)
+    if provisioning is None:
+        await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
+        return
+    qr: QRService = context.application.bot_data["qr"]
+    data = context.user_data.get("pkg") or {}
+    idem = str(data.get("idem") or query.id)
+    await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
+    try:
+        links = await provisioning.process_package_purchase(user_id=update.effective_user.id, pkg=pkg, idempotency_key=idem)
+    except ValueError as exc:
+        await edit_text(
+            query,
+            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")], [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")]]),
+        )
+        return
+    except Exception as exc:
+        if "duplicate purchase request" in str(exc):
+            await _answer_query(query, "این خرید در حال پردازش است…")
+            return
+        LOG.exception("package purchase failed user_id=%s", update.effective_user.id)
+        await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
+        return
+
+    if str(pkg.get("kind")) == "unlimited":
+        uris: list[str] = []
+        for link in links:
+            try:
+                uris.extend(await provisioning.panel.fetch_config_uris(link))
+            except Exception:
+                LOG.exception("fetch_config_uris failed for package")
+        uris = [u for u in uris if u]
+        if not uris:
+            await edit_text(
+                query,
+                "✅ بسته ساخته شد، اما دریافت لینک کانفیگ کمی طول کشید.\n"
+                "از بخش «اشتراک‌های من» می‌توانید کانفیگ را ببینید یا با پشتیبانی تماس بگیرید.",
+                back_keyboard(),
+            )
+            return
+        await edit_text(query, "✅ <b>بسته با موفقیت فعال شد.</b>\n\nلینک کانفیگ در پیام بعدی ارسال می‌شود.")
+        for i, uri in enumerate(uris):
+            png = await qr.png(uri)
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=BytesIO(png),
+                caption=(
+                    f"✅ <b>{html.escape(str(pkg['title']))}</b>\n"
+                    "<i>سرویس شما فعال شد 🌟</i>\n\n"
+                    "🔗 <b>لینک کانفیگ شما:</b>\n"
+                    f"<code>{html.escape(uri)}</code>\n\n"
+                    "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_keyboard() if i == len(uris) - 1 else None,
+            )
+        return
+
+    await edit_text(query, "✅ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
+    for i, sub_link in enumerate(links):
+        png = await qr.png(sub_link)
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=BytesIO(png),
+            caption=(
+                "✅ <b>پرداخت با موفقیت انجام شد!</b>\n"
+                f"<i>{html.escape(str(pkg['title']))} 🌟</i>\n"
+                "<code>─────────────────────</code>\n"
+                f"{_package_volume_label(pkg)}\n"
+                f"{_package_duration_label(pkg)}\n"
+                "<code>─────────────────────</code>\n"
+                "🔗 <b>لینک اشتراک شما:</b>\n"
+                f"<code>{html.escape(sub_link)}</code>\n\n"
+                "📲 لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_keyboard() if i == len(links) - 1 else None,
+        )
 
 
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
@@ -921,6 +1103,14 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await audience_sales_is_open(db, update.effective_user.id):
         await show_sales_closed(update, context)
         return ConversationHandler.END
+    # Package mode: if this panel has packages defined, sell those instead of
+    # the per-GB flow.
+    if await get_panel_packages(db, "1"):
+        await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
+        clear_flow_state(context)
+        labels = await resolve_nav_labels(db)
+        await show_packages(update, context, "1", labels["buy"])
+        return ConversationHandler.END
     min_gb = await minimum_purchase_gb(db)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
@@ -944,11 +1134,17 @@ async def buy2_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await audience_sales_is_open(db, update.effective_user.id):
         await show_sales_closed(update, context)
         return ConversationHandler.END
+    label = await panel2_label(db)
+    # Package mode for the second panel.
+    if await get_panel_packages(db, "2"):
+        await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
+        clear_flow_state(context)
+        await show_packages(update, context, "2", label)
+        return ConversationHandler.END
     min_gb = await minimum_purchase_gb(db)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
     context.user_data["checkout"] = {"panel2": True}
-    label = await panel2_label(db)
     await new_flow_card(
         update,
         context,
@@ -2060,30 +2256,20 @@ async def topup_start(update: Update, context: ContextTypes.DEFAULT_TYPE, method
     unit_price = await effective_unit_price(db, update.effective_user.id)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
-    tier_mode = await _topup_uses_tiered_pricing(db, update.effective_user.id)
-    context.user_data["topup"] = {"method": method, "unit_price": unit_price, "tier_mode": tier_mode}
+    context.user_data["topup"] = {"method": method, "unit_price": unit_price, "tier_mode": True}
     method_label = "کارت به کارت" if method == "card" else "رمزارز (تتر)"
-    if tier_mode:
-        # Tiered pricing → no fixed per-GB amount to suggest; ask for a free
-        # amount in Toman and let the user type it.
-        await new_flow_card(
-            update,
-            context,
-            f"💳 <b>شارژ کیف پول - {method_label}</b>\n\n"
-            "💰 مبلغ مورد نظر را به تومان وارد کنید.\n"
-            "<i>مثال: 200000 تومان</i>\n\n"
-            "فقط عدد ارسال کنید 👇",
-            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="topup:cancel")]]),
-        )
-        return TOPUP_CUSTOM_AMOUNT
+    # Always ask for a free amount — the user types whatever they want to top up.
     await new_flow_card(
         update,
         context,
-        f"💳 <b>شارژ کیف پول - {method_label}</b>\n\n"
-        "ابتدا مبلغ شارژ را انتخاب کنید. مبلغ‌ها بر اساس تعرفه فعال حساب شما ساخته شده‌اند.",
-        topup_amount_keyboard(method, unit_price),
+        f"💳 <b>شارژ کیف پول — {method_label}</b>\n"
+        "<code>─────────────────────</code>\n"
+        "💰 مبلغ موردنظر برای شارژ را به <b>تومان</b> وارد کنید.\n"
+        "<i>مثال: 200000</i>\n\n"
+        "فقط عدد بفرستید 👇",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="topup:cancel")]]),
     )
-    return TOPUP_AMOUNT
+    return TOPUP_CUSTOM_AMOUNT
 
 
 async def topup_c2c_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3046,5 +3232,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
     app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
     app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
+    app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:[12]:\d+$"))
+    app.add_handler(CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:[12]:\d+$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))

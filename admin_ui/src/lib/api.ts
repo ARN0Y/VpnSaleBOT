@@ -114,6 +114,10 @@ export const api = {
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
   setPanelPrimary: (enabled: boolean) => post<Ok>("/panel-primary", { enabled }),
+  setPanelPackages: (
+    panel: "1" | "2",
+    packages: { kind: "volume" | "unlimited"; title: string; gb: number; days: number; price: number; agent_price: number }[],
+  ) => post<Ok>("/panel-packages", { panel, packages }),
   setTexts: (p: { welcome_text?: string; labels?: Record<string, string> }) => post<Ok>("/texts", p),
   setPanel2: (p: {
     enabled: boolean;
