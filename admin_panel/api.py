@@ -10,6 +10,7 @@ working in parallel until the SPA fully replaces it (strangler migration).
 """
 from __future__ import annotations
 
+import asyncio
 import secrets
 import string
 import time
@@ -773,15 +774,35 @@ async def pg_list_admins(request: Request):
     self_user = (await _pg_settings(database))["pg_username"].strip().lower()
     try:
         admins = await client.list_admins()
+        roster = [
+            a for a in admins
+            if not (a.get("role") or {}).get("is_owner")
+            and str(a.get("username", "")).strip().lower() != self_user
+        ]
+        # Total allocated volume per reseller (Σ data_limit of their accounts),
+        # computed concurrently with a small semaphore so the roster stays
+        # responsive and never floods the panel even with many resellers.
+        sem = asyncio.Semaphore(5)
+
+        async def _allocated(a: dict) -> tuple[int, bool]:
+            async with sem:
+                try:
+                    agg = await client.admin_user_aggregates(str(a.get("username")), max_scan=20000)
+                    return int(agg.get("allocated") or 0), bool(agg.get("capped"))
+                except Exception:
+                    return 0, False
+
+        aggs = await asyncio.gather(*[_allocated(a) for a in roster])
     except Exception as exc:
         return {"ok": False, "error": str(exc), "admins": []}
     finally:
         await client.close()
-    out = [
-        _slim_admin(a) for a in admins
-        if not (a.get("role") or {}).get("is_owner")
-        and str(a.get("username", "")).strip().lower() != self_user
-    ]
+    out = []
+    for a, (allocated, capped) in zip(roster, aggs):
+        row = _slim_admin(a)
+        row["allocated"] = allocated
+        row["allocated_capped"] = capped
+        out.append(row)
     return {"ok": True, "admins": out, "total": len(out)}
 
 

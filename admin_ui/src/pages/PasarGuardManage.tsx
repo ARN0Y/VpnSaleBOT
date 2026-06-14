@@ -76,6 +76,7 @@ function MonitorTab() {
                 <TH>وضعیت</TH>
                 <TH>تعداد حساب</TH>
                 <TH>مصرف کل</TH>
+                <TH>حجم کل ساخته‌شده</TH>
                 <TH>محدودیت حجم</TH>
                 <TH>عملیات</TH>
               </TR>
@@ -91,6 +92,10 @@ function MonitorTab() {
                     <TD><Badge variant={isActive ? "success" : "default"}>{isActive ? "فعال" : "غیرفعال"}</Badge></TD>
                     <TD className="text-xs"><span className="inline-flex items-center gap-1"><Users className="h-3.5 w-3.5" />{Number(a.total_users || 0)}</span></TD>
                     <TD className="text-xs">{gbFromBytes(a.used_traffic)} گیگابایت</TD>
+                    <TD className="text-xs font-bold text-white">
+                      {gbFromBytes(a.allocated)} گیگابایت
+                      {a.allocated_capped ? <span className="mr-1 text-[10px] font-normal text-amber-300">(تقریبی)</span> : null}
+                    </TD>
                     <TD className="text-xs">{dataLimitLabel(a.data_limit)}</TD>
                     <TD>
                       <div className="flex flex-wrap gap-1.5">
@@ -114,7 +119,7 @@ function MonitorTab() {
                 );
               })}
               {admins.length === 0 && (
-                <TR><TD colSpan={7} className="py-8 text-center text-muted-foreground">تاکنون حساب ادمینی برای نمایندگان ایجاد نشده است.</TD></TR>
+                <TR><TD colSpan={8} className="py-8 text-center text-muted-foreground">تاکنون حساب ادمینی برای نمایندگان ایجاد نشده است.</TD></TR>
               )}
             </TBody>
           </Table>
