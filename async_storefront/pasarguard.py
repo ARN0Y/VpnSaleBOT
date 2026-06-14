@@ -300,13 +300,13 @@ class PasarGuardClient:
         return self._as_list(data, "admins", "items")
 
     async def get_admin(self, username: str) -> dict[str, Any] | None:
-        try:
-            data = await self._request("GET", PG_API["admin"].format(u=username))
-        except PasarGuardError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
-        return data if isinstance(data, dict) else None
+        """Fetch one admin by exact username. v5.0.1 has NO GET /api/admin/{u}
+        (that path is PUT/DELETE only), so we filter the list endpoint."""
+        target = (username or "").strip().lower()
+        for admin in await self.list_admins():
+            if str(admin.get("username", "")).strip().lower() == target:
+                return admin
+        return None
 
     async def create_admin(
         self,
