@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from async_storefront.models import AgentAccess
+from async_storefront.pasarguard import PasarGuardClient
 
 from .auth import COOKIE_NAME, current_admin_username, csrf_token, sign_session
 from .routers.common import db, notify_telegram_user, panel
@@ -155,6 +156,7 @@ async def settings(request: Request):
         items["panel_inbound_id"] = str(panel_row["inbound_id"] or 0)
         items["sub_link_base"] = str(panel_row["sub_link_base"] or "")
     items["panel_password"] = ""
+    items["pg_password"] = ""  # PasarGuard admin password — never exposed
     return {"items": items}
 
 
@@ -628,6 +630,70 @@ async def set_infinite_package(request: Request):
         "duration_days": duration_days,
         "price": price,
     }
+
+
+async def _pg_settings(database) -> dict[str, str]:
+    rows = {row["key"]: row["value"] for row in await database.admin_list_settings()}
+    return {k: str(rows.get(k, "")) for k in (
+        "pg_enabled", "pg_label", "pg_base_url", "pg_username", "pg_password",
+        "pg_group", "pg_verify_tls", "pg_price_per_gb", "pg_default_days",
+    )}
+
+
+@router.post("/pasarguard")
+async def set_pasarguard(request: Request):
+    """Configure the PasarGuard panel (settings KV, no schema change). Empty
+    password keeps the current one."""
+    body = await _json_body(request)
+    database = db(request)
+
+    def _s(key: str) -> str:
+        return str(body.get(key, "") or "").strip()
+
+    def _int(value, default=0, minimum=0):
+        try:
+            return max(minimum, int(float(value)))
+        except (TypeError, ValueError):
+            return default
+
+    values: dict[str, str] = {
+        "pg_enabled": "1" if bool(body.get("enabled")) else "0",
+        "pg_label": _s("label") or "سرور اختصاصی",
+        "pg_base_url": _s("base_url").rstrip("/"),
+        "pg_username": _s("username"),
+        "pg_group": _s("group") or "Tsco-Bot",
+        "pg_verify_tls": "1" if (body.get("verify_tls", True) and str(body.get("verify_tls")).lower() not in {"0", "false", "off", "no"}) else "0",
+        "pg_price_per_gb": str(_int(body.get("price_per_gb"), 0, 0)),
+        "pg_default_days": str(_int(body.get("default_days"), 30, 0)),
+    }
+    password = str(body.get("password", "") or "")
+    if password.strip():
+        values["pg_password"] = password
+    await database.admin_update_settings(values)
+    return {"ok": True, "enabled": values["pg_enabled"] == "1"}
+
+
+@router.post("/pasarguard/test")
+async def test_pasarguard(request: Request):
+    """Live connection test: build a client from saved settings (with any
+    just-typed overrides in the body) and authenticate against the panel."""
+    body = await _json_body(request)
+    database = db(request)
+    cur = await _pg_settings(database)
+    base_url = str(body.get("base_url") or cur["pg_base_url"]).strip().rstrip("/")
+    username = str(body.get("username") or cur["pg_username"]).strip()
+    password = str(body.get("password") or "").strip() or cur["pg_password"]
+    verify_tls = cur["pg_verify_tls"] != "0"
+    if "verify_tls" in body:
+        verify_tls = str(body.get("verify_tls")).lower() not in {"0", "false", "off", "no"}
+    if not (base_url and username and password):
+        return {"ok": False, "error": "آدرس پنل، یوزرنیم و پسورد را کامل کنید."}
+    client = PasarGuardClient(base_url=base_url, username=username, password=password, verify_tls=verify_tls)
+    try:
+        report = await client.test_connection()
+    finally:
+        await client.close()
+    return report
 
 
 @router.post("/ui-mode")

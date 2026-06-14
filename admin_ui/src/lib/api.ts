@@ -113,6 +113,22 @@ export const api = {
     post<Ok>("/infinite-package", p),
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
+  setPasarGuard: (p: {
+    enabled: boolean;
+    label: string;
+    base_url: string;
+    username: string;
+    password: string;
+    group: string;
+    verify_tls: boolean;
+    price_per_gb: number;
+    default_days: number;
+  }) => post<Ok>("/pasarguard", p),
+  testPasarGuard: (p: { base_url?: string; username?: string; password?: string; verify_tls?: boolean }) =>
+    post<{ ok: boolean; error?: string; admin_username?: string; is_owner?: boolean; panel_version?: string; groups?: { id: number; name: string; inbound_tags?: string[] }[] }>(
+      "/pasarguard/test",
+      p,
+    ),
 
   updateAgent: (
     id: number,

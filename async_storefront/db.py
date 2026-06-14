@@ -654,6 +654,17 @@ class AsyncDatabase:
             "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
+            # ── PasarGuard panel (optional second backend, stored in settings KV
+            #    so no schema change). Sold at Shayan's per-GB price. ──
+            "pg_enabled": "0",
+            "pg_label": "سرور اختصاصی",
+            "pg_base_url": "",
+            "pg_username": "",
+            "pg_password": "",
+            "pg_group": "Tsco-Bot",
+            "pg_verify_tls": "1",
+            "pg_price_per_gb": "0",
+            "pg_default_days": "30",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",

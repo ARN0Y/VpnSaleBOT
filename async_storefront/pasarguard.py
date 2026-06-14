@@ -245,3 +245,35 @@ class PasarGuardClient:
 
     async def delete_admin(self, username: str) -> None:
         await self._request("DELETE", PG_API["admin"].format(u=username), expect_json=False)
+
+    async def system_info(self) -> dict[str, Any]:
+        try:
+            data = await self._request("GET", "/api/system")
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def test_connection(self) -> dict[str, Any]:
+        """Authenticate and read back enough to prove the bot can drive the panel.
+        Returns a report dict (never raises) for the admin 'Test Connection' UI."""
+        report: dict[str, Any] = {"ok": False}
+        try:
+            await self._login(force=True)
+            report["token_path"] = self._token_path
+            admin = await self.current_admin()
+            report["admin_username"] = admin.get("username")
+            role = admin.get("role") or {}
+            report["is_owner"] = bool(role.get("is_owner")) or bool(admin.get("is_sudo"))
+            groups = await self.list_groups()
+            report["groups"] = [
+                {"id": g.get("id"), "name": g.get("name"), "inbound_tags": g.get("inbound_tags")}
+                for g in groups
+            ]
+            sysinfo = await self.system_info()
+            if sysinfo:
+                report["panel_version"] = sysinfo.get("version")
+                report["total_users"] = sysinfo.get("total_user")
+            report["ok"] = True
+        except Exception as exc:
+            report["error"] = str(exc)
+        return report

@@ -99,6 +99,52 @@ def main() -> None:
             methods = ",".join(sorted(m.upper() for m in spec["paths"][path] if m.lower() in
                                       ("get", "post", "put", "patch", "delete")))
             print(f"  {methods:18} {path}")
+
+        schemas = (spec.get("components") or {}).get("schemas") or {}
+
+        def _resolve(node):
+            if isinstance(node, dict) and "$ref" in node:
+                return schemas.get(node["$ref"].split("/")[-1], {})
+            return node or {}
+
+        def _props(schema, depth=0):
+            schema = _resolve(schema)
+            for combine in ("allOf", "anyOf", "oneOf"):
+                if combine in schema:
+                    out = {}
+                    for sub in schema[combine]:
+                        out.update(_resolve(sub).get("properties", {}))
+                    if out:
+                        return out
+            return schema.get("properties", {})
+
+        def _print_schema(title, schema):
+            props = _props(schema)
+            if not props:
+                return
+            print(f"\n-- schema: {title} --")
+            for name, p in props.items():
+                p = _resolve(p)
+                t = p.get("type") or ("/".join(str(_resolve(x).get("type", "?")) for x in p.get("anyOf", [])) or "?")
+                fmt = f" ({p.get('format')})" if p.get("format") else ""
+                enum = f" enum={p.get('enum')}" if p.get("enum") else ""
+                print(f"   {name}: {t}{fmt}{enum}")
+
+        # create-user request body
+        for create_path in ("/api/users", "/api/user"):
+            node = spec["paths"].get(create_path, {}).get("post")
+            if node:
+                body = (((node.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema")
+                if body:
+                    _print_schema(f"CREATE USER body ({create_path} POST)", body)
+                break
+        # user response + admin schemas by name
+        for key in list(schemas.keys()):
+            kl = key.lower()
+            if kl in ("user", "userresponse") or (kl.startswith("user") and "response" in kl):
+                _print_schema(f"USER response ({key})", schemas[key])
+            if kl in ("admin", "adminresponse", "admincreate"):
+                _print_schema(f"ADMIN ({key})", schemas[key])
     else:
         print("[openapi] not reachable (DOCS likely off). Tip: set DOCS=True in the panel .env once,")
         print("          restart, re-run this probe, then turn it back off. Below is best-effort probing.")
