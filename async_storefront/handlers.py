@@ -177,6 +177,19 @@ async def pg_is_primary(db: AsyncDatabase) -> bool:
     return backend == "pasarguard" and await pg_configured(db)
 
 
+async def pg_unit_price_override(db: AsyncDatabase) -> int:
+    """When PasarGuard is the primary backend, its own per-GB price (``pg_price_per_gb``)
+    overrides the global/tiered shop price for regular users. ``0`` means "use
+    Shayan's normal pricing" (the shop's tiers / flat ``price_per_gb``). Agents
+    with their own flat rate are unaffected (handled before this is consulted)."""
+    if not await pg_is_primary(db):
+        return 0
+    try:
+        return max(0, int(float(await db.get_setting("pg_price_per_gb", "0") or "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
     """Build (and cache) a PasarGuardClient from settings; rebuild if the panel
     address/username/TLS changed so admin edits apply without a restart."""
@@ -648,6 +661,9 @@ async def unit_price_for_gb(db: AsyncDatabase, user_id: int, gb: int, agent=None
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     if agent_price > 0:
         return agent_price
+    pg_unit = await pg_unit_price_override(db)
+    if pg_unit > 0:
+        return pg_unit
     tiers = await get_price_tiers(db)
     if tiers:
         chosen = tiers[0]["price_per_gb"]
@@ -669,6 +685,9 @@ async def effective_unit_price(db: AsyncDatabase, user_id: int, agent=None) -> i
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     if agent_price > 0:
         return agent_price
+    pg_unit = await pg_unit_price_override(db)
+    if pg_unit > 0:
+        return pg_unit
     tiers = await get_price_tiers(db)
     if tiers:
         return int(tiers[0]["price_per_gb"])
@@ -1776,8 +1795,9 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     db: AsyncDatabase = context.application.bot_data["db"]
     agent = await db.get_agent(update.effective_user.id)
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    pg_unit = await pg_unit_price_override(db)
     tiers = await get_price_tiers(db)
-    if agent_price <= 0 and tiers:
+    if agent_price <= 0 and pg_unit <= 0 and tiers:
         lines = [
             "💡 <b>تعرفه پلکانی سرویس‌ها</b>",
             "هر چه بیشتر بخرید، هر گیگ ارزان‌تر! 📉",
@@ -2838,6 +2858,32 @@ def build_main_conversation() -> ConversationHandler:
     )
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global safety net: log any unhandled exception and reassure the user so a
+    crash in one handler can never leave the bot silent or in a broken state.
+    Never raises (any failure while reporting is swallowed)."""
+    LOG.exception("Unhandled error while processing update", exc_info=context.error)
+    try:
+        if isinstance(update, Update):
+            chat = update.effective_chat
+            if update.callback_query:
+                with contextlib.suppress(Exception):
+                    await update.callback_query.answer()
+            if chat is not None:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=(
+                        "⚠️ <b>یک خطای غیرمنتظره رخ داد.</b>\n\n"
+                        "اگر مبلغی کسر شده ولی سرویس را دریافت نکرده‌اید نگران نباشید؛ "
+                        "تراکنش‌های ناقص به‌صورت خودکار برگشت می‌خورند. لطفاً دوباره تلاش کنید "
+                        "یا با پشتیبانی در تماس باشید."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+    except Exception:
+        LOG.exception("Failed to deliver the error notice to the user")
+
+
 def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start))
     # Admin custom text input (group=-1 runs before ConversationHandler)
@@ -2867,3 +2913,5 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))
+    # Global safety net for any unhandled exception in any handler.
+    app.add_error_handler(on_error)
