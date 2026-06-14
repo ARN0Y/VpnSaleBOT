@@ -1301,11 +1301,25 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         f"صفحه <b>{safe_page + 1}</b> از <b>{total_pages}</b> | مجموع: <b>{total}</b>",
         "",
     ]
+    pg_buttons: list[InlineKeyboardButton] = []
     for idx, sub in enumerate(subs, start=safe_page * page_size + 1):
         name = html.escape(str(sub.get("client_email") or "بدون نام"))
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
         is_infinite = int(sub.get("is_infinite") or 0) == 1
+        if int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL:
+            # PasarGuard service: the link is token-based and fetched live, so we
+            # show the service and a button to (re)deliver its subscription link.
+            lines.append(
+                f"{idx}. <b>{name}</b> | 🌐 سرور اختصاصی\n"
+                f"   📦 حجم: {int(sub.get('gb') or 0)} گیگ\n"
+                "   🔗 برای دریافت لینک اتصال، دکمه‌ی پایین را بزنید."
+            )
+            raw_name = str(sub.get("client_email") or sub.get("sub_id") or "")
+            pg_buttons.append(
+                InlineKeyboardButton(f"🔗 لینک {raw_name[:18]}", callback_data=f"pgsub:link:{sub.get('sub_id')}")
+            )
+            continue
         if is_infinite:
             # Fair-usage "infinite" config: never reveal the volume cap or the
             # remaining traffic — only the type and on/off status.
@@ -1345,6 +1359,8 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
     if safe_page < total_pages - 1:
         nav.append(InlineKeyboardButton("بعدی", callback_data=f"subs:page:{safe_page + 1}"))
     rows = []
+    for b in pg_buttons:
+        rows.append([b])
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")])
@@ -1366,6 +1382,49 @@ async def my_subscriptions_page(update: Update, context: ContextTypes.DEFAULT_TY
     await ensure_user(update, context)
     page = int(update.callback_query.data.rsplit(":", 1)[1])
     await render_my_subscriptions(update, context, page, new_card=False)
+
+
+async def pgsub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-deliver a PasarGuard service's subscription link (fetched live by
+    username). Ownership is enforced via get_subscription_for_user."""
+    query = update.callback_query
+    await query.answer()
+    await ensure_user(update, context)
+    sub_id = query.data.split(":", 2)[2]
+    db: AsyncDatabase = context.application.bot_data["db"]
+    sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
+    if not sub or int(sub.get("inbound_id") or 0) != PG_INBOUND_SENTINEL:
+        await _answer_query(query, "این سرویس پیدا نشد.", show_alert=True)
+        return
+    client = await get_pg_client(context)
+    if client is None:
+        await _answer_query(query, "سرور در حال حاضر در دسترس نیست.", show_alert=True)
+        return
+    try:
+        pg_user = await client.get_user(sub_id)
+    except Exception:
+        LOG.exception("pgsub_link get_user failed sub_id=%s", sub_id)
+        await _answer_query(query, "خطا در دریافت لینک. بعداً تلاش کنید.", show_alert=True)
+        return
+    sub_url = str((pg_user or {}).get("subscription_url") or "")
+    if not sub_url:
+        await _answer_query(query, "لینک این سرویس یافت نشد. با پشتیبانی تماس بگیرید.", show_alert=True)
+        return
+    qr: QRService = context.application.bot_data["qr"]
+    png = await qr.png(sub_url)
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=BytesIO(png),
+        caption=(
+            "🌐 <b>سرور اختصاصی</b>\n"
+            "<code>─────────────────────</code>\n"
+            "🔗 <b>لینک اشتراک شما:</b>\n"
+            f"<code>{html.escape(sub_url)}</code>\n\n"
+            "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
+    )
 
 
 def renewal_label(sub: dict) -> str:
@@ -2801,6 +2860,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(account_info, pattern=r"^menu:account$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions, pattern=r"^menu:subs$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions_page, pattern=r"^subs:page:\d+$"))
+    app.add_handler(CallbackQueryHandler(pgsub_link, pattern=r"^pgsub:link:"))
     app.add_handler(CallbackQueryHandler(tariffs_info, pattern=r"^menu:tariffs$"))
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
     app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
