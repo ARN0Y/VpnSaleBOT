@@ -134,9 +134,13 @@ export const api = {
   // PasarGuard admin delegation (phase 2)
   pgAdmins: () =>
     request<{ ok: boolean; error?: string; admins: Row[]; total?: number }>("/pasarguard/admins"),
-  pgAdminUsers: (username: string) =>
-    request<{ ok: boolean; error?: string; admin: Row; users: Row[]; total: number }>(
-      `/pasarguard/admins/${encodeURIComponent(username)}/users`,
+  pgAdminUsers: (username: string, offset = 0, limit = 25, search = "") =>
+    request<{ ok: boolean; error?: string; admin: Row; users: Row[]; total: number; offset: number; limit: number }>(
+      `/pasarguard/admins/${encodeURIComponent(username)}/users?offset=${offset}&limit=${limit}&search=${encodeURIComponent(search)}`,
+    ),
+  pgAdminStats: (username: string) =>
+    request<{ ok: boolean; error?: string; total: number; used: number; allocated: number; created_24h_count: number; created_24h_data: number; capped: boolean }>(
+      `/pasarguard/admins/${encodeURIComponent(username)}/stats`,
     ),
   pgRoles: () =>
     request<{ ok: boolean; error?: string; roles: { id: number; name: string; is_owner: boolean }[] }>(

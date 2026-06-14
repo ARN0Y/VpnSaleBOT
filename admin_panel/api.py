@@ -786,26 +786,45 @@ async def pg_list_admins(request: Request):
 
 
 @router.get("/pasarguard/admins/{username}/users")
-async def pg_admin_users(request: Request, username: str):
-    """Live list of the accounts a given reseller-admin has created, plus a
-    usage roll-up — the per-reseller drill-down."""
+async def pg_admin_users(request: Request, username: str, offset: int = 0, limit: int = 25, search: str = ""):
+    """One server-side page of a reseller's accounts (heavy-scale safe)."""
     database = db(request)
     client = await _pg_client(database)
     if client is None:
-        return {"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است.", "users": []}
+        return {"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است.", "users": [], "total": 0}
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
     try:
         admin = await client.get_admin(username)
-        users = await client.list_users_by_admin(username)
+        page = await client.list_users_by_admin(username, offset=offset, limit=limit, search=search)
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "users": []}
+        return {"ok": False, "error": str(exc), "users": [], "total": 0}
     finally:
         await client.close()
     return {
         "ok": True,
         "admin": _slim_admin(admin) if admin else {"username": username},
-        "users": [_slim_pg_user(u) for u in users],
-        "total": len(users),
+        "users": [_slim_pg_user(u) for u in page["users"]],
+        "total": int(page["total"]),
+        "offset": offset,
+        "limit": limit,
     }
+
+
+@router.get("/pasarguard/admins/{username}/stats")
+async def pg_admin_stats(request: Request, username: str):
+    """Fleet roll-up for the KPI tiles: account count, used traffic, total
+    allocated volume, and volume created in the last 24h."""
+    client = await _pg_client(db(request))
+    if client is None:
+        return {"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است."}
+    try:
+        agg = await client.admin_user_aggregates(username)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        await client.close()
+    return {"ok": True, **agg}
 
 
 @router.get("/pasarguard/roles")

@@ -15,9 +15,24 @@ import asyncio
 import base64
 import json
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
+
+
+def _iso_to_epoch(value: Any) -> float:
+    """Parse a PasarGuard ISO timestamp (e.g. 2026-07-14T20:17:11Z) to epoch
+    seconds; 0.0 if missing/unparseable."""
+    if not value:
+        return 0.0
+    s = str(value).strip()
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
 
 
 class PasarGuardError(RuntimeError):
@@ -341,13 +356,57 @@ class PasarGuardClient:
         except PasarGuardError:
             return None
 
-    async def list_users_by_admin(self, username: str, *, limit: int = 0) -> list[dict[str, Any]]:
-        """Every user created by a given admin (admin:{username} on each user)."""
-        path = PG_API["users"] + f"?admin={username}"
-        if limit:
-            path += f"&limit={int(limit)}"
-        data = await self._request("GET", path)
-        return self._as_list(data, "users", "items")
+    async def list_users_by_admin(
+        self, username: str, *, offset: int = 0, limit: int = 50, search: str = ""
+    ) -> dict[str, Any]:
+        """One server-side page of a reseller's users. Returns {users, total} so
+        the UI paginates without ever pulling the whole set (heavy-scale safe)."""
+        params: dict[str, Any] = {"admin": username, "offset": int(offset), "limit": int(limit)}
+        if search.strip():
+            params["search"] = search.strip()
+        data = await self._request("GET", PG_API["users"], params=params)
+        users = self._as_list(data, "users", "items")
+        total = int(data.get("total")) if isinstance(data, dict) and data.get("total") is not None else len(users)
+        return {"users": users, "total": total}
+
+    async def admin_user_aggregates(self, username: str, *, max_scan: int = 50000) -> dict[str, Any]:
+        """Aggregate a reseller's whole fleet for the KPI tiles: allocated volume
+        (Σ data_limit), used traffic, and volume created in the last 24h. Scans
+        server-side in batches with a hard safety cap so it never runs away."""
+        cutoff = time.time() - 86400
+        batch = 1000
+        offset = 0
+        total: int | None = None
+        scanned = 0
+        count = used = allocated = 0
+        c24_count = c24_data = 0
+        while scanned < max_scan:
+            params = {"admin": username, "offset": offset, "limit": batch}
+            data = await self._request("GET", PG_API["users"], params=params)
+            users = self._as_list(data, "users", "items")
+            if total is None and isinstance(data, dict) and data.get("total") is not None:
+                total = int(data["total"])
+            for u in users:
+                count += 1
+                dl = int(u.get("data_limit") or 0)
+                allocated += dl
+                used += int(u.get("used_traffic") or 0)
+                if _iso_to_epoch(u.get("created_at")) >= cutoff:
+                    c24_count += 1
+                    c24_data += dl
+            scanned += len(users)
+            offset += batch
+            if not users or (total is not None and scanned >= total):
+                break
+        return {
+            "total": total if total is not None else count,
+            "scanned": scanned,
+            "used": used,
+            "allocated": allocated,
+            "created_24h_count": c24_count,
+            "created_24h_data": c24_data,
+            "capped": total is not None and total > scanned,
+        }
 
     # ───────────────────────── admin roles ─────────────────────────
     async def list_roles(self, *, simple: bool = False) -> list[dict[str, Any]]:
