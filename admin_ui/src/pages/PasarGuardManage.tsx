@@ -68,7 +68,7 @@ function MonitorTab() {
             {data?.error || "ارتباط با پنل PasarGuard برقرار نشد."}
           </div>
         ) : (
-          <Table>
+          <Table className="[&_td]:text-right [&_th]:text-right">
             <THead>
               <TR>
                 <TH>نام کاربری</TH>
@@ -252,7 +252,7 @@ function CreateTab() {
 
 export function PasarGuardManage() {
   return (
-    <Tabs defaultValue="monitor" className="space-y-4">
+    <Tabs dir="rtl" defaultValue="monitor" className="space-y-4 text-right">
       <TabsList>
         <TabsTrigger value="monitor" className="flex items-center gap-1.5"><ShieldCheck className="h-4 w-4" /> مانیتورینگ</TabsTrigger>
         <TabsTrigger value="create" className="flex items-center gap-1.5"><UserPlus className="h-4 w-4" /> صدور حساب ادمین</TabsTrigger>
