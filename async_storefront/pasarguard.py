@@ -34,16 +34,28 @@ class PasarGuardError(RuntimeError):
 #   token=/api/admin/token, me=/api/admin, list=/api/users (GET),
 #   create=/api/user (POST 201), single=/api/user/{username} (GET/PUT/DELETE 204).
 #   subscription_url is a top-level field on the user object.
+#   Phase-2 admin/role paths confirmed from the official v5.0.1 source
+#   (app/routers/admin.py, app/routers/admin_role.py): admins list=/api/admins,
+#   create admin=POST /api/admin, single admin=/api/admin/{username} (PUT/DELETE),
+#   usage=/api/admin/{username}/usage; roles list=/api/admin-roles (+/simple),
+#   create role=POST /api/admin-role, single role=/api/admin-role/{id} (hyphen!).
+#   Users carry admin:{id,username}; GET /api/users?admin=<username> filters.
 PG_API = {
     "token_candidates": ("/api/admin/token", "/api/admins/token", "/api/token"),
     "current_admin_candidates": ("/api/admin", "/api/admins/current", "/api/admins/me"),
     "groups": "/api/groups",
-    "users": "/api/users",          # list (GET)
+    "users": "/api/users",          # list (GET) — supports ?admin=<username>
     "create": "/api/user",          # create (POST) — singular
     "user": "/api/user/{u}",        # single GET/PUT/DELETE — singular
     "user_reset": "/api/user/{u}/reset",
-    "admins": "/api/admins",
-    "admin": "/api/admins/{u}",
+    "admins": "/api/admins",        # list (GET)
+    "admin_create": "/api/admin",   # create (POST)
+    "admin": "/api/admin/{u}",      # single GET/PUT/DELETE (username)
+    "admin_usage": "/api/admin/{u}/usage",
+    "roles": "/api/admin-roles",            # list (GET)
+    "roles_simple": "/api/admin-roles/simple",
+    "role_create": "/api/admin-role",       # create (POST)
+    "role": "/api/admin-role/{rid}",        # single GET/PUT/DELETE
 }
 
 
@@ -272,15 +284,115 @@ class PasarGuardClient:
     async def delete_user(self, username: str) -> None:
         await self._request("DELETE", PG_API["user"].format(u=username), expect_json=False)
 
-    async def create_admin(self, *, username: str, password: str, is_sudo: bool = False) -> dict[str, Any]:
-        body = {"username": username, "password": password, "is_sudo": bool(is_sudo)}
-        return await self._request("POST", PG_API["admins"], json=body)
+    # ───────────────────────── admins (phase 2) ─────────────────────────
+    @staticmethod
+    def _as_list(data: Any, *keys: str) -> list[dict[str, Any]]:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for k in keys:
+                if isinstance(data.get(k), list):
+                    return data[k]
+        return []
 
-    async def list_admins(self) -> Any:
-        return await self._request("GET", PG_API["admins"])
+    async def list_admins(self) -> list[dict[str, Any]]:
+        data = await self._request("GET", PG_API["admins"])
+        return self._as_list(data, "admins", "items")
+
+    async def get_admin(self, username: str) -> dict[str, Any] | None:
+        try:
+            data = await self._request("GET", PG_API["admin"].format(u=username))
+        except PasarGuardError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def create_admin(
+        self,
+        *,
+        username: str,
+        password: str,
+        role_id: int,
+        data_limit: int | None = None,
+        note: str = "",
+        telegram_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a panel admin. role_id is REQUIRED by v5.0.1; the password
+        policy is >=12 chars with >=2 uppercase (validated panel-side)."""
+        body: dict[str, Any] = {"username": username, "password": password, "role_id": int(role_id)}
+        if data_limit is not None:
+            body["data_limit"] = int(data_limit)
+        if note:
+            body["note"] = note
+        if telegram_id:
+            body["telegram_id"] = int(telegram_id)
+        return await self._request("POST", PG_API["admin_create"], json=body)
+
+    async def modify_admin(self, username: str, **fields: Any) -> dict[str, Any]:
+        return await self._request("PUT", PG_API["admin"].format(u=username), json=fields)
 
     async def delete_admin(self, username: str) -> None:
         await self._request("DELETE", PG_API["admin"].format(u=username), expect_json=False)
+
+    async def admin_usage(self, username: str, *, period: str = "month") -> Any:
+        try:
+            return await self._request("GET", PG_API["admin_usage"].format(u=username) + f"?period={period}")
+        except PasarGuardError:
+            return None
+
+    async def list_users_by_admin(self, username: str, *, limit: int = 0) -> list[dict[str, Any]]:
+        """Every user created by a given admin (admin:{username} on each user)."""
+        path = PG_API["users"] + f"?admin={username}"
+        if limit:
+            path += f"&limit={int(limit)}"
+        data = await self._request("GET", path)
+        return self._as_list(data, "users", "items")
+
+    # ───────────────────────── admin roles ─────────────────────────
+    async def list_roles(self, *, simple: bool = False) -> list[dict[str, Any]]:
+        data = await self._request("GET", PG_API["roles_simple"] if simple else PG_API["roles"])
+        return self._as_list(data, "admin_roles", "roles", "items")
+
+    async def get_role(self, role_id: int) -> dict[str, Any] | None:
+        try:
+            data = await self._request("GET", PG_API["role"].format(rid=int(role_id)))
+        except PasarGuardError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def create_role(self, *, name: str, permissions: dict[str, Any], limits: dict[str, Any] | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"name": name, "permissions": permissions}
+        if limits:
+            body["limits"] = limits
+        return await self._request("POST", PG_API["role_create"], json=body)
+
+    async def delete_role(self, role_id: int) -> None:
+        await self._request("DELETE", PG_API["role"].format(rid=int(role_id)), expect_json=False)
+
+    @staticmethod
+    def reseller_permissions() -> dict[str, Any]:
+        """A safe default reseller permission set: full control over the
+        admin's OWN users only (scope OWN=1), read-only on groups so they can
+        assign one; no access to other admins, nodes, settings or system."""
+        own = {"scope": 1}
+        return {
+            "users": {
+                "create": True, "read": own, "read_simple": own, "update": own,
+                "delete": own, "reset_usage": own, "revoke_sub": own, "activate_next_plan": own,
+            },
+            "groups": {"read": True, "read_simple": True},
+        }
+
+    async def ensure_reseller_role(self, name: str = "reseller") -> int:
+        """Return the id of a reusable reseller role, creating it once if absent."""
+        for role in await self.list_roles():
+            if str(role.get("name", "")).strip().lower() == name.strip().lower() and not role.get("is_owner"):
+                return int(role["id"])
+        created = await self.create_role(name=name, permissions=self.reseller_permissions())
+        return int(created["id"])
 
     async def system_info(self) -> dict[str, Any]:
         try:

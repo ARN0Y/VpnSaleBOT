@@ -11,6 +11,7 @@ working in parallel until the SPA fully replaces it (strangler migration).
 from __future__ import annotations
 
 import secrets
+import string
 import time
 
 from fastapi import APIRouter, Request
@@ -350,8 +351,10 @@ async def user_detail_bundle(
     agent_24h = None
     if user.get("access_level"):
         agent_24h = await database.get_agent_recent_purchase_summary(user_id, seconds=86400)
+    settings_rows = {row["key"]: row["value"] for row in await database.admin_list_settings()}
     return {
         "user": user,
+        "pg_admin_username": settings_rows.get(f"pg_admin_user_{user_id}", ""),
         "subscriptions": subs,
         "subs_total": subs_total,
         "subs_page": safe_page,
@@ -703,6 +706,219 @@ async def test_pasarguard(request: Request):
     finally:
         await client.close()
     return report
+
+
+# ───────────────────── PasarGuard admin delegation (phase 2) ─────────────────────
+async def _pg_client(database) -> PasarGuardClient | None:
+    """Build a PasarGuard client from saved settings (None if not configured)."""
+    cur = await _pg_settings(database)
+    base_url, username, password = cur["pg_base_url"], cur["pg_username"], cur["pg_password"]
+    if not (base_url and username and password):
+        return None
+    return PasarGuardClient(
+        base_url=base_url, username=username, password=password,
+        verify_tls=cur["pg_verify_tls"] != "0",
+    )
+
+
+def _gen_admin_password() -> str:
+    """A PasarGuard-policy-valid password: 13 chars, 3 uppercase, digits + symbol."""
+    pool = (
+        [secrets.choice(string.ascii_uppercase) for _ in range(3)]
+        + [secrets.choice(string.ascii_lowercase) for _ in range(6)]
+        + [secrets.choice(string.digits) for _ in range(3)]
+        + [secrets.choice("!@#$%*-_")]
+    )
+    secrets.SystemRandom().shuffle(pool)
+    return "".join(pool)
+
+
+def _slim_admin(a: dict) -> dict:
+    role = a.get("role") or {}
+    return {
+        "username": a.get("username"),
+        "status": a.get("status"),
+        "total_users": int(a.get("total_users") or 0),
+        "used_traffic": int(a.get("used_traffic") or 0),
+        "lifetime_used_traffic": int(a.get("lifetime_used_traffic") or 0),
+        "data_limit": a.get("data_limit"),
+        "role_name": role.get("name"),
+        "is_owner": bool(role.get("is_owner")),
+        "telegram_id": a.get("telegram_id"),
+        "note": a.get("note"),
+    }
+
+
+def _slim_pg_user(u: dict) -> dict:
+    return {
+        "username": u.get("username"),
+        "status": u.get("status"),
+        "used_traffic": int(u.get("used_traffic") or 0),
+        "data_limit": u.get("data_limit"),
+        "expire": u.get("expire"),
+        "online_at": u.get("online_at"),
+        "created_at": u.get("created_at"),
+        "subscription_url": u.get("subscription_url"),
+    }
+
+
+@router.get("/pasarguard/admins")
+async def pg_list_admins(request: Request):
+    """All admin accounts we created in the PasarGuard panel, EXCLUDING the
+    owner and the bot's own account — the monitoring roster."""
+    database = db(request)
+    client = await _pg_client(database)
+    if client is None:
+        return {"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است.", "admins": []}
+    self_user = (await _pg_settings(database))["pg_username"].strip().lower()
+    try:
+        admins = await client.list_admins()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "admins": []}
+    finally:
+        await client.close()
+    out = [
+        _slim_admin(a) for a in admins
+        if not (a.get("role") or {}).get("is_owner")
+        and str(a.get("username", "")).strip().lower() != self_user
+    ]
+    return {"ok": True, "admins": out, "total": len(out)}
+
+
+@router.get("/pasarguard/admins/{username}/users")
+async def pg_admin_users(request: Request, username: str):
+    """Live list of the accounts a given reseller-admin has created, plus a
+    usage roll-up — the per-reseller drill-down."""
+    database = db(request)
+    client = await _pg_client(database)
+    if client is None:
+        return {"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است.", "users": []}
+    try:
+        admin = await client.get_admin(username)
+        users = await client.list_users_by_admin(username)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "users": []}
+    finally:
+        await client.close()
+    return {
+        "ok": True,
+        "admin": _slim_admin(admin) if admin else {"username": username},
+        "users": [_slim_pg_user(u) for u in users],
+        "total": len(users),
+    }
+
+
+@router.get("/pasarguard/roles")
+async def pg_list_roles(request: Request):
+    """Roles available to assign when creating an admin (for the form dropdown)."""
+    client = await _pg_client(db(request))
+    if client is None:
+        return {"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است.", "roles": []}
+    try:
+        roles = await client.list_roles()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "roles": []}
+    finally:
+        await client.close()
+    out = [{"id": r.get("id"), "name": r.get("name"), "is_owner": bool(r.get("is_owner"))} for r in roles]
+    return {"ok": True, "roles": out}
+
+
+@router.post("/pasarguard/admins")
+async def pg_create_admin(request: Request):
+    """Create a PasarGuard admin with a chosen username/password and role. If no
+    role_id is given, a safe default 'reseller' role is ensured and used."""
+    body = await _json_body(request)
+    database = db(request)
+    client = await _pg_client(database)
+    if client is None:
+        return JSONResponse({"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است."}, status_code=400)
+    username = str(body.get("username") or "").strip()
+    username = "".join(c for c in username if c.isalnum() or c == "_")
+    if len(username) < 3:
+        await client.close()
+        return JSONResponse({"ok": False, "error": "یوزرنیم باید حداقل ۳ کاراکتر (حروف/عدد/زیرخط) باشد."}, status_code=400)
+    password = str(body.get("password") or "").strip() or _gen_admin_password()
+    try:
+        role_id = body.get("role_id")
+        role_id = int(role_id) if role_id not in (None, "", 0, "0") else await client.ensure_reseller_role()
+        data_limit = body.get("data_limit_gb")
+        data_limit = int(float(data_limit) * (1024 ** 3)) if data_limit not in (None, "", 0, "0") else None
+        admin = await client.create_admin(
+            username=username, password=password, role_id=role_id,
+            data_limit=data_limit, note=str(body.get("note") or "").strip(),
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    finally:
+        await client.close()
+    return {"ok": True, "username": username, "password": password,
+            "role_id": role_id, "panel_url": (await _pg_settings(database))["pg_base_url"],
+            "admin": _slim_admin(admin) if isinstance(admin, dict) else None}
+
+
+@router.post("/pasarguard/admins/{username}/delete")
+async def pg_delete_admin(request: Request, username: str):
+    client = await _pg_client(db(request))
+    if client is None:
+        return JSONResponse({"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است."}, status_code=400)
+    try:
+        await client.delete_admin(username)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    finally:
+        await client.close()
+    return {"ok": True}
+
+
+@router.post("/pasarguard/admins/{username}/status")
+async def pg_set_admin_status(request: Request, username: str):
+    """Enable/disable a reseller-admin (status: active|disabled)."""
+    body = await _json_body(request)
+    status = "disabled" if str(body.get("status")) == "disabled" else "active"
+    client = await _pg_client(db(request))
+    if client is None:
+        return JSONResponse({"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است."}, status_code=400)
+    try:
+        await client.modify_admin(username, status=status)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    finally:
+        await client.close()
+    return {"ok": True, "status": status}
+
+
+@router.post("/users/{user_id}/pasarguard-admin")
+async def pg_create_admin_for_reseller(request: Request, user_id: int):
+    """One-click: issue a personal PasarGuard admin account for a reseller, with
+    username/password derived from their Telegram id. Stores the username so the
+    UI can show it was already created."""
+    database = db(request)
+    client = await _pg_client(database)
+    if client is None:
+        return JSONResponse({"ok": False, "error": "پنل پاسارگارد پیکربندی نشده است."}, status_code=400)
+    username = f"rs{int(user_id)}"
+    password = _gen_admin_password()
+    try:
+        existing = await client.get_admin(username)
+        if existing:
+            return JSONResponse(
+                {"ok": False, "exists": True, "username": username,
+                 "error": f"این نماینده از قبل اکانت ادمین دارد: {username}"},
+                status_code=409,
+            )
+        role_id = await client.ensure_reseller_role()
+        await client.create_admin(
+            username=username, password=password, role_id=role_id,
+            note=f"reseller tg:{int(user_id)}", telegram_id=int(user_id),
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    finally:
+        await client.close()
+    await database.admin_update_settings({f"pg_admin_user_{int(user_id)}": username})
+    return {"ok": True, "username": username, "password": password,
+            "panel_url": (await _pg_settings(database))["pg_base_url"]}
 
 
 @router.post("/ui-mode")

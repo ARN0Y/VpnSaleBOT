@@ -8,6 +8,8 @@ import {
   Megaphone,
   Activity,
   SlidersHorizontal,
+  ShieldCheck,
+  UserPlus,
   type LucideIcon,
 } from "lucide-react";
 
@@ -28,6 +30,8 @@ export const NAV: NavItem[] = [
   { to: "/topups", label: "شارژ کیف پول", icon: Wallet, group: "ops" },
   { to: "/agent-requests", label: "درخواست نمایندگی", icon: Handshake, group: "ops" },
   { to: "/broadcast", label: "پیام همگانی", icon: Megaphone, group: "ops" },
+  { to: "/pasarguard/monitor", label: "مانیتورینگ پنل پاسارگارد", icon: ShieldCheck, group: "ops" },
+  { to: "/pasarguard/new-admin", label: "ساخت اکانت ادمین نماینده", icon: UserPlus, group: "ops" },
   { to: "/events", label: "رویدادها", icon: Activity, group: "system" },
   { to: "/settings", label: "تنظیمات", icon: SlidersHorizontal, group: "system" },
 ];
@@ -40,6 +44,8 @@ export const PAGE_TITLES: Record<string, string> = {
   "/topups": "شارژ کیف پول",
   "/agent-requests": "درخواست‌های نمایندگی",
   "/broadcast": "پیام همگانی",
+  "/pasarguard/monitor": "مانیتورینگ پنل پاسارگارد",
+  "/pasarguard/new-admin": "ساخت اکانت ادمین نماینده",
   "/events": "رویدادها",
   "/settings": "تنظیمات",
 };

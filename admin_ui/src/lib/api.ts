@@ -131,6 +131,31 @@ export const api = {
       p,
     ),
 
+  // PasarGuard admin delegation (phase 2)
+  pgAdmins: () =>
+    request<{ ok: boolean; error?: string; admins: Row[]; total?: number }>("/pasarguard/admins"),
+  pgAdminUsers: (username: string) =>
+    request<{ ok: boolean; error?: string; admin: Row; users: Row[]; total: number }>(
+      `/pasarguard/admins/${encodeURIComponent(username)}/users`,
+    ),
+  pgRoles: () =>
+    request<{ ok: boolean; error?: string; roles: { id: number; name: string; is_owner: boolean }[] }>(
+      "/pasarguard/roles",
+    ),
+  pgCreateAdmin: (p: { username: string; password?: string; role_id?: number; data_limit_gb?: number; note?: string }) =>
+    post<{ ok: boolean; error?: string; username?: string; password?: string; role_id?: number; panel_url?: string }>(
+      "/pasarguard/admins",
+      p,
+    ),
+  pgDeleteAdmin: (username: string) =>
+    post<Ok>(`/pasarguard/admins/${encodeURIComponent(username)}/delete`),
+  pgSetAdminStatus: (username: string, status: "active" | "disabled") =>
+    post<Ok>(`/pasarguard/admins/${encodeURIComponent(username)}/status`, { status }),
+  pgCreateAdminForReseller: (userId: number) =>
+    post<{ ok: boolean; error?: string; exists?: boolean; username?: string; password?: string; panel_url?: string }>(
+      `/users/${userId}/pasarguard-admin`,
+    ),
+
   updateAgent: (
     id: number,
     p: { access_level: string; credit_limit_toman: number; credit_used_toman: number; price_per_gb: number; daily_test_limit: number },
