@@ -238,14 +238,30 @@ class PasarGuardClient:
             "note": note,
             "expire": None,
         }
+        bodies: list[dict[str, Any]] = []
         if not expire or int(expire) <= 0:
-            return await self._request("POST", PG_API["create"], json=base_body)
-        try:
-            return await self._request("POST", PG_API["create"], json={**base_body, "expire": self._iso(int(expire))})
-        except PasarGuardError as exc:
-            if "HTTP 422" in str(exc) or "expire" in str(exc).lower():
-                return await self._request("POST", PG_API["create"], json={**base_body, "expire": int(expire)})
-            raise
+            bodies.append(base_body)
+        else:
+            bodies.append({**base_body, "expire": self._iso(int(expire))})
+            bodies.append({**base_body, "expire": int(expire)})  # unix fallback if ISO is rejected
+        last_exc: PasarGuardError | None = None
+        for i, body in enumerate(bodies):
+            try:
+                return await self._request("POST", PG_API["create"], json=body)
+            except PasarGuardError as exc:
+                last_exc = exc
+                msg = str(exc).lower()
+                # Only fall through to the unix-expire body on a validation error.
+                if i + 1 < len(bodies) and ("http 422" in msg or "expire" in msg):
+                    continue
+                break
+        # The create may have actually landed even though the response was lost
+        # (timeout/retry). If the user now exists, treat it as success — never
+        # create a duplicate or leave the buyer unpaid-for.
+        existing = await self.get_user(username)
+        if existing:
+            return existing
+        raise last_exc if last_exc else PasarGuardError("PasarGuard create_user failed")
 
     async def modify_user(self, username: str, fields: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", PG_API["user"].format(u=username), json=fields)

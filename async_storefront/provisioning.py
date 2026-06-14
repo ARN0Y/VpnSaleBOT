@@ -627,9 +627,12 @@ class ProvisioningService:
         try:
             expire_ts = (now_ts() + int(days) * 86400) if int(days) > 0 else 0
             data_bytes = gb_to_bytes(requested_gb)
-            base = sanitize_client_name(client_name) or f"u{int(user_id)}"
+            # PasarGuard usernames are strict (letters/digits/underscore); strip
+            # anything else so a custom name can never cause a 422 on create.
+            base = "".join(c for c in sanitize_client_name(client_name) if c.isalnum() or c == "_")
+            base = base[:18].strip("_") or f"u{int(user_id)}"
             for _ in range(requested_qty):
-                username = f"{base[:18].rstrip('._-') or 'u'}_{secrets.token_hex(4)}"
+                username = f"{base}_{secrets.token_hex(4)}"
                 resp = await pg_client.create_user(
                     username=username,
                     group_ids=list(group_ids),
