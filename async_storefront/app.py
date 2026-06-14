@@ -64,6 +64,12 @@ async def post_shutdown(app: Application) -> None:
     panel: PanelClient | None = app.bot_data.get("panel")
     if panel:
         await panel.close()
+    pg_client = app.bot_data.get("pg_client")
+    if pg_client is not None:
+        try:
+            await pg_client.close()
+        except Exception:
+            pass
     db: AsyncDatabase | None = app.bot_data.get("db")
     if db:
         await db.close()

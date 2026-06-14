@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import logging
@@ -25,7 +26,8 @@ from telegram.ext import (
 
 from .config import Settings
 from .db import AsyncDatabase
-from .provisioning import ProvisioningService
+from .pasarguard import PasarGuardClient
+from .provisioning import PG_INBOUND_SENTINEL, ProvisioningService
 from .qr import QRService
 
 try:
@@ -159,6 +161,48 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
 
 async def infinite_enabled(db: AsyncDatabase) -> bool:
     return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
+# ───────────────────────── PasarGuard backend ─────────────────────────
+async def pg_configured(db: AsyncDatabase) -> bool:
+    enabled = str(await db.get_setting("pg_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    if not enabled:
+        return False
+    return bool((await db.get_setting("pg_base_url", "")).strip()) and bool((await db.get_setting("pg_username", "")).strip())
+
+
+async def pg_is_primary(db: AsyncDatabase) -> bool:
+    """True when the main 'buy' flow should sell from PasarGuard instead of 3x-ui."""
+    backend = str(await db.get_setting("primary_backend", "xui") or "xui").strip().lower()
+    return backend == "pasarguard" and await pg_configured(db)
+
+
+async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
+    """Build (and cache) a PasarGuardClient from settings; rebuild if the panel
+    address/username/TLS changed so admin edits apply without a restart."""
+    app = context.application
+    db: AsyncDatabase = app.bot_data["db"]
+    if not await pg_configured(db):
+        return None
+    base = (await db.get_setting("pg_base_url", "")).strip().rstrip("/")
+    user = (await db.get_setting("pg_username", "")).strip()
+    pwd = (await db.get_setting("pg_password", "")).strip()
+    verify = str(await db.get_setting("pg_verify_tls", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+    key = f"{base}|{user}|{int(verify)}"
+    client = app.bot_data.get("pg_client")
+    if client is not None and app.bot_data.get("pg_client_key") == key:
+        return client
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.close()
+    try:
+        client = PasarGuardClient(base_url=base, username=user, password=pwd, verify_tls=verify)
+    except Exception:
+        LOG.exception("failed to build PasarGuard client")
+        return None
+    app.bot_data["pg_client"] = client
+    app.bot_data["pg_client_key"] = key
+    return client
 
 
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
@@ -961,16 +1005,38 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     qr: QRService = context.application.bot_data["qr"]
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        links = await provisioning.process_checkout(
-            user_id=update.effective_user.id,
-            plan_id=0,
-            gb=gb,
-            qty=qty,
-            unit_price=unit_price,
-            final_total=total,
-            client_name=client_name,
-            idempotency_key=str(checkout.get("idem") or query.id),
-        )
+        if await pg_is_primary(db):
+            pg_client = await get_pg_client(context)
+            if pg_client is None:
+                raise ValueError("اتصال به سرور برقرار نشد. لطفاً با پشتیبانی تماس بگیرید.")
+            group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
+            group_ids = await pg_client.resolve_group_ids([group])
+            if not group_ids:
+                raise ValueError("گروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.")
+            days = int(str(await db.get_setting("pg_default_days", "30") or "30").strip() or "0")
+            links = await provisioning.process_pg_checkout(
+                pg_client=pg_client,
+                group_ids=group_ids,
+                user_id=update.effective_user.id,
+                gb=gb,
+                qty=qty,
+                unit_price=unit_price,
+                final_total=total,
+                days=days,
+                client_name=client_name,
+                idempotency_key=str(checkout.get("idem") or query.id),
+            )
+        else:
+            links = await provisioning.process_checkout(
+                user_id=update.effective_user.id,
+                plan_id=0,
+                gb=gb,
+                qty=qty,
+                unit_price=unit_price,
+                final_total=total,
+                client_name=client_name,
+                idempotency_key=str(checkout.get("idem") or query.id),
+            )
     except ValueError as exc:
         clear_flow_state(context)
         await edit_text(
@@ -1445,6 +1511,16 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
     if not sub:
         await edit_text(query, "⚠️ این اشتراک پیدا نشد. لطفاً دوباره از لیست انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+    if int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL:
+        # PasarGuard-backed service: renewal from the bot isn't wired yet —
+        # guide to support instead of failing on the 3x-ui panel.
+        await edit_text(
+            query,
+            "🌐 <b>این سرویس روی سرور PasarGuard است.</b>\n\n"
+            "تمدید این نوع سرویس فعلاً از داخل ربات فعال نیست؛ برای تمدید با پشتیبانی در ارتباط باشید.",
+            back_keyboard(),
+        )
         return ConversationHandler.END
     name = str(sub.get("client_email") or sub_id)
     min_gb = await minimum_purchase_gb(db)

@@ -179,6 +179,7 @@ export function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
   const toggle = useMutation({ mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
+  const setBackend = useMutation({ mutationFn: (b: "xui" | "pasarguard") => api.setPrimaryBackend(b), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-12 w-72" /><Skeleton className="h-72" /></div>;
@@ -322,6 +323,39 @@ export function Settings() {
             هر نوع پنل را در تبِ مربوط به خودش پیکربندی و به ربات وصل کنید. ربات از هر پنلِ فعال به‌عنوان یک سرورِ قابل‌فروش استفاده می‌کند.
           </p>
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>پنلِ اصلیِ فروش</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              دکمه‌ی اصلیِ «خرید سرویس» در ربات از کدام پنل بفروشد. می‌توانی هر زمان آن را از 3x-ui به PasarGuard منتقل کنی؛ بدون قطعی و بدون از دست رفتن سرویس‌های قبلی.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["xui", "pasarguard"] as const).map((b) => {
+                const active = (items.primary_backend ?? "xui") === b;
+                const title = b === "xui" ? "پنل 3x-ui" : "پنل PasarGuard";
+                return (
+                  <button
+                    key={b}
+                    onClick={() => setBackend.mutate(b)}
+                    disabled={setBackend.isPending}
+                    className={`card-hover rounded-2xl border p-4 text-right transition ${active ? "border-brand/40 bg-brand/[0.06]" : "border-border hover:border-white/20"}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white">{title}</span>
+                      {active && <Badge variant="success">پنل اصلی</Badge>}
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {b === "pasarguard" ? "فروش از طریق PasarGuard (باید پایین فعال و وصل باشد)" : "فروش از طریق پنل 3x-ui"}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
         <Tabs defaultValue="xui" className="space-y-5">
           <TabsList>
             <TabsTrigger value="xui" className="px-4 py-2 text-sm">3x-ui</TabsTrigger>

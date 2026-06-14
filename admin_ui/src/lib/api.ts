@@ -113,6 +113,7 @@ export const api = {
     post<Ok>("/infinite-package", p),
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
+  setPrimaryBackend: (backend: "xui" | "pasarguard") => post<Ok>("/primary-backend", { backend }),
   setPasarGuard: (p: {
     enabled: boolean;
     label: string;

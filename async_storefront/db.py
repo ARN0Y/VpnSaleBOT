@@ -654,6 +654,9 @@ class AsyncDatabase:
             "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
+            # Which backend the MAIN buy flow sells from: "xui" (3x-ui) or
+            # "pasarguard". Lets the admin move the primary panel to PasarGuard.
+            "primary_backend": "xui",
             # ── PasarGuard panel (optional second backend, stored in settings KV
             #    so no schema change). Sold at Shayan's per-GB price. ──
             "pg_enabled": "0",

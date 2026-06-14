@@ -640,6 +640,15 @@ async def _pg_settings(database) -> dict[str, str]:
     )}
 
 
+@router.post("/primary-backend")
+async def set_primary_backend(request: Request):
+    """Choose which backend the main buy flow sells from: 'xui' or 'pasarguard'."""
+    body = await _json_body(request)
+    backend = "pasarguard" if str(body.get("backend")) == "pasarguard" else "xui"
+    await db(request).admin_update_settings({"primary_backend": backend})
+    return {"ok": True, "backend": backend}
+
+
 @router.post("/pasarguard")
 async def set_pasarguard(request: Request):
     """Configure the PasarGuard panel (settings KV, no schema change). Empty

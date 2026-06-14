@@ -30,13 +30,18 @@ class PasarGuardError(RuntimeError):
 # is /api/admin/token, current admin is /api/admin, groups/users/admins as below.
 # Single-user create/CRUD path (singular vs plural) is resolved at runtime from
 # a candidate list and cached, so it self-adapts across point releases.
+# Confirmed against live PasarGuard v5.0.1 (pg_probe --create-test):
+#   token=/api/admin/token, me=/api/admin, list=/api/users (GET),
+#   create=/api/user (POST 201), single=/api/user/{username} (GET/PUT/DELETE 204).
+#   subscription_url is a top-level field on the user object.
 PG_API = {
     "token_candidates": ("/api/admin/token", "/api/admins/token", "/api/token"),
     "current_admin_candidates": ("/api/admin", "/api/admins/current", "/api/admins/me"),
     "groups": "/api/groups",
-    "users": "/api/users",          # list (GET) + create (POST) — RESTful plural
-    "user": "/api/users/{u}",       # single GET/PUT/DELETE  (fallback: /api/user/{u})
-    "user_reset": "/api/users/{u}/reset",
+    "users": "/api/users",          # list (GET)
+    "create": "/api/user",          # create (POST) — singular
+    "user": "/api/user/{u}",        # single GET/PUT/DELETE — singular
+    "user_reset": "/api/user/{u}/reset",
     "admins": "/api/admins",
     "admin": "/api/admins/{u}",
 }
@@ -205,6 +210,12 @@ class PasarGuardClient:
         return await self._request("GET", PG_API["users"], params=params)
 
     # ────────────────────────── write ops ───────────────────────────
+    @staticmethod
+    def _iso(ts: int) -> str:
+        import datetime as _dt
+
+        return _dt.datetime.fromtimestamp(int(ts), tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     async def create_user(
         self,
         *,
@@ -215,17 +226,26 @@ class PasarGuardClient:
         status: str = "active",
         note: str = "",
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
+        """Create a user. ``expire`` is a unix timestamp (0 = never). v5 uses an
+        ISO datetime for ``expire``; if the panel rejects that we retry with the
+        raw unix int so it works across point releases."""
+        base_body: dict[str, Any] = {
             "username": username,
             "group_ids": group_ids,
             "data_limit": int(data_limit_bytes),
             "data_limit_reset_strategy": "no_reset",
             "status": status,
             "note": note,
+            "expire": None,
         }
-        if expire and int(expire) > 0:
-            body["expire"] = int(expire)
-        return await self._request("POST", PG_API["users"], json=body)
+        if not expire or int(expire) <= 0:
+            return await self._request("POST", PG_API["create"], json=base_body)
+        try:
+            return await self._request("POST", PG_API["create"], json={**base_body, "expire": self._iso(int(expire))})
+        except PasarGuardError as exc:
+            if "HTTP 422" in str(exc) or "expire" in str(exc).lower():
+                return await self._request("POST", PG_API["create"], json={**base_body, "expire": int(expire)})
+            raise
 
     async def modify_user(self, username: str, fields: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", PG_API["user"].format(u=username), json=fields)
