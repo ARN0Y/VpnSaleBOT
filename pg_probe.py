@@ -283,8 +283,24 @@ def main() -> None:
         print("\n== full chain test (role -> admin -> cleanup) ==")
         import random
 
-        ROLE_LIST = ("/api/admin_roles", "/api/admin_roles?limit=100", "/api/admins/roles", "/api/admin/roles")
-        ROLE_CREATE = ("/api/admin_role", "/api/admin_roles", "/api/admin/role")
+        # GET /api/admin/roles and /api/admin/role both returned 405 → the paths
+        # EXIST but with a different verb. Map the full matrix to learn which is
+        # list (GET) and which is create (POST).
+        print("\n-- role endpoint matrix (which verb each path wants) --")
+        for mp in ("/api/admin/role", "/api/admin/roles", "/api/admin_role", "/api/admin_roles"):
+            for verb in ("GET", "OPTIONS"):
+                try:
+                    rr = client.request(verb, base + mp, headers=auth)
+                    extra = ("  allow=" + rr.headers.get("allow", "")) if rr.headers.get("allow") else ""
+                    print(f"[{verb}] {mp} -> {rr.status_code}{extra}")
+                    if verb == "GET" and rr.status_code == 200:
+                        print("    " + _short(rr.text, 900))
+                except Exception as e:
+                    print(f"[{verb}] {mp} -> ERROR {e}")
+
+        ROLE_LIST = ("/api/admin/role", "/api/admin/role?limit=100", "/api/admin/roles?limit=100",
+                     "/api/admin_roles", "/api/admins/roles")
+        ROLE_CREATE = ("/api/admin/roles", "/api/admin/role", "/api/admin_role", "/api/admin_roles")
 
         def _roles_from(payload):
             if isinstance(payload, dict):
