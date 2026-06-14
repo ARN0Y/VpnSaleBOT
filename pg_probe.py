@@ -145,6 +145,24 @@ def main() -> None:
                 _print_schema(f"USER response ({key})", schemas[key])
             if kl in ("admin", "adminresponse", "admincreate"):
                 _print_schema(f"ADMIN ({key})", schemas[key])
+        # create-admin request body (the body we must send to make a reseller admin)
+        for create_path in ("/api/admins", "/api/admin"):
+            node = spec["paths"].get(create_path, {}).get("post")
+            if node:
+                body = (((node.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema")
+                if body:
+                    _print_schema(f"CREATE ADMIN body ({create_path} POST)", body)
+                break
+        # role / permission schemas (the RBAC model that decides an admin's access)
+        for key in list(schemas.keys()):
+            if "role" in key.lower() or "permission" in key.lower():
+                _print_schema(f"ROLE/PERM ({key})", schemas[key])
+        print("\n-- admin / role endpoints --")
+        for path in sorted(spec["paths"].keys()):
+            if "admin" in path.lower() or "role" in path.lower():
+                methods = ",".join(sorted(m.upper() for m in spec["paths"][path] if m.lower() in
+                                          ("get", "post", "put", "patch", "delete")))
+                print(f"  {methods:18} {path}")
     else:
         print("[openapi] not reachable (DOCS likely off). Tip: set DOCS=True in the panel .env once,")
         print("          restart, re-run this probe, then turn it back off. Below is best-effort probing.")
@@ -221,6 +239,115 @@ def main() -> None:
                         break
                 except Exception as e:
                     print(f"[cleanup-delete] {dp} -> ERROR {e}")
+
+    # 6) admin / roles discovery (read-only) — the monitoring view needs these
+    print("\n== admin & roles discovery (read-only) ==")
+    for p in ("/api/admins", "/api/admins?limit=500", "/api/roles", "/api/role", "/api/permissions"):
+        try:
+            r = client.get(base + p, headers=auth)
+        except Exception as e:
+            print(f"[get] {p} -> ERROR {e}")
+            continue
+        print(f"[get] {p} -> {r.status_code}")
+        if r.status_code == 200:
+            print(f"      {_short(r.text, 1600)}")
+
+    # how is a user tied to the admin who created it? (so the monitor can group
+    # each reseller's accounts). Inspect one user object + try server-side filters.
+    print("\n-- user -> creator-admin linkage --")
+    try:
+        ur = client.get(base + "/api/users?limit=3", headers=auth).json()
+        items = ur.get("users") or ur.get("items") or (ur if isinstance(ur, list) else [])
+        if items:
+            print("  user object keys:", list(items[0].keys()))
+            for k in ("admin", "owner", "owner_username", "admin_username", "created_by"):
+                if k in items[0]:
+                    print(f"  -> '{k}':", _short(json.dumps(items[0][k], ensure_ascii=False), 200))
+        else:
+            print("  (no users to inspect)")
+    except Exception as e:
+        print("  could not inspect users:", e)
+    print("\n-- filter users by creator admin (used by the monitoring view) --")
+    for qp in (f"/api/users?admin={user}", f"/api/users?owner_username={user}",
+               f"/api/users?admin_username={user}", f"/api/users?admins={user}"):
+        try:
+            r = client.get(base + qp, headers=auth)
+            print(f"[get] {qp} -> {r.status_code}  {_short(r.text, 140)}")
+        except Exception as e:
+            print(f"[get] {qp} -> ERROR {e}")
+
+    # 7) optional admin-test: creates a throwaway NON-SUDO admin, reads it back,
+    #    then DELETES it — confirms the exact create body, role model & delete path.
+    if "--admin-test" in sys.argv:
+        print("\n== admin-test (creates a throwaway NON-SUDO admin, then deletes it) ==")
+        import random
+        # find a non-owner role id if the panel uses RBAC roles
+        role_id = None
+        for rp in ("/api/roles", "/api/role"):
+            try:
+                rr = client.get(base + rp, headers=auth)
+            except Exception:
+                continue
+            if rr.status_code == 200:
+                try:
+                    roles = rr.json()
+                    roles = roles.get("roles") if isinstance(roles, dict) else roles
+                    print(f"  roles({rp}): {_short(json.dumps(roles, ensure_ascii=False), 700)}")
+                    for role in (roles or []):
+                        if str(role.get("name", "")).lower() not in ("owner", "sudo", "superadmin"):
+                            role_id = role.get("id")
+                            break
+                except Exception as e:
+                    print("  role parse error:", e)
+                break
+        aname = f"probe_admin_{random.randint(10000, 99999)}"
+        apass = f"Px{random.randint(100000, 999999)}!q"
+        base_b = {"username": aname, "password": apass}
+        bodies = []
+        if role_id is not None:
+            bodies.append({**base_b, "role_id": role_id})
+        bodies.append({**base_b, "is_sudo": False})
+        bodies.append({**base_b, "is_sudo": False, "telegram_id": 0, "discord_webhook": ""})
+        bodies.append(base_b)
+        created_path = created_body = None
+        for cp in ("/api/admins", "/api/admin"):
+            for b in bodies:
+                try:
+                    r = client.post(base + cp, headers=auth, json=b)
+                except Exception as e:
+                    print(f"[create-admin] {cp} {list(b.keys())} -> ERROR {e}")
+                    continue
+                print(f"[create-admin] {cp} {list(b.keys())} -> {r.status_code}")
+                if r.status_code in (200, 201):
+                    created_path, created_body = cp, b
+                    print("  FULL CREATE-ADMIN RESPONSE:\n  " + _short(r.text, 2000))
+                    break
+                print(f"   {_short(r.text, 300)}")
+            if created_path:
+                break
+        if created_body:
+            for gp in (f"/api/admins/{aname}", f"/api/admin/{aname}"):
+                try:
+                    r = client.get(base + gp, headers=auth)
+                    print(f"[get-admin] {gp} -> {r.status_code}")
+                    if r.status_code == 200:
+                        print("  " + _short(r.text, 1200))
+                        break
+                except Exception as e:
+                    print(f"[get-admin] {gp} -> ERROR {e}")
+            deleted = False
+            for dp in (f"/api/admins/{aname}", f"/api/admin/{aname}"):
+                try:
+                    r = client.delete(base + dp, headers=auth)
+                    print(f"[delete-admin] {dp} -> {r.status_code}")
+                    if r.status_code in (200, 204):
+                        deleted = True
+                        break
+                except Exception as e:
+                    print(f"[delete-admin] {dp} -> ERROR {e}")
+            print(f"  >>> WORKING create endpoint: {created_path}  body keys: {list(created_body.keys())}")
+            if not deleted:
+                print(f"  !!! WARNING: throwaway admin '{aname}' was NOT deleted — remove it MANUALLY in the panel.")
 
     print("\n== done — paste everything above ==")
 
