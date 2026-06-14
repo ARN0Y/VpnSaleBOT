@@ -76,9 +76,9 @@ function PasarGuardCard({ items }: { items: Record<string, string> }) {
   return (
     <Card className="border-brand/20">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-brand" /> پنل PasarGuard</CardTitle>
+        <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-brand" /> اتصال پنل PasarGuard</CardTitle>
         <p className="text-sm text-muted-foreground">
-          یک پنل PasarGuard اضافه کن که در ربات به‌عنوان یک سرور فروخته می‌شود (با همان نرخ گیگیِ شایان). یک ادمینِ اختصاصیِ ربات در پنل بساز و کردنشالش را اینجا بده. پسورد خالی = بدون تغییر.
+          اطلاعات اتصال ربات به پنل PasarGuard را وارد کنید. توصیه می‌شود یک حساب ادمینِ اختصاصی برای ربات در پنل بسازید و از همان استفاده کنید. سرویس‌های این پنل بر اساس تعرفه‌ی گیگیِ شایان فروخته می‌شوند. برای حفظ رمز فعلی، فیلد رمز عبور را خالی بگذارید.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -187,7 +187,7 @@ export function Settings() {
     { v: "general", label: "عمومی" },
     { v: "sales", label: "فروش و تعرفه" },
     { v: "payment", label: "پرداخت" },
-    { v: "panel", label: "پنل" },
+    { v: "panel", label: "پنل‌ها" },
   ];
 
   return (
@@ -314,23 +314,45 @@ export function Settings() {
         </Card>
       </TabsContent>
 
-      {/* ───────────── Panel ───────────── */}
-      <TabsContent value="panel" className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-muted-foreground" /> اتصال پنل 3x-ui</CardTitle>
-            <p className="text-sm text-muted-foreground">پسورد را خالی بگذارید تا تغییر نکند.</p>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            {PANEL_FIELDS.map(({ key, label, type }) => (
-              <Field key={key} label={label}>
-                <Input type={type || "text"} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} placeholder={type === "password" ? "بدون تغییر" : ""} />
-              </Field>
-            ))}
-          </CardContent>
-        </Card>
+      {/* ───────────── Panels (per-type sub-tabs) ───────────── */}
+      <TabsContent value="panel" className="space-y-5">
+        <div>
+          <h2 className="text-lg font-black text-white">مدیریت پنل‌ها</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            هر نوع پنل را در تبِ مربوط به خودش پیکربندی و به ربات وصل کنید. ربات از هر پنلِ فعال به‌عنوان یک سرورِ قابل‌فروش استفاده می‌کند.
+          </p>
+        </div>
+        <Tabs defaultValue="xui" className="space-y-5">
+          <TabsList>
+            <TabsTrigger value="xui" className="px-4 py-2 text-sm">3x-ui</TabsTrigger>
+            <TabsTrigger value="pasarguard" className="px-4 py-2 text-sm">PasarGuard</TabsTrigger>
+          </TabsList>
 
-        <PasarGuardCard items={items} />
+          <TabsContent value="xui" className="space-y-5">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-muted-foreground" /> اتصال پنل 3x-ui</CardTitle>
+                <p className="text-sm text-muted-foreground">اطلاعات اتصال ربات به پنل 3x-ui. برای حفظ رمز فعلی، فیلد رمز عبور را خالی بگذارید.</p>
+              </CardHeader>
+              <CardContent className="grid gap-4 sm:grid-cols-2">
+                {PANEL_FIELDS.map(({ key, label, type }) => (
+                  <Field key={key} label={label}>
+                    <Input type={type || "text"} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)} placeholder={type === "password" ? "بدون تغییر" : ""} />
+                  </Field>
+                ))}
+                <div className="sm:col-span-2 flex justify-end">
+                  <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+                    <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره پنل 3x-ui"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="pasarguard" className="space-y-5">
+            <PasarGuardCard items={items} />
+          </TabsContent>
+        </Tabs>
       </TabsContent>
 
       <div className="sticky bottom-4 flex justify-end">

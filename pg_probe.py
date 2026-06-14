@@ -173,6 +173,55 @@ def main() -> None:
         if r.status_code == 200:
             print(f"      {_short(r.text)}")
 
+    # 5) optional create-test: confirms the exact create body + where the
+    #    subscription_url lives. Creates a throwaway user and DELETES it.
+    if "--create-test" in sys.argv:
+        print("\n== create-test (creates a throwaway user, then deletes it) ==")
+        gid = None
+        try:
+            gr = client.get(base + "/api/groups", headers=auth).json()
+            for g in gr.get("groups", []):
+                if str(g.get("name")) == "Tsco-Bot":
+                    gid = g.get("id")
+            gid = gid if gid is not None else (gr.get("groups", [{}])[0].get("id"))
+        except Exception as e:
+            print(f"[create-test] could not read groups: {e}")
+        import random
+        uname = f"probe_del_{random.randint(10000, 99999)}"
+        body = {
+            "username": uname,
+            "group_ids": [gid] if gid is not None else [],
+            "data_limit": 1073741824,
+            "data_limit_reset_strategy": "no_reset",
+            "status": "active",
+            "expire": None,
+            "note": "probe — safe to delete",
+        }
+        created_path = None
+        for cp in ("/api/users", "/api/user"):
+            try:
+                r = client.post(base + cp, headers=auth, json=body)
+            except Exception as e:
+                print(f"[create] {cp} -> ERROR {e}")
+                continue
+            print(f"[create] {cp} -> {r.status_code}")
+            if r.status_code in (200, 201):
+                created_path = cp
+                print("  FULL CREATE RESPONSE:")
+                print("  " + _short(r.text, 2000))
+                break
+            else:
+                print(f"  {_short(r.text, 400)}")
+        if created_path:
+            for dp in (f"/api/users/{uname}", f"/api/user/{uname}"):
+                try:
+                    r = client.delete(base + dp, headers=auth)
+                    print(f"[cleanup-delete] {dp} -> {r.status_code}")
+                    if r.status_code in (200, 204):
+                        break
+                except Exception as e:
+                    print(f"[cleanup-delete] {dp} -> ERROR {e}")
+
     print("\n== done — paste everything above ==")
 
 
