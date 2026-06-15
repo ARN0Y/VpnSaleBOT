@@ -137,6 +137,11 @@ function BackupCard({ items }: { items: Record<string, string> }) {
     bot: (items.backup_include_bot ?? "1") === "1",
     xui: (items.backup_include_xui ?? "1") === "1",
     pg: (items.backup_include_pg ?? "0") === "1",
+    pg_db: (items.backup_include_pg_db ?? "0") === "1",
+    pg_db_container: items.pg_db_container ?? "",
+    pg_db_user: items.pg_db_user || "pasarguard",
+    pg_db_name: items.pg_db_name || "pasarguard",
+    pg_db_dump_cmd: items.pg_db_dump_cmd ?? "",
     interval_value: items.backup_interval_value || "20",
     interval_unit: items.backup_interval_unit || "minutes",
     chat_id: items.backup_telegram_chat_id ?? "",
@@ -149,6 +154,11 @@ function BackupCard({ items }: { items: Record<string, string> }) {
         backup_include_bot: f.bot ? "on" : "off",
         backup_include_xui: f.xui ? "on" : "off",
         backup_include_pg: f.pg ? "on" : "off",
+        backup_include_pg_db: f.pg_db ? "on" : "off",
+        pg_db_container: f.pg_db_container.trim(),
+        pg_db_user: f.pg_db_user.trim() || "pasarguard",
+        pg_db_name: f.pg_db_name.trim() || "pasarguard",
+        pg_db_dump_cmd: f.pg_db_dump_cmd.trim(),
         backup_interval_value: String(Math.max(1, Number(f.interval_value) || 1)),
         backup_interval_unit: f.interval_unit,
         backup_telegram_chat_id: f.chat_id.trim(),
@@ -183,7 +193,32 @@ function BackupCard({ items }: { items: Record<string, string> }) {
         <div className="grid gap-3 sm:grid-cols-3">
           <Check k="bot" label="دیتابیس ربات" hint="کاربران، سفارش‌ها، کیف پول" />
           <Check k="xui" label="پنل x-ui" hint="دیتابیس/اینباندهای 3x-ui" />
-          <Check k="pg" label="پنل PasarGuard" hint="کاربران، ادمین‌ها و گروه‌ها (از API)" />
+          <Check k="pg" label="PasarGuard (JSON)" hint="کاربران، ادمین‌ها و گروه‌ها (از API)" />
+        </div>
+
+        {/* Full PasarGuard DB dump (pg_dump) */}
+        <div className="space-y-3 rounded-xl border border-brand/25 bg-brand/[0.04] p-4">
+          <Check k="pg_db" label="بکاپ کامل دیتابیس PasarGuard (دامپ SQL)" hint="کلِ دیتابیس Postgres با pg_dump — شاملِ تمام کاربران، مصرف و تاریخچه" />
+          {f.pg_db && (
+            <>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Field label="نام کانتینر دیتابیس" hint="خالی = تشخیص خودکار"><Input value={f.pg_db_container} onChange={(e) => set("pg_db_container", e.target.value)} placeholder="auto-detect" dir="ltr" /></Field>
+                <Field label="یوزر دیتابیس"><Input value={f.pg_db_user} onChange={(e) => set("pg_db_user", e.target.value)} placeholder="pasarguard" dir="ltr" /></Field>
+                <Field label="نام دیتابیس"><Input value={f.pg_db_name} onChange={(e) => set("pg_db_name", e.target.value)} placeholder="pasarguard" dir="ltr" /></Field>
+              </div>
+              <Field label="دستور دلخواهِ بکاپ (پیشرفته — اختیاری)" hint="اگر پر شود به‌جای حالت بالا اجرا می‌شود؛ باید دامپ را در STDOUT بدهد. می‌تواند ssh به سرور مستر هم باشد.">
+                <textarea
+                  value={f.pg_db_dump_cmd}
+                  onChange={(e) => set("pg_db_dump_cmd", e.target.value)}
+                  rows={2}
+                  dir="ltr"
+                  placeholder="مثال: docker exec -i pasarguard-db pg_dump -U pasarguard pasarguard"
+                  className="w-full rounded-xl border border-input bg-card px-3 py-2 font-mono text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                />
+              </Field>
+              <p className="text-[11px] text-amber-300">⚠️ نیازمندِ دسترسیِ پنل به Docker روی همان سرورِ PasarGuard است (یا یک دستورِ ssh دلخواه). خروجی به‌صورت <code>.sql.gz</code> در همان آرشیوِ تلگرام قرار می‌گیرد.</p>
+            </>
+          )}
         </div>
 
         <div className="grid gap-4 sm:grid-cols-3">
