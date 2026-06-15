@@ -15,6 +15,7 @@ import httpx
 
 from async_storefront.db import AsyncDatabase
 from async_storefront.panel import PanelClient
+from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.util import now_ts
 
 LOG = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class BackupResult:
     xui_path: Path | None
     mode: str
     errors: tuple[str, ...] = ()
+    pg_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,23 @@ def _tehran_now_label() -> str:
     return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y/%m/%d - %H:%M:%S")
 
 
+async def _build_pg_client(db: AsyncDatabase) -> "PasarGuardClient | None":
+    """Build a PasarGuard client from settings for the backup snapshot, or None
+    if PasarGuard is disabled / not fully configured."""
+    enabled = str(await db.get_setting("pg_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    base = (await db.get_setting("pg_base_url", "")).strip().rstrip("/")
+    user = (await db.get_setting("pg_username", "")).strip()
+    pwd = (await db.get_setting("pg_password", "")).strip()
+    if not (enabled and base and user and pwd):
+        return None
+    verify = str(await db.get_setting("pg_verify_tls", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+    try:
+        return PasarGuardClient(base_url=base, username=user, password=pwd, verify_tls=verify)
+    except Exception:
+        LOG.exception("failed to build PasarGuard client for backup")
+        return None
+
+
 async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> None:
     db: AsyncDatabase = app.state.db
     token = str(getattr(app.state, "bot_token", "") or "").strip()
@@ -81,6 +100,8 @@ async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> 
         includes.append("دیتابیس ربات")
     if result.xui_path:
         includes.append("دیتابیس x-ui")
+    if result.pg_path:
+        includes.append("سرور PasarGuard")
     caption = (
         f"🗄 <b>{source_label} تسکو نتورک</b>\n\n"
         f"⏱ زمان تهران: <b>{_tehran_now_label()}</b>\n"
@@ -175,6 +196,42 @@ async def export_xui_snapshot(
     return XuiExportResult(path=saved, mode="inbounds_json_fallback", endpoint="", backup_format="json")
 
 
+async def export_pasarguard_snapshot(client: "PasarGuardClient", work_dir: Path, stamp: str, *, max_users: int = 100000) -> Path:
+    """Logical backup of the PasarGuard panel via its API: system info, all
+    groups, all admins, and every user (paged) — written as JSON so the accounts
+    can be inspected/recreated if the panel is lost."""
+    async def _safe(coro, default):
+        try:
+            return await coro
+        except Exception:
+            return default
+
+    system = await _safe(client.system_info(), {})
+    groups = await _safe(client.list_groups(), [])
+    admins = await _safe(client.list_admins(), [])
+    users: list[Any] = []
+    offset, batch, total = 0, 1000, None
+    while len(users) < max_users:
+        page = await client.list_users(offset=offset, limit=batch)
+        chunk = page.get("users") or []
+        users.extend(chunk)
+        if total is None:
+            total = int(page.get("total") or 0)
+        offset += batch
+        if not chunk or (total is not None and len(users) >= total):
+            break
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "panel_version": (system or {}).get("version"),
+        "counts": {"users": len(users), "admins": len(admins), "groups": len(groups), "reported_total_users": total},
+        "system": system,
+        "groups": groups,
+        "admins": admins,
+        "users": users,
+    }
+    return await _write_bytes(work_dir / f"pasarguard-{stamp}.json", await _json_bytes(payload))
+
+
 async def create_full_backup(
     *,
     db: AsyncDatabase,
@@ -182,6 +239,8 @@ async def create_full_backup(
     backup_dir: Path,
     include_bot: bool = True,
     include_xui: bool = True,
+    include_pg: bool = False,
+    pg_client: "PasarGuardClient | None" = None,
     xui_timeout_seconds: int = DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS,
 ) -> BackupResult:
     backup_dir = Path(backup_dir)
@@ -209,14 +268,28 @@ async def create_full_backup(
             )
             xui_export = XuiExportResult(path=xui_path, mode="error", endpoint="", backup_format="json")
 
+    pg_path: Path | None = None
+    if include_pg and pg_client is not None:
+        try:
+            pg_path = await export_pasarguard_snapshot(pg_client, work_dir, stamp)
+        except Exception as exc:
+            LOG.exception("PasarGuard backup export failed")
+            errors.append(f"pasarguard backup failed: {exc}")
+            pg_path = await _write_bytes(
+                work_dir / f"pasarguard-error-{stamp}.json",
+                await _json_bytes({"exported_at": datetime.now(timezone.utc).isoformat(), "error": str(exc)}),
+            )
+
     settings_rows = await db.admin_list_settings()
     panel_settings = await db.get_panel_settings()
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "include_bot": include_bot,
         "include_xui": include_xui,
+        "include_pg": include_pg,
         "bot_db": bot_db_path.name if bot_db_path else None,
         "xui_export": xui_path.name if xui_path else None,
+        "pasarguard_export": pg_path.name if pg_path else None,
         "xui_export_mode": xui_export.mode if xui_export else None,
         "xui_endpoint": xui_export.endpoint if xui_export else None,
         "xui_backup_format": xui_export.backup_format if xui_export else None,
@@ -230,7 +303,7 @@ async def create_full_backup(
 
     def _zip() -> None:
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for path in (bot_db_path, xui_path, manifest_path):
+            for path in (bot_db_path, xui_path, pg_path, manifest_path):
                 if path and path.exists():
                     zf.write(path, arcname=path.name)
         for path in work_dir.iterdir():
@@ -238,8 +311,9 @@ async def create_full_backup(
         work_dir.rmdir()
 
     await asyncio.to_thread(_zip)
-    mode = "full" if include_bot and include_xui else "bot" if include_bot else "xui"
-    return BackupResult(archive_path=archive_path, bot_db_path=bot_db_path, xui_path=xui_path, mode=mode, errors=tuple(errors))
+    parts = [p for p, inc in (("bot", include_bot), ("xui", include_xui), ("pg", include_pg and pg_path is not None)) if inc]
+    mode = "full" if len(parts) > 1 else (parts[0] if parts else "empty")
+    return BackupResult(archive_path=archive_path, bot_db_path=bot_db_path, xui_path=xui_path, mode=mode, errors=tuple(errors), pg_path=pg_path)
 
 
 async def run_scheduled_backup_once(app) -> BackupResult | None:
@@ -279,10 +353,14 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
     backup_dir = Path(getattr(app.state, "backup_dir", Path("backup"))).resolve()
     include_bot = await db.get_setting("backup_include_bot", "1") == "1"
     include_xui = await db.get_setting("backup_include_xui", "1") == "1"
+    include_pg = await db.get_setting("backup_include_pg", "0") == "1"
     xui_timeout_seconds = normalize_xui_backup_timeout(
         await db.get_setting("backup_xui_timeout_seconds", str(DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS))
     )
-    if not include_bot and not include_xui:
+    pg_client = await _build_pg_client(db) if include_pg else None
+    if pg_client is None:
+        include_pg = False
+    if not include_bot and not include_xui and not include_pg:
         include_bot = True
 
     await db.set_setting("backup_last_status", "running")
@@ -294,6 +372,8 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
             backup_dir=backup_dir,
             include_bot=include_bot,
             include_xui=include_xui,
+            include_pg=include_pg,
+            pg_client=pg_client,
             xui_timeout_seconds=xui_timeout_seconds,
         )
         await send_backup_to_telegram(app, result, source=source)
@@ -305,6 +385,10 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
             with contextlib.suppress(Exception):
                 Path(result.archive_path).unlink(missing_ok=True)
         raise
+    finally:
+        if pg_client is not None:
+            with contextlib.suppress(Exception):
+                await pg_client.close()
     await db.set_setting("backup_last_status", "partial" if result.errors else "ok")
     await db.set_setting("backup_last_error", "\n".join(result.errors)[:1000])
     await db.set_setting("backup_last_run_ts", str(now_ts()))

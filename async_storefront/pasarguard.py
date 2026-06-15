@@ -369,6 +369,17 @@ class PasarGuardClient:
         total = int(data.get("total")) if isinstance(data, dict) and data.get("total") is not None else len(users)
         return {"users": users, "total": total}
 
+    async def list_users(self, *, offset: int = 0, limit: int = 100, search: str = "") -> dict[str, Any]:
+        """One page of ALL panel users (no admin filter) — used by the backup
+        snapshot. Returns {users, total}."""
+        params: dict[str, Any] = {"offset": int(offset), "limit": int(limit)}
+        if search.strip():
+            params["search"] = search.strip()
+        data = await self._request("GET", PG_API["users"], params=params)
+        users = self._as_list(data, "users", "items")
+        total = int(data.get("total")) if isinstance(data, dict) and data.get("total") is not None else len(users)
+        return {"users": users, "total": total}
+
     async def admin_user_aggregates(self, username: str, *, max_scan: int = 50000) -> dict[str, Any]:
         """Aggregate a reseller's whole fleet for the KPI tiles: allocated volume
         (Σ data_limit), used traffic, and volume created in the last 24h. Scans

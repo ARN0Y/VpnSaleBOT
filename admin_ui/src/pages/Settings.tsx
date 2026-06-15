@@ -130,6 +130,89 @@ function PasarGuardCard({ items }: { items: Record<string, string> }) {
   );
 }
 
+function BackupCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const [f, setF] = React.useState({
+    enabled: (items.backup_enabled ?? "1") === "1",
+    bot: (items.backup_include_bot ?? "1") === "1",
+    xui: (items.backup_include_xui ?? "1") === "1",
+    pg: (items.backup_include_pg ?? "0") === "1",
+    interval_value: items.backup_interval_value || "20",
+    interval_unit: items.backup_interval_unit || "minutes",
+    chat_id: items.backup_telegram_chat_id ?? "",
+  });
+  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateSettings({
+        backup_enabled: f.enabled ? "on" : "off",
+        backup_include_bot: f.bot ? "on" : "off",
+        backup_include_xui: f.xui ? "on" : "off",
+        backup_include_pg: f.pg ? "on" : "off",
+        backup_interval_value: String(Math.max(1, Number(f.interval_value) || 1)),
+        backup_interval_unit: f.interval_unit,
+        backup_telegram_chat_id: f.chat_id.trim(),
+        backup_xui_timeout_seconds: items.backup_xui_timeout_seconds ?? "180",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const Check = ({ k, label, hint }: { k: keyof typeof f; label: string; hint?: string }) => (
+    <label className="flex items-start gap-2 rounded-xl border border-border bg-white/[0.02] p-3 text-sm">
+      <input type="checkbox" checked={Boolean(f[k])} onChange={(e) => set(k, e.target.checked)} className="mt-0.5 h-4 w-4 accent-[hsl(var(--brand))]" />
+      <span><span className="font-bold text-white">{label}</span>{hint && <span className="block text-[11px] text-muted-foreground">{hint}</span>}</span>
+    </label>
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-muted-foreground" /> بکاپ‌گیری خودکار</CardTitle>
+        <p className="text-sm text-muted-foreground">بکاپِ زمان‌بندی‌شده به‌صورت خودکار ساخته و به تلگرام ارسال می‌شود. منابعی که باید در بکاپ باشند را انتخاب کنید.</p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-white">بکاپ خودکار</span>
+            <Badge variant={f.enabled ? "success" : "danger"}>{f.enabled ? "فعال" : "غیرفعال"}</Badge>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={f.enabled} onClick={() => set("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
+            <Button size="sm" variant="destructive" disabled={!f.enabled} onClick={() => set("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Check k="bot" label="دیتابیس ربات" hint="کاربران، سفارش‌ها، کیف پول" />
+          <Check k="xui" label="پنل x-ui" hint="دیتابیس/اینباندهای 3x-ui" />
+          <Check k="pg" label="پنل PasarGuard" hint="کاربران، ادمین‌ها و گروه‌ها (از API)" />
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="فاصله‌ی بکاپ"><Input value={f.interval_value} inputMode="numeric" onChange={(e) => set("interval_value", e.target.value)} /></Field>
+          <Field label="واحد">
+            <select
+              value={f.interval_unit}
+              onChange={(e) => set("interval_unit", e.target.value)}
+              className="h-10 w-full rounded-xl border border-input bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="minutes">دقیقه</option>
+              <option value="hours">ساعت</option>
+              <option value="days">روز</option>
+              <option value="weeks">هفته</option>
+            </select>
+          </Field>
+          <Field label="آیدی چت تلگرام (مقصد بکاپ)"><Input value={f.chat_id} onChange={(e) => set("chat_id", e.target.value)} dir="ltr" placeholder="-100..." /></Field>
+        </div>
+
+        <div className="flex justify-end">
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات بکاپ"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function Settings() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["settings"], queryFn: () => api.settings() });
@@ -213,6 +296,7 @@ export function Settings() {
             ))}
           </CardContent>
         </Card>
+        <BackupCard items={items} />
       </TabsContent>
 
       {/* ───────────── Sales + Pricing ───────────── */}

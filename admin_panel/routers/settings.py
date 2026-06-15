@@ -137,6 +137,7 @@ def backup_values_from_form(form) -> dict[str, str]:
         "backup_enabled": "1" if form.get("backup_enabled") == "on" else "0",
         "backup_include_bot": "1" if form.get("backup_include_bot") == "on" else "0",
         "backup_include_xui": "1" if form.get("backup_include_xui") == "on" else "0",
+        "backup_include_pg": "1" if form.get("backup_include_pg") == "on" else "0",
         "backup_interval_value": str(interval_value),
         "backup_interval_unit": unit,
         "backup_interval_days": str(interval_value),

@@ -632,6 +632,7 @@ class AsyncDatabase:
             "backup_interval_unit": "minutes",
             "backup_include_bot": "1",
             "backup_include_xui": "1",
+            "backup_include_pg": "0",
             "backup_xui_timeout_seconds": "180",
             "backup_last_run_ts": "0",
             "backup_last_status": "never",
