@@ -115,7 +115,7 @@ export const api = {
     post<Ok>("/price-tiers", { tiers }),
   setPanelPrimary: (enabled: boolean) => post<Ok>("/panel-primary", { enabled }),
   setPanelPackages: (
-    panel: "1" | "2",
+    panel: "1" | "2" | "pg",
     packages: { kind: "volume" | "unlimited"; title: string; gb: number; days: number; price: number; agent_price: number }[],
   ) => post<Ok>("/panel-packages", { panel, packages }),
   setTexts: (p: { welcome_text?: string; labels?: Record<string, string> }) => post<Ok>("/texts", p),
@@ -131,6 +131,51 @@ export const api = {
     proxy_url: string;
     price_per_gb: number;
   }) => post<Ok>("/panel2", p),
+
+  // PasarGuard backend (navid: package pricing)
+  setPrimaryBackend: (backend: "xui" | "pasarguard") => post<Ok>("/primary-backend", { backend }),
+  setPasarGuard: (p: {
+    enabled: boolean;
+    label: string;
+    base_url: string;
+    username: string;
+    password: string;
+    group: string;
+    verify_tls: boolean;
+    default_days: number;
+  }) => post<Ok>("/pasarguard", p),
+  testPasarGuard: (p: { base_url?: string; username?: string; password?: string; verify_tls?: boolean }) =>
+    post<{ ok: boolean; error?: string; admin_username?: string; is_owner?: boolean; panel_version?: string; groups?: { id: number; name: string; inbound_tags?: string[] }[] }>(
+      "/pasarguard/test",
+      p,
+    ),
+  pgAdmins: () =>
+    request<{ ok: boolean; error?: string; admins: Row[]; total?: number }>("/pasarguard/admins"),
+  pgAdminUsers: (username: string, offset = 0, limit = 25, search = "") =>
+    request<{ ok: boolean; error?: string; admin: Row; users: Row[]; total: number; offset: number; limit: number }>(
+      `/pasarguard/admins/${encodeURIComponent(username)}/users?offset=${offset}&limit=${limit}&search=${encodeURIComponent(search)}`,
+    ),
+  pgAdminStats: (username: string) =>
+    request<{ ok: boolean; error?: string; total: number; used: number; allocated: number; created_24h_count: number; created_24h_data: number; capped: boolean }>(
+      `/pasarguard/admins/${encodeURIComponent(username)}/stats`,
+    ),
+  pgRoles: () =>
+    request<{ ok: boolean; error?: string; roles: { id: number; name: string; is_owner: boolean }[] }>(
+      "/pasarguard/roles",
+    ),
+  pgCreateAdmin: (p: { username: string; password?: string; role_id?: number; data_limit_gb?: number; note?: string }) =>
+    post<{ ok: boolean; error?: string; username?: string; password?: string; role_id?: number; panel_url?: string }>(
+      "/pasarguard/admins",
+      p,
+    ),
+  pgDeleteAdmin: (username: string) =>
+    post<Ok>(`/pasarguard/admins/${encodeURIComponent(username)}/delete`),
+  pgSetAdminStatus: (username: string, status: "active" | "disabled") =>
+    post<Ok>(`/pasarguard/admins/${encodeURIComponent(username)}/status`, { status }),
+  pgCreateAdminForReseller: (userId: number) =>
+    post<{ ok: boolean; error?: string; exists?: boolean; username?: string; password?: string; panel_url?: string }>(
+      `/users/${userId}/pasarguard-admin`,
+    ),
 
   updateAgent: (
     id: number,

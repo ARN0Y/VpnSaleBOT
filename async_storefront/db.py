@@ -674,6 +674,18 @@ class AsyncDatabase:
             "panel2_proxy_url": "",
             "panel2_price_per_gb": "7000",
             "panel2_cookie": "",
+            # ── PasarGuard backend (optional). Sells navid-style packages
+            #    (pg_packages), NOT per-GB. Stored in KV so no schema change. ──
+            "primary_backend": "xui",      # xui | pasarguard (main buy flow source)
+            "pg_enabled": "0",
+            "pg_label": "سرور اختصاصی",
+            "pg_base_url": "",
+            "pg_username": "",
+            "pg_password": "",
+            "pg_group": "Tsco-Bot",
+            "pg_verify_tls": "1",
+            "pg_default_days": "30",
+            "pg_packages": "",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",

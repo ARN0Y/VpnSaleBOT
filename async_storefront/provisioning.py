@@ -5,12 +5,17 @@ import secrets
 
 from .agent import AgentService
 from .db import AsyncDatabase
-from .models import PaymentMethod
+from .models import PaymentMethod, PanelClientPayload
 from .panel import PanelClient
-from .util import now_ts
+from .util import now_ts, gb_to_bytes, sanitize_client_name
 
 TEST_CONFIG_BYTES = 200 * 1024 * 1024
 TEST_CONFIG_TTL_SECONDS = 10 * 60
+
+# Subscriptions provisioned on the PasarGuard backend are tagged with this
+# sentinel inbound id so the rest of the app can tell them apart from 3x-ui
+# subs with no DB schema change.
+PG_INBOUND_SENTINEL = -100
 
 
 def parse_packages(raw) -> list[dict]:
@@ -646,6 +651,137 @@ class ProvisioningService:
             for provision in provisions:
                 try:
                     await self.panel.delete_subscription(provision.sub_id)
+                except Exception:
+                    pass
+            if payment_method == PaymentMethod.AGENT_OPEN:
+                async with self.db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (int(final_total), int(user_id)),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
+                    )
+            else:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
+    async def process_pg_package_purchase(
+        self,
+        *,
+        pg_client,
+        group_ids,
+        user_id: int,
+        pkg: dict,
+        days: int = 0,
+        client_name: str = "",
+        idempotency_key: str | None = None,
+    ) -> list[str]:
+        """Buy a PasarGuard package (volume or fair-usage 'unlimited') at navid's
+        package price. Mirrors process_package_purchase's money rules but creates
+        the account on the PasarGuard backend; PG subs are tagged with
+        PG_INBOUND_SENTINEL. Fully rolled back on any failure."""
+        kind = "unlimited" if str(pkg.get("kind")) == "unlimited" else "volume"
+        cap_gb = max(0, int(pkg.get("gb") or 0))  # volume = volume; unlimited = hidden cap (0 = truly unlimited)
+        if kind == "volume" and cap_gb <= 0:
+            raise ValueError("حجم این بسته نامعتبر است.")
+        pkg_days = max(0, int(days or pkg.get("days") or 0))
+
+        agent = await self.db.get_agent(user_id)
+        final_total = package_price(pkg, agent)
+        if final_total <= 0:
+            raise ValueError("قیمت این بسته نامعتبر است.")
+
+        order_id = f"{user_id}-pgpkg-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        payment_method = PaymentMethod.WALLET
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate purchase request: {existing['status']}")
+            agent_row = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            if agent_row and self.db.normalize_agent_access_value(agent_row["access_level"]) == "open":
+                payment_method = PaymentMethod.AGENT_OPEN
+                credit_update = await conn.execute(
+                    """
+                    UPDATE agents SET credit_used_toman=credit_used_toman+?
+                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
+                    """,
+                    (int(final_total), int(user_id), int(final_total)),
+                )
+                if credit_update.rowcount != 1:
+                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
+                await conn.execute(
+                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
+                )
+            else:
+                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
+                if debit.rowcount != 1:
+                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
+                    int(final_total), 0, int(final_total), now_ts(),
+                    payment_method.value, ("infinite" if kind == "unlimited" else "purchase"), None,
+                    (str(pkg.get("title") or "").strip()[:64] or None),
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        created: list[str] = []
+        rows: list[PanelClientPayload] = []
+        try:
+            expire_ts = (now_ts() + pkg_days * 86400) if pkg_days > 0 else 0
+            data_bytes = gb_to_bytes(cap_gb) if cap_gb > 0 else 0  # 0 = unlimited on PasarGuard
+            base = "".join(c for c in sanitize_client_name(client_name) if c.isalnum() or c == "_")
+            base = base[:18].strip("_") or f"u{int(user_id)}"
+            username = f"{base}_{secrets.token_hex(4)}"
+            resp = await pg_client.create_user(
+                username=username,
+                group_ids=list(group_ids),
+                data_limit_bytes=data_bytes,
+                expire=expire_ts,
+                note=f"tg:{int(user_id)}",
+            )
+            created.append(username)
+            sub_url = str((resp or {}).get("subscription_url") or "")
+            if not sub_url:
+                raise RuntimeError("PasarGuard did not return a subscription_url")
+            rows.append(
+                PanelClientPayload(
+                    user_id=int(user_id),
+                    sub_id=username,
+                    sub_link=sub_url,
+                    inbound_id=PG_INBOUND_SENTINEL,
+                    client_uuid="",
+                    client_email=username,
+                    gb=cap_gb,
+                )
+            )
+            await self.db.insert_subscriptions(rows, order_id=order_id, is_infinite=(kind == "unlimited"))
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("pg package order approval failed after provisioning")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return [r.sub_link for r in rows]
+        except Exception:
+            await self.db.delete_subscriptions([r.sub_id for r in rows])
+            for uname in created:
+                try:
+                    await pg_client.delete_user(uname)
                 except Exception:
                     pass
             if payment_method == PaymentMethod.AGENT_OPEN:

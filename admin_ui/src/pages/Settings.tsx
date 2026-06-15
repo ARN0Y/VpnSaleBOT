@@ -37,7 +37,6 @@ const NAV_LABEL_FIELDS: { action: string; label: string; def: string }[] = [
   { action: "subs", label: "سرویس‌های من", def: "📦 سرویس‌های من" },
   { action: "account", label: "حساب کاربری", def: "🪪 حساب کاربری" },
   { action: "wallet", label: "کیف پول", def: "💎 کیف پول من" },
-  { action: "tariffs", label: "تعرفه‌ها", def: "🏷 تعرفه‌ها" },
   { action: "support", label: "پشتیبانی", def: "🛟 تماس با پشتیبانی" },
   { action: "test_config", label: "تست رایگان", def: "🆓 دریافت تست رایگان" },
   { action: "agent_request", label: "درخواست نمایندگی", def: "🤝 درخواست نمایندگی" },
@@ -64,7 +63,7 @@ function SalesRow({ title, audience, status, onToggle, busy }: {
 
 type Pkg = { kind: "volume" | "unlimited"; title: string; gb: string; days: string; price: string; agent_price: string };
 
-function PackageEditor({ panel, initial }: { panel: "1" | "2"; initial: string }) {
+function PackageEditor({ panel, initial }: { panel: "1" | "2" | "pg"; initial: string }) {
   const qc = useQueryClient();
   const [pkgs, setPkgs] = React.useState<Pkg[]>(() => {
     try {
@@ -162,6 +161,105 @@ function PackageEditor({ panel, initial }: { panel: "1" | "2"; initial: string }
         </Button>
       </div>
     </div>
+  );
+}
+
+function PasarGuardCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const [f, setF] = React.useState({
+    enabled: (items.pg_enabled ?? "0") === "1",
+    label: items.pg_label || "سرور اختصاصی",
+    base_url: items.pg_base_url ?? "",
+    username: items.pg_username ?? "",
+    password: "",
+    group: items.pg_group || "Tsco-Bot",
+    verify_tls: (items.pg_verify_tls ?? "1") !== "0",
+    default_days: items.pg_default_days ?? "30",
+  });
+  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+  const isPrimary = (items.primary_backend ?? "xui") === "pasarguard";
+
+  const save = useMutation({
+    mutationFn: () => api.setPasarGuard({ ...f, default_days: Number(f.default_days) || 30 }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const primary = useMutation({
+    mutationFn: (backend: "xui" | "pasarguard") => api.setPrimaryBackend(backend),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const [test, setTest] = React.useState<{ ok: boolean; msg: string } | null>(null);
+  const doTest = useMutation({
+    mutationFn: () => api.testPasarGuard({ base_url: f.base_url, username: f.username, password: f.password || undefined, verify_tls: f.verify_tls }),
+    onSuccess: (r) =>
+      setTest(
+        r.ok
+          ? { ok: true, msg: `اتصال موفق — ادمین: ${r.admin_username ?? "?"}${r.panel_version ? ` · نسخه ${r.panel_version}` : ""}${r.groups?.length ? ` · گروه‌ها: ${r.groups.map((g) => g.name).join("، ")}` : ""}` }
+          : { ok: false, msg: r.error || "اتصال ناموفق" },
+      ),
+    onError: (e: Error) => setTest({ ok: false, msg: e.message }),
+  });
+
+  return (
+    <Card className="border-brand/20">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><Server className="h-5 w-5 text-brand" /> پنل PasarGuard</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          اتصال به یک پنل PasarGuard و فروش از آن با همان سیستم بسته‌ها. قیمت‌گذاری این پنل از طریق «بسته‌های این سرور» در پایین تعیین می‌شود. برای حفظ پسورد فعلی، فیلد پسورد را خالی بگذارید.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-white">وضعیت پنل PasarGuard</span>
+            <Badge variant={f.enabled ? "success" : "danger"}>{f.enabled ? "فعال" : "غیرفعال"}</Badge>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={f.enabled} onClick={() => set("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
+            <Button size="sm" variant="destructive" disabled={!f.enabled} onClick={() => set("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-brand/25 bg-brand/[0.05] p-4">
+          <div>
+            <div className="font-bold text-white">پنل اصلیِ فروش</div>
+            <p className="text-xs text-muted-foreground">انتخاب کنید دکمه‌ی «خرید سرویس» از کدام پنل بفروشد.</p>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" variant={!isPrimary ? "default" : "outline"} disabled={primary.isPending} onClick={() => primary.mutate("xui")}>3x-ui</Button>
+            <Button size="sm" variant={isPrimary ? "default" : "outline"} disabled={primary.isPending} onClick={() => primary.mutate("pasarguard")}>PasarGuard</Button>
+          </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="نام دکمه‌ی خرید" hint="در منوی ربات نمایش داده می‌شود"><Input value={f.label} onChange={(e) => set("label", e.target.value)} placeholder="سرور اختصاصی" /></Field>
+          <Field label="گروه (group) پنل" hint="کاربر در این گروه ساخته می‌شود"><Input value={f.group} onChange={(e) => set("group", e.target.value)} placeholder="Tsco-Bot" /></Field>
+          <Field label="آدرس پنل (با https و پورت)"><Input value={f.base_url} onChange={(e) => set("base_url", e.target.value)} placeholder="https://panel.example.com:8000" dir="ltr" /></Field>
+          <Field label="یوزرنیم ادمین ربات"><Input value={f.username} onChange={(e) => set("username", e.target.value)} dir="ltr" /></Field>
+          <Field label="پسورد ادمین ربات"><Input type="password" value={f.password} onChange={(e) => set("password", e.target.value)} placeholder="بدون تغییر" dir="ltr" /></Field>
+          <Field label="مدت اعتبار پیش‌فرض (روز)" hint="۰ = بدون انقضا"><Input value={f.default_days} inputMode="numeric" onChange={(e) => set("default_days", e.target.value)} /></Field>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input type="checkbox" checked={f.verify_tls} onChange={(e) => set("verify_tls", e.target.checked)} className="h-4 w-4 accent-[hsl(var(--brand))]" />
+          بررسی گواهی TLS (اگر گواهی معتبر دارید روشن بماند)
+        </label>
+
+        {test && (
+          <div className={`rounded-xl border p-3 text-sm ${test.ok ? "border-emerald-400/30 bg-emerald-500/5 text-emerald-200" : "border-rose-400/30 bg-rose-500/5 text-rose-200"}`}>
+            {test.ok ? "✅ " : "❌ "}{test.msg}
+          </div>
+        )}
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button size="sm" variant="outline" disabled={doTest.isPending} onClick={() => doTest.mutate()}>{doTest.isPending ? "در حال تست…" : "تست اتصال"}</Button>
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره PasarGuard"}
+          </Button>
+        </div>
+
+        <PackageEditor panel="pg" initial={items.pg_packages ?? ""} />
+      </CardContent>
+    </Card>
   );
 }
 
@@ -488,6 +586,8 @@ export function Settings() {
             <PackageEditor panel="2" initial={items.panel2_packages ?? ""} />
           </CardContent>
         </Card>
+
+        <PasarGuardCard items={items} />
       </TabsContent>
 
       <div className="sticky bottom-4 flex justify-end">

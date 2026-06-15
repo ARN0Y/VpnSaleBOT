@@ -27,7 +27,8 @@ from telegram.ext import (
 from .config import Settings
 from .db import AsyncDatabase
 from .panel import PanelClient
-from .provisioning import ProvisioningService, package_price, parse_packages
+from .pasarguard import PasarGuardClient
+from .provisioning import ProvisioningService, package_price, parse_packages, PG_INBOUND_SENTINEL
 from .qr import QRService
 from .util import resolve_proxy_value
 
@@ -72,7 +73,6 @@ NAV_ACTIONS: tuple[tuple[str, str], ...] = (
     ("subs", BTN_SUBS),
     ("account", BTN_ACCOUNT),
     ("wallet", BTN_WALLET),
-    ("tariffs", BTN_TARIFFS),
     ("support", BTN_SUPPORT),
     ("test_config", BTN_TEST_CONFIG),
     ("agent_request", BTN_AGENT_REQ),
@@ -326,8 +326,51 @@ async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "Provis
     return prov2
 
 
+# ───────────────────────── PasarGuard backend ─────────────────────────
+async def pg_configured(db: AsyncDatabase) -> bool:
+    enabled = str(await db.get_setting("pg_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    if not enabled:
+        return False
+    return bool((await db.get_setting("pg_base_url", "")).strip()) and bool((await db.get_setting("pg_username", "")).strip())
+
+
+async def pg_is_primary(db: AsyncDatabase) -> bool:
+    """True when the main 'buy' flow should sell from PasarGuard (its packages)
+    instead of the primary 3x-ui panel."""
+    backend = str(await db.get_setting("primary_backend", "xui") or "xui").strip().lower()
+    return backend == "pasarguard" and await pg_configured(db)
+
+
+async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
+    """Build (and cache) a PasarGuardClient from settings; rebuild if the panel
+    address/username/TLS changed so admin edits apply without a restart."""
+    app = context.application
+    db: AsyncDatabase = app.bot_data["db"]
+    if not await pg_configured(db):
+        return None
+    base = (await db.get_setting("pg_base_url", "")).strip().rstrip("/")
+    user = (await db.get_setting("pg_username", "")).strip()
+    pwd = (await db.get_setting("pg_password", "")).strip()
+    verify = str(await db.get_setting("pg_verify_tls", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+    key = f"{base}|{user}|{int(verify)}"
+    client = app.bot_data.get("pg_client")
+    if client is not None and app.bot_data.get("pg_client_key") == key:
+        return client
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.close()
+    try:
+        client = PasarGuardClient(base_url=base, username=user, password=pwd, verify_tls=verify)
+    except Exception:
+        LOG.exception("failed to build PasarGuard client")
+        return None
+    app.bot_data["pg_client"] = client
+    app.bot_data["pg_client_key"] = key
+    return client
+
+
 # ───────────────────────── Per-panel packages (plans) ─────────────────────────
-PANEL_PKG_SETTING = {"1": "panel_packages", "2": "panel2_packages"}
+PANEL_PKG_SETTING = {"1": "panel_packages", "2": "panel2_packages", "pg": "pg_packages"}
 
 
 async def get_panel_packages(db: AsyncDatabase, panel_key: str) -> list[dict]:
@@ -427,16 +470,36 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
         return
     pkg = packages[idx]
-    provisioning = await _provisioning_for_panel(context, panel_key)
-    if provisioning is None:
-        await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
-        return
     qr: QRService = context.application.bot_data["qr"]
     data = context.user_data.get("pkg") or {}
     idem = str(data.get("idem") or query.id)
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        links = await provisioning.process_package_purchase(user_id=update.effective_user.id, pkg=pkg, idempotency_key=idem)
+        if panel_key == "pg":
+            pg_client = await get_pg_client(context)
+            if pg_client is None:
+                await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
+                return
+            group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
+            group_ids = await pg_client.resolve_group_ids([group])
+            if not group_ids:
+                await edit_text(query, "گروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
+                return
+            provisioning = context.application.bot_data["provisioning"]
+            links = await provisioning.process_pg_package_purchase(
+                pg_client=pg_client,
+                group_ids=group_ids,
+                user_id=update.effective_user.id,
+                pkg=pkg,
+                days=int(pkg.get("days") or 0),
+                idempotency_key=idem,
+            )
+        else:
+            provisioning = await _provisioning_for_panel(context, panel_key)
+            if provisioning is None:
+                await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
+                return
+            links = await provisioning.process_package_purchase(user_id=update.effective_user.id, pkg=pkg, idempotency_key=idem)
     except ValueError as exc:
         await edit_text(
             query,
@@ -452,7 +515,7 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
         return
 
-    if str(pkg.get("kind")) == "unlimited":
+    if panel_key != "pg" and str(pkg.get("kind")) == "unlimited":
         uris: list[str] = []
         for link in links:
             try:
@@ -532,21 +595,9 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
         except Exception:
             permissions = {"buy", "test"}
         if "test" in permissions:
-            rows.append(
-                [
-                    InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config"),
-                    InlineKeyboardButton(lbl["tariffs"], callback_data="menu:tariffs"),
-                ]
-            )
-        else:
-            rows.append([InlineKeyboardButton(lbl["tariffs"], callback_data="menu:tariffs")])
+            rows.append([InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config")])
     else:
-        rows.append(
-            [
-                InlineKeyboardButton(lbl["agent_request"], callback_data="menu:agent_request"),
-                InlineKeyboardButton(lbl["tariffs"], callback_data="menu:tariffs"),
-            ]
-        )
+        rows.append([InlineKeyboardButton(lbl["agent_request"], callback_data="menu:agent_request")])
     rows.append([InlineKeyboardButton(lbl["support"], callback_data="menu:support")])
     return InlineKeyboardMarkup(rows)
 
@@ -727,8 +778,8 @@ def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_t
         fourth.append(KeyboardButton(L("test_config")))
     if not is_agent:
         fourth.append(KeyboardButton(L("agent_request")))
-    fourth.append(KeyboardButton(L("tariffs")))
-    rows.append(fourth)
+    if fourth:
+        rows.append(fourth)
     rows.append([KeyboardButton(L("support"))])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
@@ -1083,6 +1134,20 @@ async def notify_admins(
 async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await ensure_user(update, context)
     db: AsyncDatabase = context.application.bot_data["db"]
+    # When PasarGuard is the primary backend, the main buy button sells its
+    # packages instead of the 3x-ui panel (navid pricing = packages, no per-GB).
+    if await pg_is_primary(db):
+        if not await audience_sales_is_open(db, update.effective_user.id):
+            await show_sales_closed(update, context)
+            return ConversationHandler.END
+        if not await get_panel_packages(db, "pg"):
+            await new_flow_card(update, context, "🌐 بسته‌ای برای فروش روی این سرور تعریف نشده است.", back_keyboard())
+            return ConversationHandler.END
+        await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
+        clear_flow_state(context)
+        labels = await resolve_nav_labels(db)
+        await show_packages(update, context, "pg", labels["buy"])
+        return ConversationHandler.END
     if not await panel1_enabled(db):
         await new_flow_card(
             update,
@@ -1686,11 +1751,26 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         f"صفحه <b>{safe_page + 1}</b> از <b>{total_pages}</b> | مجموع: <b>{total}</b>",
         "",
     ]
+    pg_buttons: list[InlineKeyboardButton] = []
     for idx, sub in enumerate(subs, start=safe_page * page_size + 1):
         name = html.escape(str(sub.get("client_email") or "بدون نام"))
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
         is_infinite = int(sub.get("is_infinite") or 0) == 1
+        if int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL:
+            # PasarGuard service: token-based link fetched live; show the service
+            # and a button to (re)deliver its subscription link.
+            vol_line = "♾️ بسته‌ی نامحدود (مصرف منصفانه)" if is_infinite else f"📦 حجم: {int(sub.get('gb') or 0)} گیگ"
+            lines.append(
+                f"{idx}. <b>{name}</b> | 🌐 سرور اختصاصی\n"
+                f"   {vol_line}\n"
+                "   🔗 برای دریافت لینک اتصال، دکمه‌ی پایین را بزنید."
+            )
+            raw_name = str(sub.get("client_email") or sub.get("sub_id") or "")
+            pg_buttons.append(
+                InlineKeyboardButton(f"🔗 لینک {raw_name[:18]}", callback_data=f"pgsub:link:{sub.get('sub_id')}")
+            )
+            continue
         if is_infinite:
             # Fair-usage "infinite" config: never reveal the volume cap or the
             # remaining traffic — only the type and on/off status.
@@ -1730,6 +1810,8 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
     if safe_page < total_pages - 1:
         nav.append(InlineKeyboardButton("بعدی", callback_data=f"subs:page:{safe_page + 1}"))
     rows = []
+    for b in pg_buttons:
+        rows.append([b])
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")])
@@ -1751,6 +1833,49 @@ async def my_subscriptions_page(update: Update, context: ContextTypes.DEFAULT_TY
     await ensure_user(update, context)
     page = int(update.callback_query.data.rsplit(":", 1)[1])
     await render_my_subscriptions(update, context, page, new_card=False)
+
+
+async def pgsub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-deliver a PasarGuard service's subscription link (fetched live by
+    username). Ownership is enforced via get_subscription_for_user."""
+    query = update.callback_query
+    await query.answer()
+    await ensure_user(update, context)
+    sub_id = query.data.split(":", 2)[2]
+    db: AsyncDatabase = context.application.bot_data["db"]
+    sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
+    if not sub or int(sub.get("inbound_id") or 0) != PG_INBOUND_SENTINEL:
+        await _answer_query(query, "این سرویس پیدا نشد.", show_alert=True)
+        return
+    client = await get_pg_client(context)
+    if client is None:
+        await _answer_query(query, "سرور در حال حاضر در دسترس نیست.", show_alert=True)
+        return
+    try:
+        pg_user = await client.get_user(sub_id)
+    except Exception:
+        LOG.exception("pgsub_link get_user failed sub_id=%s", sub_id)
+        await _answer_query(query, "خطا در دریافت لینک. بعداً تلاش کنید.", show_alert=True)
+        return
+    sub_url = str((pg_user or {}).get("subscription_url") or "")
+    if not sub_url:
+        await _answer_query(query, "لینک این سرویس یافت نشد. با پشتیبانی تماس بگیرید.", show_alert=True)
+        return
+    qr: QRService = context.application.bot_data["qr"]
+    png = await qr.png(sub_url)
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=BytesIO(png),
+        caption=(
+            "🌐 <b>سرور اختصاصی</b>\n"
+            "<code>─────────────────────</code>\n"
+            "🔗 <b>لینک اشتراک شما:</b>\n"
+            f"<code>{html.escape(sub_url)}</code>\n\n"
+            "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
+    )
 
 
 def renewal_label(sub: dict) -> str:
@@ -1896,6 +2021,14 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
     if not sub:
         await edit_text(query, "⚠️ این اشتراک پیدا نشد. لطفاً دوباره از لیست انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+    if int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL:
+        await edit_text(
+            query,
+            "🌐 <b>این سرویس روی سرور اختصاصی (PasarGuard) است.</b>\n\n"
+            "تمدید این نوع سرویس فعلاً از داخل ربات فعال نیست؛ برای تمدید با پشتیبانی در ارتباط باشید.",
+            back_keyboard(),
+        )
         return ConversationHandler.END
     if await is_panel2_subscription(db, sub):
         # v1: dedicated-panel services are buy-only from the bot; renewal of them
@@ -3217,11 +3350,12 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(account_info, pattern=r"^menu:account$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions, pattern=r"^menu:subs$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions_page, pattern=r"^subs:page:\d+$"))
+    app.add_handler(CallbackQueryHandler(pgsub_link, pattern=r"^pgsub:link:"))
     app.add_handler(CallbackQueryHandler(tariffs_info, pattern=r"^menu:tariffs$"))
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
     app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
     app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
-    app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:[12]:\d+$"))
-    app.add_handler(CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:[12]:\d+$"))
+    app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:(1|2|pg):\d+$"))
+    app.add_handler(CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:(1|2|pg):\d+$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))
