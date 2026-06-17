@@ -341,6 +341,19 @@ async def pg_is_primary(db: AsyncDatabase) -> bool:
     return backend == "pasarguard" and await pg_configured(db)
 
 
+async def primary_buy_available(db: AsyncDatabase) -> bool:
+    """Whether the MAIN 'buy' button should be offered, based on the chosen
+    primary selling panel:
+      • primary = PasarGuard → available when PasarGuard is configured.
+      • primary = 3x-ui      → available when the 3x-ui panel is enabled.
+    This is the single source of truth so the button never disappears just
+    because 3x-ui is off while PasarGuard is the active seller."""
+    backend = str(await db.get_setting("primary_backend", "xui") or "xui").strip().lower()
+    if backend == "pasarguard":
+        return await pg_configured(db)
+    return await panel1_enabled(db)
+
+
 async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
     """Build (and cache) a PasarGuardClient from settings; rebuild if the panel
     address/username/TLS changed so admin edits apply without a restart."""
@@ -575,7 +588,7 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
     agent = await db.get_agent(user_id)
     lbl = await resolve_nav_labels(db)
     rows: list[list[InlineKeyboardButton]] = []
-    if await panel1_enabled(db):
+    if await primary_buy_available(db):
         rows.append([InlineKeyboardButton(lbl["buy"], callback_data="menu:buy")])
     rows += [
         [
@@ -934,7 +947,7 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
         except Exception:
             has_test = True
     has_panel2 = await panel2_available(db)
-    has_primary = await panel1_enabled(db)
+    has_primary = await primary_buy_available(db)
     labels = await resolve_nav_labels(db)
     return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_panel2=has_panel2, has_primary=has_primary)
 

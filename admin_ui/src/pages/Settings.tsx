@@ -164,6 +164,63 @@ function PackageEditor({ panel, initial }: { panel: "1" | "2" | "pg"; initial: s
   );
 }
 
+function PrimaryPanelCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const backend = (items.primary_backend ?? "xui") === "pasarguard" ? "pasarguard" : "xui";
+  const pgConfigured = (items.pg_enabled ?? "0") === "1" && Boolean((items.pg_base_url ?? "").trim());
+  const xuiEnabled = (items.panel_enabled ?? "1") !== "0";
+  const setBackend = useMutation({
+    mutationFn: (b: "xui" | "pasarguard") => api.setPrimaryBackend(b),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const Option = ({ id, title, desc }: { id: "xui" | "pasarguard"; title: string; desc: string }) => {
+    const active = backend === id;
+    return (
+      <button
+        type="button"
+        onClick={() => !active && setBackend.mutate(id)}
+        disabled={setBackend.isPending}
+        className={`flex flex-col items-start gap-1 rounded-2xl border p-4 text-right transition ${
+          active ? "border-brand/60 bg-brand/15 shadow-brand-glow" : "border-border bg-white/[0.02] hover:border-brand/30 hover:bg-white/[0.04]"
+        }`}
+      >
+        <div className="flex w-full items-center justify-between">
+          <span className="font-black text-white">{title}</span>
+          {active ? <Badge variant="success">پنل اصلی فعلی</Badge> : <span className="text-[11px] text-muted-foreground">انتخاب</span>}
+        </div>
+        <span className="text-xs text-muted-foreground">{desc}</span>
+      </button>
+    );
+  };
+  return (
+    <Card className="border-brand/30">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><Server className="h-5 w-5 text-brand" /> پنل اصلیِ فروش</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          دکمه‌ی «خرید سرویس» در ربات از این پنل می‌فروشد. قیمت‌ها و بسته‌های هر پنل را در کارتِ همان پنل (پایین) تعیین کنید.
+          پنل دوم به‌صورت یک دکمه‌ی خریدِ جداگانه باقی می‌ماند.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Option id="xui" title="۳x-ui (پنل اصلی)" desc="فروش از پنل 3x-ui؛ بسته‌ها/قیمت در کارت «پنل اصلی 3x-ui»." />
+          <Option id="pasarguard" title="PasarGuard" desc="فروش از پنل PasarGuard؛ بسته‌ها/قیمت در کارت «پنل PasarGuard»." />
+        </div>
+        {backend === "pasarguard" && !pgConfigured && (
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
+            ⚠️ PasarGuard به‌عنوان پنل اصلی انتخاب شده اما هنوز پیکربندی/فعال نشده است؛ تا تکمیلِ کارتِ PasarGuard، دکمه‌ی خرید نمایش داده نمی‌شود.
+          </div>
+        )}
+        {backend === "xui" && !xuiEnabled && (
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
+            ⚠️ پنل 3x-ui به‌عنوان پنل اصلی انتخاب شده اما در کارتِ «پنل اصلی 3x-ui» غیرفعال است؛ دکمه‌ی خرید نمایش داده نمی‌شود.
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function PasarGuardCard({ items }: { items: Record<string, string> }) {
   const qc = useQueryClient();
   const [f, setF] = React.useState({
@@ -177,14 +234,9 @@ function PasarGuardCard({ items }: { items: Record<string, string> }) {
     default_days: items.pg_default_days ?? "30",
   });
   const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
-  const isPrimary = (items.primary_backend ?? "xui") === "pasarguard";
 
   const save = useMutation({
     mutationFn: () => api.setPasarGuard({ ...f, default_days: Number(f.default_days) || 30 }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
-  });
-  const primary = useMutation({
-    mutationFn: (backend: "xui" | "pasarguard") => api.setPrimaryBackend(backend),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
   });
   const [test, setTest] = React.useState<{ ok: boolean; msg: string } | null>(null);
@@ -216,17 +268,6 @@ function PasarGuardCard({ items }: { items: Record<string, string> }) {
           <div className="flex gap-2">
             <Button size="sm" disabled={f.enabled} onClick={() => set("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
             <Button size="sm" variant="destructive" disabled={!f.enabled} onClick={() => set("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-brand/25 bg-brand/[0.05] p-4">
-          <div>
-            <div className="font-bold text-white">پنل اصلیِ فروش</div>
-            <p className="text-xs text-muted-foreground">انتخاب کنید دکمه‌ی «خرید سرویس» از کدام پنل بفروشد.</p>
-          </div>
-          <div className="flex gap-2">
-            <Button size="sm" variant={!isPrimary ? "default" : "outline"} disabled={primary.isPending} onClick={() => primary.mutate("xui")}>3x-ui</Button>
-            <Button size="sm" variant={isPrimary ? "default" : "outline"} disabled={primary.isPending} onClick={() => primary.mutate("pasarguard")}>PasarGuard</Button>
           </div>
         </div>
 
@@ -497,6 +538,7 @@ export function Settings() {
       </TabsContent>
 
       <TabsContent value="panels" className="space-y-6">
+        <PrimaryPanelCard items={items} />
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Settings2 className="h-5 w-5 text-muted-foreground" /> پنل اصلی 3x-ui</CardTitle>
