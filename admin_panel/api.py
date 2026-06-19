@@ -194,12 +194,25 @@ async def approve_topup(request: Request, topup_id: str):
     topup = await database.get_wallet_topup(topup_id)
     ok = await database.approve_wallet_topup(topup_id)
     if ok and topup:
-        await notify_telegram_user(
-            request,
-            int(topup["user_id"]),
-            f"🎉 شارژ کیف پول شما تایید شد!\nمبلغ: <b>{int(topup['amount_toman']):,}</b> تومان",
-        )
+        await notify_telegram_user(request, int(topup["user_id"]), _topup_approved_message(ok))
     return {"ok": bool(ok)}
+
+
+def _topup_approved_message(result) -> str:
+    """Build the user-facing approval message. Open agents see their settled
+    credit debt; everyone else sees the wallet top-up."""
+    amount = int((result or {}).get("amount") or 0)
+    if isinstance(result, dict) and result.get("open_agent"):
+        settled = int(result.get("settled") or 0)
+        to_wallet = int(result.get("to_wallet") or 0)
+        lines = [f"🎉 پرداخت شما تایید شد! مبلغ: <b>{amount:,}</b> تومان"]
+        if settled > 0:
+            lines.append(f"✅ از بدهی اعتبار شما تسویه شد: <b>{settled:,}</b> تومان")
+        if to_wallet > 0:
+            lines.append(f"💰 به کیف پول شما اضافه شد: <b>{to_wallet:,}</b> تومان")
+        lines.append("اکنون می‌توانید دوباره خرید کنید.")
+        return "\n".join(lines)
+    return f"🎉 شارژ کیف پول شما تایید شد!\nمبلغ: <b>{amount:,}</b> تومان"
 
 
 @router.post("/topups/{topup_id}/reject")

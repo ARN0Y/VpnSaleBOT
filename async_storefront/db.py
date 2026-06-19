@@ -2005,26 +2005,53 @@ class AsyncDatabase:
         )
         return [dict(row) for row in rows]
 
-    async def approve_wallet_topup(self, topup_id: str) -> bool:
+    async def approve_wallet_topup(self, topup_id: str):
+        """Approve a pending top-up. For OPEN (credit) agents the payment first
+        settles their outstanding credit debt (credit_used) — since they buy on
+        credit, not from the wallet — freeing credit to purchase again; any
+        excess goes to the wallet. Everyone else is credited to the wallet as
+        before. Returns a result dict on success, False otherwise."""
         async with self.transaction() as conn:
             row = await self.fetchone("SELECT * FROM wallet_topups WHERE topup_id=?", (topup_id,))
             if not row or row["status"] != "pending":
                 return False
-            await conn.execute(
-                """
-                INSERT INTO wallets(user_id,balance_toman,updated_at)
-                VALUES(?,?,?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                  balance_toman=wallets.balance_toman+excluded.balance_toman,
-                  updated_at=excluded.updated_at
-                """,
-                (int(row["user_id"]), int(row["amount_toman"]), now_ts()),
+            user_id = int(row["user_id"])
+            amount = int(row["amount_toman"])
+            agent = await self.fetchone(
+                "SELECT access_level, credit_used_toman FROM agents WHERE user_id=?", (user_id,)
             )
+            is_open = bool(agent) and self.normalize_agent_access_value(agent["access_level"]) == "open"
+            settled = 0
+            to_wallet = amount
+            if is_open:
+                debt = max(0, int(agent["credit_used_toman"] or 0))
+                settled = min(amount, debt)
+                if settled > 0:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (settled, user_id),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (user_id, -settled, "credit_repay", f"topup:{topup_id}", now_ts()),
+                    )
+                to_wallet = amount - settled
+            if to_wallet > 0:
+                await conn.execute(
+                    """
+                    INSERT INTO wallets(user_id,balance_toman,updated_at)
+                    VALUES(?,?,?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                      balance_toman=wallets.balance_toman+excluded.balance_toman,
+                      updated_at=excluded.updated_at
+                    """,
+                    (user_id, int(to_wallet), now_ts()),
+                )
             await conn.execute(
                 "UPDATE wallet_topups SET status='approved', approved_at=? WHERE topup_id=?",
                 (now_ts(), topup_id),
             )
-            return True
+            return {"ok": True, "amount": amount, "settled": settled, "to_wallet": to_wallet, "open_agent": is_open}
 
     async def reject_wallet_topup(self, topup_id: str) -> bool:
         async with self.transaction() as conn:

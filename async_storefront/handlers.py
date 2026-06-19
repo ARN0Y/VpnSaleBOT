@@ -2700,12 +2700,25 @@ async def topup_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         changed = await db.approve_wallet_topup(topup_id)
         if changed:
+            amount = int(topup["amount_toman"])
+            if isinstance(changed, dict) and changed.get("open_agent"):
+                settled = int(changed.get("settled") or 0)
+                to_wallet = int(changed.get("to_wallet") or 0)
+                lines = [f"🎉 <b>پرداخت شما تایید شد.</b>\n\nمبلغ: <b>{amount:,}</b> تومان"]
+                if settled > 0:
+                    lines.append(f"✅ از بدهی اعتبار شما تسویه شد: <b>{settled:,}</b> تومان")
+                if to_wallet > 0:
+                    lines.append(f"💰 به کیف پول شما اضافه شد: <b>{to_wallet:,}</b> تومان")
+                lines.append("اکنون می‌توانید دوباره خرید کنید.")
+                approve_msg = "\n".join(lines)
+            else:
+                approve_msg = (
+                    "🎉 <b>شارژ کیف پول شما تایید شد.</b>\n\n"
+                    f"مبلغ شارژشده: <b>{amount:,}</b> تومان"
+                )
             await context.bot.send_message(
                 chat_id=int(topup["user_id"]),
-                text=(
-                    "🎉 <b>شارژ کیف پول شما تایید شد.</b>\n\n"
-                    f"مبلغ شارژشده: <b>{int(topup['amount_toman']):,}</b> تومان"
-                ),
+                text=approve_msg,
                 parse_mode=ParseMode.HTML,
             )
     elif action == "reject":
