@@ -750,6 +750,49 @@ def agent_admin_price_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def agent_admin_pricing_keyboard() -> InlineKeyboardMarkup:
+    """Package-based agent pricing: the agent pays each package's 'agent price'.
+    Per-GB is only a fallback for panels that have no packages."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ تایید قیمتِ بسته‌ها و ادامه", callback_data="agent_admin:pg:packages")],
+            [InlineKeyboardButton("✍️ قیمت گیگیِ سفارشی (پنل بدون بسته)", callback_data="agent_admin:pg:custom")],
+            [InlineKeyboardButton("🔁 پیش‌فرض سیستم", callback_data="agent_admin:pg:def")],
+            [InlineKeyboardButton("❌ لغو تایید", callback_data="agent_admin:cancel")],
+        ]
+    )
+
+
+async def agent_pricing_text(db: AsyncDatabase) -> str:
+    """Summary of what THIS agent will pay per package (the package 'agent price',
+    falling back to the user price when it isn't set). Same for all agents; edited
+    per package in the Panels tab."""
+    lines = ["💼 <b>قیمت‌گذاری نماینده</b>", "نماینده هر بسته را با «قیمت نماینده»یِ همان بسته می‌خرد:", ""]
+    any_pkg = False
+    panels = [
+        ("1", "پنل اصلی"),
+        ("2", await panel2_label(db)),
+        ("pg", (await db.get_setting("pg_label", "سرور اختصاصی") or "سرور اختصاصی").strip()),
+    ]
+    for key, label in panels:
+        pkgs = await get_panel_packages(db, key)
+        if not pkgs:
+            continue
+        any_pkg = True
+        lines.append(f"🔹 <b>{html.escape(str(label))}</b>")
+        for p in pkgs:
+            ap = int(p.get("agent_price") or 0)
+            price = ap if ap > 0 else int(p.get("price") or 0)
+            tag = "" if ap > 0 else " <i>(= قیمت کاربر)</i>"
+            lines.append(f"   • {html.escape(str(p['title']))}: <b>{price:,}</b> ت{tag}")
+        lines.append("")
+    if not any_pkg:
+        lines.append("⚠️ بسته‌ای تعریف نشده؛ «قیمت گیگیِ سفارشی» را انتخاب کنید.")
+    else:
+        lines.append("برای تغییرِ قیمتِ نماینده‌یِ هر بسته، تب «پنل‌ها» را ویرایش کنید.")
+    return "\n".join(lines)
+
+
 def agent_admin_daily_test_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -2852,9 +2895,9 @@ async def agent_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             text=(
                 f"⚙️ <b>تنظیم نماینده – نیازمند پرداخت</b>\n"
                 f"درخواست: <code>{req_id}</code>\n\n"
-                "💵 <b>قیمت هر گیگابایت</b> را انتخاب کنید:"
+                + await agent_pricing_text(db)
             ),
-            reply_markup=agent_admin_price_keyboard(),
+            reply_markup=agent_admin_pricing_keyboard(),
             parse_mode=ParseMode.HTML,
         )
 
@@ -2886,8 +2929,8 @@ async def agent_admin_set_credit(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     await query.edit_message_text(
         f"✅ سقف اعتبار: <b>{amount:,}</b> تومان ثبت شد.\n\n"
-        "💵 <b>قیمت هر گیگابایت</b> را انتخاب کنید:",
-        reply_markup=agent_admin_price_keyboard(),
+        + await agent_pricing_text(db),
+        reply_markup=agent_admin_pricing_keyboard(),
         parse_mode=ParseMode.HTML,
     )
 
@@ -2910,16 +2953,22 @@ async def agent_admin_set_price(update: Update, context: ContextTypes.DEFAULT_TY
 
     price_str = query.data.split(":")[-1]
     db: AsyncDatabase = context.application.bot_data["db"]
-    if price_str == "def":
+    if price_str == "packages":
+        price = 0  # package agent prices govern; no per-GB rate
+    elif price_str == "def":
         price = int(await db.get_setting("default_agent_price_per_gb", "0") or "0")
     else:
         price = int(price_str)
 
     approval["price_per_gb"] = price
     await query.answer()
+    confirm_line = (
+        "✅ قیمت‌گذاری: <b>بر اساس قیمتِ نماینده‌یِ بسته‌ها</b> ثبت شد."
+        if price <= 0
+        else f"✅ قیمت هر گیگ: <b>{price:,}</b> تومان ثبت شد."
+    )
     await query.edit_message_text(
-        f"✅ قیمت هر گیگ: <b>{price:,}</b> تومان ثبت شد.\n\n"
-        "🧪 <b>سهمیه کانفیگ تست روزانه</b> را انتخاب کنید:",
+        f"{confirm_line}\n\n🧪 <b>سهمیه کانفیگ تست روزانه</b> را انتخاب کنید:",
         reply_markup=agent_admin_daily_test_keyboard(),
         parse_mode=ParseMode.HTML,
     )
@@ -2961,7 +3010,11 @@ async def agent_admin_set_daily_test(update: Update, context: ContextTypes.DEFAU
     )
     if access_level == "open":
         summary += f"سقف اعتبار: <b>{credit_limit:,}</b> تومان\n"
-    summary += f"قیمت هر گیگ: <b>{price_per_gb:,}</b> تومان\n"
+    summary += (
+        "قیمت‌گذاری: <b>بر اساس قیمتِ نماینده‌یِ بسته‌ها</b>\n"
+        if price_per_gb <= 0
+        else f"قیمت هر گیگ: <b>{price_per_gb:,}</b> تومان\n"
+    )
     summary += f"کانفیگ تست روزانه: <b>{limit if limit > 0 else 'تنظیم نشده'}</b>\n\n"
     summary += "آیا تایید نهایی می‌کنید؟"
 
