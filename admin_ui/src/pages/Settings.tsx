@@ -63,6 +63,14 @@ function SalesRow({ title, audience, status, onToggle, busy }: {
 
 type Pkg = { kind: "volume" | "unlimited"; title: string; gb: string; days: string; price: string; agent_price: string };
 
+function durationHint(days: string | number): string {
+  const n = Number(days) || 0;
+  if (n <= 0) return "بدون انقضا";
+  const months = n / 30;
+  if (months >= 1) return Number.isInteger(months) ? `≈ ${months} ماه` : `≈ ${months.toFixed(1)} ماه`;
+  return `${n} روز`;
+}
+
 function PackageEditor({ panel, initial }: { panel: "1" | "2" | "pg"; initial: string }) {
   const qc = useQueryClient();
   const [pkgs, setPkgs] = React.useState<Pkg[]>(() => {
@@ -135,7 +143,7 @@ function PackageEditor({ panel, initial }: { panel: "1" | "2" | "pg"; initial: s
             <Field label={p.kind === "unlimited" ? "سقف مصرف منصفانه (گیگ) — مخفی، ۰=بی‌نهایت واقعی" : "حجم (گیگ)"}>
               <Input value={p.gb} inputMode="numeric" onChange={(e) => upd(i, { gb: e.target.value })} />
             </Field>
-            <Field label="مدت اعتبار (روز) — ۰ = بدون انقضا">
+            <Field label="مدت اعتبار (روز) — ۰ = بدون انقضا" hint={durationHint(p.days)}>
               <Input value={p.days} inputMode="numeric" onChange={(e) => upd(i, { days: e.target.value })} />
             </Field>
             <Field label="قیمت برای کاربر (تومان)">
