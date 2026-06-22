@@ -236,6 +236,11 @@ async def infinite_enabled(db: AsyncDatabase) -> bool:
     return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
 
 
+async def free_test_enabled(db: AsyncDatabase) -> bool:
+    """One-time free test for regular (non-agent) users — toggle in settings."""
+    return str(await db.get_setting("free_test_enabled", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
 async def panel1_enabled(db: AsyncDatabase) -> bool:
     """Whether the primary 3x-ui panel is offered for new purchases. The admin
     can turn it off in settings (e.g. to sell only via the second panel)."""
@@ -610,7 +615,11 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
         if "test" in permissions:
             rows.append([InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config")])
     else:
-        rows.append([InlineKeyboardButton(lbl["agent_request"], callback_data="menu:agent_request")])
+        last = [InlineKeyboardButton(lbl["agent_request"], callback_data="menu:agent_request")]
+        # Regular users: a one-time free test, when enabled.
+        if await free_test_enabled(db):
+            last.insert(0, InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config"))
+        rows.append(last)
     rows.append([InlineKeyboardButton(lbl["support"], callback_data="menu:support")])
     return InlineKeyboardMarkup(rows)
 
@@ -770,7 +779,7 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_panel2: bool = False, has_primary: bool = True) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_panel2: bool = False, has_primary: bool = True, has_free_test: bool = False) -> ReplyKeyboardMarkup:
     def L(action: str) -> str:
         return labels.get(action) or NAV_DEFAULT_LABEL[action]
 
@@ -788,6 +797,8 @@ def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_t
         rows.insert(1, [KeyboardButton(BTN_PANEL2)])
     fourth = []
     if is_agent and has_test:
+        fourth.append(KeyboardButton(L("test_config")))
+    if not is_agent and has_free_test:
         fourth.append(KeyboardButton(L("test_config")))
     if not is_agent:
         fourth.append(KeyboardButton(L("agent_request")))
@@ -948,8 +959,9 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
             has_test = True
     has_panel2 = await panel2_available(db)
     has_primary = await primary_buy_available(db)
+    has_free_test = (not is_agent) and await free_test_enabled(db)
     labels = await resolve_nav_labels(db)
-    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_panel2=has_panel2, has_primary=has_primary)
+    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_panel2=has_panel2, has_primary=has_primary, has_free_test=has_free_test)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2304,6 +2316,12 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     if query:
         await query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    is_agent = bool(await db.get_agent(update.effective_user.id))
+    # Regular users get a one-time free test; gate it on the toggle.
+    if not is_agent and not await free_test_enabled(db):
+        await new_flow_card(update, context, "🧪 تست رایگان در حال حاضر فعال نیست.", back_keyboard())
+        return
     await new_flow_card(
         update,
         context,
@@ -2314,10 +2332,26 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     qr: QRService = context.application.bot_data["qr"]
     idem_key = query.id if query else f"test-{update.effective_user.id}-{update.effective_message.message_id}"
     try:
-        sub_link = await provisioning.process_agent_test_config(
-            user_id=update.effective_user.id,
-            idempotency_key=idem_key,
-        )
+        if is_agent:
+            sub_link = await provisioning.process_agent_test_config(
+                user_id=update.effective_user.id,
+                idempotency_key=idem_key,
+            )
+        else:
+            # One-time free test on the primary backend.
+            pg_client = await get_pg_client(context) if await pg_is_primary(db) else None
+            group_ids = None
+            if pg_client is not None:
+                group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
+                group_ids = await pg_client.resolve_group_ids([group])
+                if not group_ids:
+                    raise ValueError("سرور تست در دسترس نیست؛ لطفاً بعداً تلاش کنید.")
+            sub_link = await provisioning.process_free_test(
+                user_id=update.effective_user.id,
+                pg_client=pg_client,
+                group_ids=group_ids,
+                idempotency_key=idem_key,
+            )
     except ValueError as exc:
         await send_flow_prompt(
             update,
@@ -2350,7 +2384,7 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         chat_id=update.effective_chat.id,
         photo=BytesIO(png),
         caption=(
-            "🧪 <b>کانفیگ تست نماینده</b>\n\n"
+            f"🧪 <b>{'کانفیگ تست نماینده' if is_agent else 'کانفیگ تست رایگان'}</b>\n\n"
             "📦 حجم: <b>۲۰۰ مگابایت</b>\n"
             "⏱ اعتبار: <b>۱۰ دقیقه</b>\n\n"
             f"<code>{html.escape(sub_link)}</code>"

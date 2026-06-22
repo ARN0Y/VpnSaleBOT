@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 
 from .agent import AgentService
@@ -8,6 +9,8 @@ from .db import AsyncDatabase
 from .models import PaymentMethod, PanelClientPayload
 from .panel import PanelClient
 from .util import now_ts, gb_to_bytes, sanitize_client_name
+
+LOG = logging.getLogger(__name__)
 
 TEST_CONFIG_BYTES = 200 * 1024 * 1024
 TEST_CONFIG_TTL_SECONDS = 10 * 60
@@ -430,6 +433,63 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
+    async def process_free_test(
+        self, *, user_id: int, pg_client=None, group_ids=None, idempotency_key: str | None = None
+    ) -> str:
+        """One-time free 200MB / 10-minute test for a REGULAR user. Created on the
+        primary backend (PasarGuard when pg_client is given, otherwise 3x-ui).
+        Enforced one-per-user via agent_test_configs."""
+        test_id = f"ftest-{int(user_id)}-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or test_id
+        expires_at = now_ts() + TEST_CONFIG_TTL_SECONDS
+        async with self.db.transaction() as conn:
+            if await self.db.fetchone("SELECT 1 FROM idempotency_keys WHERE key=?", (idem,)):
+                raise RuntimeError("duplicate test config request")
+            used = await self.db.fetchone(
+                "SELECT COUNT(*) AS c FROM agent_test_configs WHERE user_id=? AND status IN ('pending','created','active')",
+                (int(user_id),),
+            )
+            if int((used["c"] if used else 0) or 0) > 0:
+                raise ValueError("شما قبلاً تست رایگان دریافت کرده‌اید. هر کاربر فقط یک‌بار می‌تواند تست رایگان بگیرد.")
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), test_id, "reserved", now_ts()),
+            )
+            await conn.execute(
+                "INSERT INTO agent_test_configs(test_id,user_id,sub_id,created_at,expires_at,status) VALUES(?,?,?,?,?,'pending')",
+                (test_id, int(user_id), f"pending:{test_id}", now_ts(), expires_at),
+            )
+        try:
+            if pg_client is not None:
+                username = f"test{int(user_id)}_{secrets.token_hex(4)}"
+                resp = await pg_client.create_user(
+                    username=username,
+                    group_ids=list(group_ids or []),
+                    data_limit_bytes=TEST_CONFIG_BYTES,
+                    expire=expires_at,
+                    note=f"tg:{int(user_id)} free-test",
+                )
+                sub_url = str((resp or {}).get("subscription_url") or "")
+                if not sub_url:
+                    raise RuntimeError("PasarGuard did not return a subscription_url")
+                provision = PanelClientPayload(
+                    user_id=int(user_id), sub_id=username, sub_link=sub_url,
+                    inbound_id=PG_INBOUND_SENTINEL, client_uuid="", client_email=username, gb=0,
+                )
+            else:
+                provision = await self.panel.add_test_subscription(
+                    user_id=user_id, total_bytes=TEST_CONFIG_BYTES, ttl_seconds=TEST_CONFIG_TTL_SECONDS
+                )
+            await self.db.insert_test_subscription(
+                provision, test_id=test_id, expires_at=expires_at, total_bytes=TEST_CONFIG_BYTES
+            )
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return provision.sub_link
+        except Exception:
+            await self.db.execute("UPDATE agent_test_configs SET status='failed' WHERE test_id=?", (test_id,))
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
     async def process_renewal(
         self,
         *,
@@ -757,6 +817,17 @@ class ProvisioningService:
                 note=f"tg:{int(user_id)}",
             )
             created.append(username)
+            # Enforce the fair-usage cap: if the panel didn't apply the requested
+            # data_limit on create (so an "unlimited" package would otherwise be
+            # truly unlimited), correct it with a follow-up modify so the real
+            # hidden volume is always applied on PasarGuard.
+            if data_bytes > 0 and int((resp or {}).get("data_limit") or 0) != data_bytes:
+                try:
+                    fixed = await pg_client.modify_user(username, {"data_limit": data_bytes})
+                    if isinstance(fixed, dict) and fixed.get("subscription_url"):
+                        resp = fixed
+                except Exception:
+                    LOG.exception("failed to enforce PG data_limit for %s", username)
             sub_url = str((resp or {}).get("subscription_url") or "")
             if not sub_url:
                 raise RuntimeError("PasarGuard did not return a subscription_url")

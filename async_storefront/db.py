@@ -648,6 +648,7 @@ class AsyncDatabase:
             "sales_status_updated_by": "",
             "ui_mode": "modern",
             "infinite_enabled": "0",
+            "free_test_enabled": "1",
             "infinite_cap_gb": "100",
             "infinite_duration_days": "30",
             "infinite_price": "0",
