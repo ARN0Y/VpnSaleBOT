@@ -547,13 +547,17 @@ class PanelClient:
         await self.upsert_client(detail, total_bytes=detail.total_bytes + gb_to_bytes(gb_add))
         return await self.find_subscription(sub_id) or detail
 
-    async def renew_subscription(self, sub_id: str, gb_add: int) -> SubscriptionDetail:
+    async def renew_subscription(self, sub_id: str, gb_add: int, *, set_expiry_ms: int | None = None) -> SubscriptionDetail:
         detail = await self.find_subscription(sub_id, use_cache=False)
         if not detail:
             raise RuntimeError("subscription was not found on the panel")
-        expiry_time = int(detail.expiry_time or 0)
-        if expiry_time > 0 and expiry_time < now_ms():
-            expiry_time = now_ms() + (30 * 24 * 60 * 60 * 1000)
+        if set_expiry_ms is not None and int(set_expiry_ms) > 0:
+            # Renewal grants a fresh validity window (provided by the caller).
+            expiry_time = int(set_expiry_ms)
+        else:
+            expiry_time = int(detail.expiry_time or 0)
+            if expiry_time > 0 and expiry_time < now_ms():
+                expiry_time = now_ms() + (30 * 24 * 60 * 60 * 1000)
         await self.upsert_client(
             detail,
             total_bytes=detail.total_bytes + gb_to_bytes(gb_add),

@@ -158,7 +158,14 @@ class ProvisioningService:
 
         provisions = []
         try:
-            provisions = await self.panel.add_subscriptions(user_id=user_id, gb=requested_gb, qty=requested_qty, preferred_name=client_name)
+            # Every volume purchase gets a fixed validity window (default 30 days)
+            # instead of an unlimited-time config.
+            duration_days = _safe_positive_int(await self.db.get_setting("purchase_duration_days", "30"), 30)
+            expiry_ms = (now_ts() + duration_days * 86400) * 1000 if duration_days > 0 else 0
+            provisions = await self.panel.add_subscriptions(
+                user_id=user_id, gb=requested_gb, qty=requested_qty,
+                preferred_name=client_name, expiry_ms=expiry_ms,
+            )
             await self.db.insert_subscriptions(provisions, order_id=order_id)
             approved = await self.db.approve_order(order_id)
             if not approved:
@@ -500,7 +507,12 @@ class ProvisioningService:
             )
 
         try:
-            detail = await self.panel.renew_subscription(clean_sub_id, requested_gb)
+            # A renewal grants a fresh validity window (same duration as a new
+            # purchase, default 30 days) so renewing never leaves the config
+            # expiring on its original date.
+            duration_days = _safe_positive_int(await self.db.get_setting("purchase_duration_days", "30"), 30)
+            renew_expiry_ms = (now_ts() + duration_days * 86400) * 1000 if duration_days > 0 else None
+            detail = await self.panel.renew_subscription(clean_sub_id, requested_gb, set_expiry_ms=renew_expiry_ms)
             await self.db.update_subscription_panel_snapshot(detail)
             await self.db.execute(
                 "UPDATE subscriptions SET renewed_count=renewed_count+1,last_renewed_at=? WHERE sub_id=?",
