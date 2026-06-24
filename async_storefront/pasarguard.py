@@ -252,25 +252,38 @@ class PasarGuardClient:
         expire: int = 0,
         status: str = "active",
         note: str = "",
+        on_hold_duration_seconds: int = 0,
     ) -> dict[str, Any]:
-        """Create a user. ``expire`` is a unix timestamp (0 = never). v5 uses an
-        ISO datetime for ``expire``; if the panel rejects that we retry with the
-        raw unix int so it works across point releases."""
+        """Create a user.
+
+        If ``on_hold_duration_seconds`` > 0 the user is created in **on_hold**
+        state: the validity window starts on the user's FIRST connect
+        (expire = first_connect + duration), and a fixed ``expire`` must be null
+        (panel rule). Otherwise ``expire`` is a unix timestamp (0 = never), sent
+        as ISO with a raw-unix fallback for cross-version safety.
+        """
         base_body: dict[str, Any] = {
             "username": username,
             "group_ids": group_ids,
             "data_limit": int(data_limit_bytes),
             "data_limit_reset_strategy": "no_reset",
-            "status": status,
             "note": note,
-            "expire": None,
         }
         bodies: list[dict[str, Any]] = []
-        if not expire or int(expire) <= 0:
-            bodies.append(base_body)
+        if on_hold_duration_seconds and int(on_hold_duration_seconds) > 0:
+            # Countdown begins at first use, not at creation.
+            bodies.append({
+                **base_body,
+                "status": "on_hold",
+                "on_hold_expire_duration": int(on_hold_duration_seconds),
+                "on_hold_timeout": None,
+                "expire": None,
+            })
+        elif not expire or int(expire) <= 0:
+            bodies.append({**base_body, "status": status, "expire": None})
         else:
-            bodies.append({**base_body, "expire": self._iso(int(expire))})
-            bodies.append({**base_body, "expire": int(expire)})  # unix fallback if ISO is rejected
+            bodies.append({**base_body, "status": status, "expire": self._iso(int(expire))})
+            bodies.append({**base_body, "status": status, "expire": int(expire)})  # unix fallback if ISO is rejected
         last_exc: PasarGuardError | None = None
         for i, body in enumerate(bodies):
             try:

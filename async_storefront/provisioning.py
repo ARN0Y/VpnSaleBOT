@@ -804,7 +804,10 @@ class ProvisioningService:
         created: list[str] = []
         rows: list[PanelClientPayload] = []
         try:
-            expire_ts = (now_ts() + pkg_days * 86400) if pkg_days > 0 else 0
+            # The validity window starts on FIRST connect (on_hold), so e.g. a
+            # 30-day package counts 30 days from when the buyer first uses it —
+            # not from creation. 0 days = no time limit (active, no expiry).
+            on_hold_seconds = pkg_days * 86400 if pkg_days > 0 else 0
             data_bytes = gb_to_bytes(cap_gb) if cap_gb > 0 else 0  # 0 = unlimited on PasarGuard
             base = "".join(c for c in sanitize_client_name(client_name) if c.isalnum() or c == "_")
             base = base[:18].strip("_") or f"u{int(user_id)}"
@@ -813,7 +816,7 @@ class ProvisioningService:
                 username=username,
                 group_ids=list(group_ids),
                 data_limit_bytes=data_bytes,
-                expire=expire_ts,
+                on_hold_duration_seconds=on_hold_seconds,
                 note=f"tg:{int(user_id)}",
             )
             created.append(username)
