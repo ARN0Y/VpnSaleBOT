@@ -462,11 +462,14 @@ class ProvisioningService:
         try:
             if pg_client is not None:
                 username = f"test{int(user_id)}_{secrets.token_hex(4)}"
+                # on_hold: the 10-minute test window starts on FIRST connect, not
+                # at creation — otherwise the test often expires before the user
+                # even imports/connects (made it look broken in the panel).
                 resp = await pg_client.create_user(
                     username=username,
                     group_ids=list(group_ids or []),
                     data_limit_bytes=TEST_CONFIG_BYTES,
-                    expire=expires_at,
+                    on_hold_duration_seconds=TEST_CONFIG_TTL_SECONDS,
                     note=f"tg:{int(user_id)} free-test",
                 )
                 sub_url = str((resp or {}).get("subscription_url") or "")
