@@ -13,7 +13,8 @@ from .util import now_ts, gb_to_bytes, sanitize_client_name
 LOG = logging.getLogger(__name__)
 
 TEST_CONFIG_BYTES = 200 * 1024 * 1024
-TEST_CONFIG_TTL_SECONDS = 10 * 60
+TEST_CONFIG_TTL_SECONDS = 10 * 60          # agent daily test config
+FREE_TEST_TTL_SECONDS = 24 * 60 * 60       # one-time free test for regular users (1 day)
 
 # Subscriptions provisioned on the PasarGuard backend are tagged with this
 # sentinel inbound id so the rest of the app can tell them apart from 3x-ui
@@ -436,12 +437,12 @@ class ProvisioningService:
     async def process_free_test(
         self, *, user_id: int, pg_client=None, group_ids=None, idempotency_key: str | None = None
     ) -> str:
-        """One-time free 200MB / 10-minute test for a REGULAR user. Created on the
+        """One-time free 200MB / 1-day test for a REGULAR user. Created on the
         primary backend (PasarGuard when pg_client is given, otherwise 3x-ui).
         Enforced one-per-user via agent_test_configs."""
         test_id = f"ftest-{int(user_id)}-{now_ts()}-{secrets.token_hex(3)}"
         idem = idempotency_key or test_id
-        expires_at = now_ts() + TEST_CONFIG_TTL_SECONDS
+        expires_at = now_ts() + FREE_TEST_TTL_SECONDS
         async with self.db.transaction() as conn:
             if await self.db.fetchone("SELECT 1 FROM idempotency_keys WHERE key=?", (idem,)):
                 raise RuntimeError("duplicate test config request")
@@ -462,14 +463,14 @@ class ProvisioningService:
         try:
             if pg_client is not None:
                 username = f"test{int(user_id)}_{secrets.token_hex(4)}"
-                # on_hold: the 10-minute test window starts on FIRST connect, not
-                # at creation — otherwise the test often expires before the user
+                # on_hold: the test window starts on FIRST connect, not at
+                # creation — otherwise the test often expires before the user
                 # even imports/connects (made it look broken in the panel).
                 resp = await pg_client.create_user(
                     username=username,
                     group_ids=list(group_ids or []),
                     data_limit_bytes=TEST_CONFIG_BYTES,
-                    on_hold_duration_seconds=TEST_CONFIG_TTL_SECONDS,
+                    on_hold_duration_seconds=FREE_TEST_TTL_SECONDS,
                     note=f"tg:{int(user_id)} free-test",
                 )
                 sub_url = str((resp or {}).get("subscription_url") or "")
@@ -481,7 +482,7 @@ class ProvisioningService:
                 )
             else:
                 provision = await self.panel.add_test_subscription(
-                    user_id=user_id, total_bytes=TEST_CONFIG_BYTES, ttl_seconds=TEST_CONFIG_TTL_SECONDS
+                    user_id=user_id, total_bytes=TEST_CONFIG_BYTES, ttl_seconds=FREE_TEST_TTL_SECONDS
                 )
             await self.db.insert_test_subscription(
                 provision, test_id=test_id, expires_at=expires_at, total_bytes=TEST_CONFIG_BYTES

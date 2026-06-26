@@ -2365,11 +2365,12 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not is_agent and not await free_test_enabled(db):
         await new_flow_card(update, context, "🧪 تست رایگان در حال حاضر فعال نیست.", back_keyboard())
         return
+    dur_label = "۱۰ دقیقه" if is_agent else "۱ روز"
     await new_flow_card(
         update,
         context,
         "⏳ <b>در حال ساخت کانفیگ تست...</b>\n\n"
-        "حجم تست ۲۰۰ مگابایت و اعتبار زمانی آن ۱۰ دقیقه است.",
+        f"حجم تست ۲۰۰ مگابایت و اعتبار زمانی آن {dur_label} است.",
     )
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
     qr: QRService = context.application.bot_data["qr"]
@@ -2418,7 +2419,7 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context,
         "✅ <b>کانفیگ تست آماده شد.</b>\n\n"
         "📦 حجم: <b>۲۰۰ مگابایت</b>\n"
-        "⏱ اعتبار: <b>۱۰ دقیقه</b>\n\n"
+        f"⏱ اعتبار: <b>{dur_label}</b>\n\n"
         "لینک و QR Code در پیام بعدی ارسال می‌شود.",
         back_keyboard(),
     )
@@ -2429,7 +2430,7 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         caption=(
             f"🧪 <b>{'کانفیگ تست نماینده' if is_agent else 'کانفیگ تست رایگان'}</b>\n\n"
             "📦 حجم: <b>۲۰۰ مگابایت</b>\n"
-            "⏱ اعتبار: <b>۱۰ دقیقه</b>\n\n"
+            f"⏱ اعتبار: <b>{dur_label}</b>\n\n"
             f"<code>{html.escape(sub_link)}</code>"
         ),
         parse_mode=ParseMode.HTML,
