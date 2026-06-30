@@ -89,14 +89,42 @@ class PanelClient:
             cookie=(await self.db.get_setting("panel_cookie", "")).strip(),
         )
 
+    def _apply_session_cookie(self, value: str) -> None:
+        """Make ``value`` the SOLE 3x-ui cookie in the jar. Clearing first avoids
+        httpx accumulating duplicate '3x-ui' cookies (different domain/path),
+        which makes cookies.get('3x-ui') raise 'Multiple cookies exist'."""
+        try:
+            self._client.cookies.clear()
+        except Exception:
+            pass
+        if value:
+            self._client.cookies.set("3x-ui", value)
+
+    def _read_session_cookie(self, response: httpx.Response) -> str:
+        """Read the session cookie value without ever raising CookieConflict:
+        iterate the response + client jars and take the last 3x-ui/session match."""
+        value = ""
+        for jar in (response.cookies.jar, self._client.cookies.jar):
+            for cookie in jar:
+                if cookie.name in ("3x-ui", "session") and cookie.value:
+                    value = cookie.value
+        return value
+
     async def login(self, *, force: bool = False, timeout_seconds: float | None = None) -> str:
         async with self._login_lock:
             settings = await self._settings()
             if settings.cookie and not force:
-                self._client.cookies.set("3x-ui", settings.cookie)
+                self._apply_session_cookie(settings.cookie)
                 return settings.cookie
             if not settings.base_url or not settings.username or not settings.password:
                 raise RuntimeError("3x-ui panel settings are incomplete.")
+
+            # Start from a clean jar so the login request doesn't send a stale
+            # cookie and the new Set-Cookie can't pile up into a duplicate.
+            try:
+                self._client.cookies.clear()
+            except Exception:
+                pass
 
             request_kwargs: dict[str, Any] = {
                 "data": {"username": settings.username, "password": settings.password, "twoFactorCode": ""},
@@ -117,16 +145,10 @@ class PanelClient:
             # current process is authenticated regardless; we only persist a known
             # name so it can survive a restart. If neither is found we don't fail —
             # a later 401 just triggers a fresh forced login.
-            cookie = (
-                self._client.cookies.get("3x-ui")
-                or self._client.cookies.get("session")
-                or response.cookies.get("3x-ui")
-                or response.cookies.get("session")
-                or ""
-            )
+            cookie = self._read_session_cookie(response)
             if cookie:
                 await self.db.update_panel_cookie(cookie, int(now_ms() / 1000))
-                self._client.cookies.set("3x-ui", cookie)
+                self._apply_session_cookie(cookie)
             return cookie
 
     async def request(
@@ -141,7 +163,7 @@ class PanelClient:
         if not settings.base_url:
             raise RuntimeError("panel_base_url is not configured.")
         if settings.cookie:
-            self._client.cookies.set("3x-ui", settings.cookie)
+            self._apply_session_cookie(settings.cookie)
         else:
             await self.login(timeout_seconds=timeout_seconds)
 
@@ -199,7 +221,7 @@ class PanelClient:
         if not settings.base_url:
             raise RuntimeError("panel_base_url is not configured.")
         if settings.cookie:
-            self._client.cookies.set("3x-ui", settings.cookie)
+            self._apply_session_cookie(settings.cookie)
         else:
             await self.login(timeout_seconds=timeout_seconds)
         request_kwargs: dict[str, Any] = {"data": data}
