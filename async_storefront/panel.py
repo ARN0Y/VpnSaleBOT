@@ -155,7 +155,21 @@ class PanelClient:
             operation=path,
             **request_kwargs,
         )
-        payload = await self._json(response, path)
+        try:
+            payload = await self._json(response, path)
+        except RuntimeError:
+            # Expired/invalid session: 3x-ui serves the login page (HTML, often
+            # HTTP 404) instead of JSON, so _json raised before the auth check
+            # below could run. Re-login once and retry — this is what made config
+            # creation fail randomly once the panel session cookie aged out.
+            await self.login(force=True, timeout_seconds=timeout_seconds)
+            response = await self._request_with_retries(
+                method,
+                f"{settings.base_url}{path}",
+                operation=path,
+                **request_kwargs,
+            )
+            payload = await self._json(response, path)
         if payload.get("success") is True:
             return payload
 
@@ -197,7 +211,9 @@ class PanelClient:
             operation=path,
             **request_kwargs,
         )
-        if response.status_code in (401, 403):
+        # 404 included: an expired session makes 3x-ui serve the login page
+        # (often HTTP 404) instead of the API response — re-login and retry.
+        if response.status_code in (401, 403, 404):
             await self.login(force=True, timeout_seconds=timeout_seconds)
             response = await self._request_with_retries(
                 method,
