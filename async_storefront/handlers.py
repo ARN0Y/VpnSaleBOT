@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -27,6 +28,7 @@ from .config import Settings
 from .db import AsyncDatabase
 from .provisioning import ProvisioningService
 from .qr import QRService
+from .util import now_ms, now_ts
 
 try:
     import jdatetime
@@ -1240,6 +1242,51 @@ def subscription_remaining_label(sub: dict) -> str:
     return f"{remaining / (1024**3):.2f} گیگ"
 
 
+def subscription_expiry_label(sub: dict) -> str:
+    """Human remaining-time from the panel snapshot (panel_expiry_time is ms;
+    0 = no time limit)."""
+    exp_ms = int(sub.get("panel_expiry_time") or 0)
+    if exp_ms <= 0:
+        return "نامحدود"
+    remaining_ms = exp_ms - now_ms()
+    if remaining_ms <= 0:
+        return "منقضی"
+    days = remaining_ms // 86_400_000
+    if days >= 1:
+        return f"{int(days)} روز"
+    hours = remaining_ms // 3_600_000
+    return f"{int(hours)} ساعت" if hours >= 1 else "کمتر از ۱ ساعت"
+
+
+async def _sync_subscriptions_snapshot(panel, db: AsyncDatabase, subs: list[dict]) -> None:
+    """Refresh the panel snapshot (status / remaining / expiry) for the visible
+    subs so 'my configs' is accurate. find_subscription reuses ONE cached
+    inbounds fetch, and recently-synced rows are skipped — so this is cheap.
+    Updates each row dict in place; never raises."""
+    if panel is None:
+        return
+    now_s = now_ts()
+    stale = [s for s in subs if now_s - int(s.get("panel_synced_at") or 0) > 60 and str(s.get("sub_id") or "").strip()]
+    if not stale:
+        return
+
+    async def _one(s: dict) -> None:
+        try:
+            detail = await panel.find_subscription(str(s.get("sub_id") or ""))
+            if not detail:
+                return
+            await db.update_subscription_panel_snapshot(detail)
+            s["panel_total_bytes"] = int(detail.total_bytes or 0)
+            s["panel_remaining_bytes"] = int(detail.remaining_bytes or 0)
+            s["panel_enabled"] = 1 if detail.enabled else 0
+            s["panel_expiry_time"] = int(detail.expiry_time or 0)
+            s["panel_synced_at"] = now_s
+        except Exception:
+            LOG.debug("my-subs snapshot sync failed sub_id=%s", s.get("sub_id"), exc_info=True)
+
+    await asyncio.gather(*[_one(s) for s in stale])
+
+
 async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int, *, new_card: bool) -> None:
     db: AsyncDatabase = context.application.bot_data["db"]
     page_size = 8
@@ -1251,6 +1298,8 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
     total_pages = max(1, (total + page_size - 1) // page_size)
     safe_page = min(max(0, int(page)), total_pages - 1)
     subs = await db.get_user_subscription_page(update.effective_user.id, safe_page, page_size)
+    # Refresh the visible page from the panel so status/remaining/expiry are live.
+    await _sync_subscriptions_snapshot(context.application.bot_data.get("panel"), db, subs)
     lines = [
         "📋 <b>اشتراک‌های من</b>",
         f"صفحه <b>{safe_page + 1}</b> از <b>{total_pages}</b> | مجموع: <b>{total}</b>",
@@ -1288,11 +1337,12 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         lines.append(
             f"{idx}. <b>{name}</b>{type_label}\n"
             f"   🆔 <code>{sub_id}</code>\n"
-            f"   📦 حجم: {int(sub.get('gb') or 0)} گیگ | وضعیت: {subscription_status_label(sub)} | باقی‌مانده: {subscription_remaining_label(sub)}"
+            f"   📦 حجم: {int(sub.get('gb') or 0)} گیگ | باقی‌مانده: {subscription_remaining_label(sub)}\n"
+            f"   ⏳ زمان باقی‌مانده: {subscription_expiry_label(sub)} | وضعیت: {subscription_status_label(sub)}"
         )
 
         if is_test:
-            lines.append(f"   🧪 نوع: تست | حجم واقعی: {volume_label} | اعتبار: ۱۰ دقیقه")
+            lines.append(f"   🧪 نوع: تست | حجم واقعی: {volume_label}")
 
     nav: list[InlineKeyboardButton] = []
     if safe_page > 0:
