@@ -113,9 +113,7 @@ export function Users() {
                     </Link>
                   </TD>
                   <TD>
-                    {u.access_level === "open" ? (
-                      <Badge variant="success">نماینده (باز)</Badge>
-                    ) : u.access_level === "closed" ? (
+                    {u.access_level ? (
                       <Badge>نماینده</Badge>
                     ) : (
                       <Badge variant="muted">کاربر</Badge>

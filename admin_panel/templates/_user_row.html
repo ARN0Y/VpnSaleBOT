@@ -15,10 +15,9 @@
   <td class="px-5 py-4 font-bold text-cyan-200">{{ toman(u.total_gb_purchased or 0) }} GB</td>
   <td class="px-5 py-4">
     <span class="badge">
-      {% if u.access_level == 'open' %}نماینده باز{% elif u.access_level == 'closed' %}نماینده نیازمند پرداخت{% else %}کاربر عادی{% endif %}
+      {% if u.access_level %}نماینده{% else %}کاربر عادی{% endif %}
     </span>
   </td>
-  <td class="px-5 py-4 text-slate-300">{{ toman(u.credit_used_toman or 0) }} / {{ toman(u.credit_limit_toman or 0) }}</td>
   <td class="px-5 py-4">
     {% set disabled = u.disabled if u.disabled is defined else u.user_disabled %}
     {% if disabled %}

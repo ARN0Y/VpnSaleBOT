@@ -94,7 +94,7 @@ export const api = {
   rejectTopup: (id: string) => post<Ok>(`/topups/${encodeURIComponent(id)}/reject`),
   approveAgentRequest: (
     id: string,
-    payload: { access_level: string; credit_limit_toman: number; price_per_gb: number },
+    payload: { price_per_gb: number },
   ) => post<Ok>(`/agent-requests/${encodeURIComponent(id)}/approve`, payload),
   rejectAgentRequest: (id: string) => post<Ok>(`/agent-requests/${encodeURIComponent(id)}/reject`),
   banUser: (id: number, reason: string) => post<Ok>(`/users/${id}/ban`, { reason }),
@@ -179,7 +179,7 @@ export const api = {
 
   updateAgent: (
     id: number,
-    p: { access_level: string; credit_limit_toman: number; credit_used_toman: number; price_per_gb: number; daily_test_limit: number },
+    p: { price_per_gb: number; daily_test_limit: number },
   ) => post<Ok>(`/users/${id}/agent`, p),
   messageUser: (id: number, message: string) => post<Ok>(`/users/${id}/message`, { message }),
   syncUserSubs: (id: number) => post<Ok>(`/users/${id}/sync-subscriptions`),

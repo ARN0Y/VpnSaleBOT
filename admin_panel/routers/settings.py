@@ -27,7 +27,6 @@ EDITABLE_KEYS = (
     "crypto_address",
     "support_id",
     "admin_user_ids",
-    "default_agent_credit_limit_toman",
     "default_agent_price_per_gb",
     "broadcast_rate_per_second",
     "broadcast_concurrency",
@@ -35,7 +34,6 @@ EDITABLE_KEYS = (
 INT_SETTING_KEYS = {
     "price_per_gb",
     "minimum_purchase_gb",
-    "default_agent_credit_limit_toman",
     "default_agent_price_per_gb",
     "broadcast_rate_per_second",
     "broadcast_concurrency",
@@ -43,7 +41,6 @@ INT_SETTING_KEYS = {
 SETTING_FORM_DEFAULTS = {
     "price_per_gb": "200000",
     "minimum_purchase_gb": "1",
-    "default_agent_credit_limit_toman": "0",
     "default_agent_price_per_gb": "0",
     "broadcast_rate_per_second": "25",
     "broadcast_concurrency": "16",
@@ -71,7 +68,6 @@ SETTING_META = {
         "label": "ادمین‌های ربات",
         "help": "هر خط یا هر کاما یک user_id ادمین. اگر خالی باشد، ADMIN_ID اصلی fallback می‌شود.",
     },
-    "default_agent_credit_limit_toman": {"label": "سقف اعتبار پیش‌فرض نماینده", "type": "number", "min": "0"},
     "default_agent_price_per_gb": {"label": "قیمت پیش‌فرض نماینده", "type": "number", "min": "0"},
     "broadcast_rate_per_second": {
         "label": "سرعت ارسال پیام همگانی",

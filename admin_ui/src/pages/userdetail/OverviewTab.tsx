@@ -145,7 +145,6 @@ export function OverviewTab({ data }: { data: UserDetailBundle }) {
                 <InfoRow k="کل ترافیک" v={`${toman(u.total_gb_purchased)} GB`} />
                 <InfoRow k="تعداد سفارش‌ها" v={toman(u.approved_orders)} />
                 <InfoRow k="تعداد کانفیگ" v={toman(data.subs_total)} />
-                {isAgent && <InfoRow k="اعتبار" v={`${toman(u.credit_used_toman)} / ${toman(u.credit_limit_toman)}`} />}
                 {isAgent && <InfoRow k="تست امروز" v={`${n(u.daily_test_used)} / ${n(u.daily_test_limit)}`} />}
               </dl>
             </CardContent>

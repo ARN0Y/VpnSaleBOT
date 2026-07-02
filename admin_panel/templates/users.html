@@ -35,8 +35,7 @@
             <th class="px-5 py-3 text-right font-black">کیف پول</th>
             <th class="px-5 py-3 text-right font-black">کل خرید</th>
             <th class="px-5 py-3 text-right font-black">کل گیگ</th>
-            <th class="px-5 py-3 text-right font-black">دسترسی</th>
-            <th class="px-5 py-3 text-right font-black">اعتبار</th>
+            <th class="px-5 py-3 text-right font-black">نقش</th>
             <th class="px-5 py-3 text-right font-black">وضعیت</th>
             <th class="px-5 py-3 text-right font-black">عملیات</th>
           </tr>
@@ -45,7 +44,7 @@
         {% for u in users %}
           {% include "_user_row.html" %}
         {% else %}
-          <tr><td colspan="9" class="px-5 py-10 text-center text-slate-500">کاربری یافت نشد.</td></tr>
+          <tr><td colspan="8" class="px-5 py-10 text-center text-slate-500">کاربری یافت نشد.</td></tr>
         {% endfor %}
         </tbody>
       </table>

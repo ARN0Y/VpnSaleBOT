@@ -18,15 +18,11 @@ const STATUSES = [
 
 function RequestCard({ row, onChanged }: { row: Record<string, unknown>; onChanged: () => void }) {
   const id = String(row.req_id);
-  const [open, setOpen] = React.useState(true);
-  const [credit, setCredit] = React.useState("0");
   const [price, setPrice] = React.useState("0");
 
   const approve = useMutation({
     mutationFn: () =>
       api.approveAgentRequest(id, {
-        access_level: open ? "open" : "closed",
-        credit_limit_toman: Number(credit) || 0,
         price_per_gb: Number(price) || 0,
       }),
     onSuccess: onChanged,
@@ -46,17 +42,12 @@ function RequestCard({ row, onChanged }: { row: Record<string, unknown>; onChang
       </p>
       {status === "pending" ? (
         <div className="mt-3 flex flex-wrap items-end gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={open} onChange={(e) => setOpen(e.target.checked)} />
-            دسترسی باز (اعتباری)
-          </label>
-          <div className="space-y-1">
-            <div className="text-[0.68rem] text-muted-foreground">سقف اعتبار</div>
-            <Input className="h-9 w-36" value={credit} onChange={(e) => setCredit(e.target.value)} inputMode="numeric" />
-          </div>
           <div className="space-y-1">
             <div className="text-[0.68rem] text-muted-foreground">قیمت هر گیگ</div>
             <Input className="h-9 w-36" value={price} onChange={(e) => setPrice(e.target.value)} inputMode="numeric" />
+          </div>
+          <div className="rounded-xl border border-border bg-white/[0.03] px-3 py-2 text-xs text-muted-foreground">
+            خرید نماینده‌ها فقط از کیف پول انجام می‌شود.
           </div>
           <div className="flex gap-2">
             <Button size="sm" disabled={busy} onClick={() => approve.mutate()}>

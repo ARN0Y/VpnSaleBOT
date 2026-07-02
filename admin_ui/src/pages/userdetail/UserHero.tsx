@@ -17,9 +17,8 @@ export function UserHero({
 }) {
   const disabled = n(user.user_disabled) === 1;
   const isAgent = !!s(user.access_level);
-  const isOpen = s(user.access_level) === "open";
   const initial = (s(user.first_name) || s(user.username) || "U").trim().charAt(0).toUpperCase();
-  const levelLabel = isOpen ? "نماینده باز" : isAgent ? "نماینده نیازمند پرداخت" : "کاربر عادی";
+  const levelLabel = isAgent ? "نماینده" : "کاربر عادی";
 
   return (
     <div className="relative overflow-hidden rounded-3xl border border-border bg-card/70">
@@ -47,7 +46,7 @@ export function UserHero({
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-2xl font-black tracking-tight text-white">{s(user.first_name) || "بدون نام"}</h1>
               {isAgent ? (
-                <Badge variant={isOpen ? "success" : "default"} className="gap-1">
+                <Badge className="gap-1">
                   <Crown className="h-3 w-3" /> {levelLabel}
                 </Badge>
               ) : (

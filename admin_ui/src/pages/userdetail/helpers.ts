@@ -11,9 +11,6 @@ export function s(v: unknown): string {
 }
 
 export interface AgentPayload {
-  access_level: string;
-  credit_limit_toman: number;
-  credit_used_toman: number;
   price_per_gb: number;
   daily_test_limit: number;
 }

@@ -1,18 +1,14 @@
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Crown, BookText, ShieldCheck, KeyRound, CheckCircle2 } from "lucide-react";
+import { Crown, ShieldCheck, KeyRound, CheckCircle2, Wallet } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { Field } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { EmptyState } from "@/components/ui/empty-state";
 import { CopyButton } from "@/components/ui/copy-button";
 import { useToast } from "@/components/ui/toast";
 import { api, ApiError } from "@/lib/api";
-import { toman, jalaliDate } from "@/lib/utils";
+import { toman } from "@/lib/utils";
 import { n, s, type UserMutations } from "./helpers";
 import type { UserDetailBundle } from "@/lib/types";
 
@@ -78,16 +74,12 @@ export function AgentTab({ data, mutations }: { data: UserDetailBundle; mutation
   const u = data.user;
   const isAgent = !!s(u.access_level);
   const [form, setForm] = React.useState({
-    access_level: s(u.access_level) === "open" ? "open" : "closed",
-    credit_limit_toman: String(n(u.credit_limit_toman)),
-    credit_used_toman: String(n(u.credit_used_toman)),
     price_per_gb: String(n(u.price_per_gb)),
     daily_test_limit: String(n(u.daily_test_limit)),
   });
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   const PRICE_PRESETS = [150000, 180000, 200000, 250000];
-  const CREDIT_PRESETS = [5000000, 10000000, 20000000, 50000000];
   const TEST_PRESETS = [0, 1, 3, 5, 10];
   const Chips = ({ field, options, fmt }: { field: keyof typeof form; options: number[]; fmt: (v: number) => string }) => (
     <div className="mt-1.5 flex flex-wrap gap-1">
@@ -106,15 +98,8 @@ export function AgentTab({ data, mutations }: { data: UserDetailBundle; mutation
     </div>
   );
 
-  const creditLimit = n(u.credit_limit_toman);
-  const creditUsed = n(u.credit_used_toman);
-  const pct = creditLimit > 0 ? (creditUsed / creditLimit) * 100 : 0;
-
   const submit = () =>
     mutations.agent.mutate({
-      access_level: form.access_level,
-      credit_limit_toman: Number(form.credit_limit_toman) || 0,
-      credit_used_toman: Number(form.credit_used_toman) || 0,
       price_per_gb: Number(form.price_per_gb) || 0,
       daily_test_limit: Number(form.daily_test_limit) || 0,
     });
@@ -133,31 +118,11 @@ export function AgentTab({ data, mutations }: { data: UserDetailBundle; mutation
               این کاربر هنوز نماینده نیست. با ذخیره‌ی فرم زیر به نماینده تبدیل می‌شود و سپس می‌توانید تنظیماتش را ویرایش کنید.
             </div>
           )}
-          {isAgent && creditLimit > 0 && (
-            <div>
-              <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-                <span>اعتبار مصرف‌شده</span>
-                <span>{toman(creditUsed)} / {toman(creditLimit)}</span>
-              </div>
-              <Progress value={pct} tone={pct >= 90 ? "danger" : pct >= 70 ? "warning" : "success"} />
-            </div>
-          )}
-          <Field label="سطح دسترسی">
-            <Select value={form.access_level} onChange={(e) => set("access_level", e.target.value)}>
-              <option value="closed">نیازمند پرداخت (کیف‌پولی)</option>
-              <option value="open">دسترسی باز (اعتباری)</option>
-            </Select>
-          </Field>
+          <div className="flex items-start gap-3 rounded-xl border border-border bg-white/[0.02] p-3 text-xs leading-6 text-muted-foreground">
+            <Wallet className="mt-0.5 h-4 w-4 shrink-0 text-foreground" />
+            <span>همه‌ی خریدهای نماینده از کیف پول کم می‌شود؛ قیمت نماینده فقط روی مبلغ فاکتور اثر می‌گذارد.</span>
+          </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <Field label="سقف اعتبار (ت)">
-                <Input value={form.credit_limit_toman} onChange={(e) => set("credit_limit_toman", e.target.value)} inputMode="numeric" />
-              </Field>
-              <Chips field="credit_limit_toman" options={CREDIT_PRESETS} fmt={(v) => `${toman(v / 1000000)}م`} />
-            </div>
-            <Field label="اعتبار مصرف‌شده (ت)" hint="اصلاح دستی بدهی">
-              <Input value={form.credit_used_toman} onChange={(e) => set("credit_used_toman", e.target.value)} inputMode="numeric" />
-            </Field>
             <div>
               <Field label="قیمت هر گیگ (ت)" hint="۰ = تعرفه عمومی">
                 <Input value={form.price_per_gb} onChange={(e) => set("price_per_gb", e.target.value)} inputMode="numeric" />
@@ -179,28 +144,21 @@ export function AgentTab({ data, mutations }: { data: UserDetailBundle; mutation
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><BookText className="h-4 w-4" /> دفتر مالی نماینده</CardTitle>
+          <CardTitle className="flex items-center gap-2"><Wallet className="h-4 w-4" /> وضعیت کیف‌پولی نماینده</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {data.ledger.length === 0 ? (
-            <EmptyState icon={BookText} title="گردش مالی ندارد" hint="تراکنش‌های اعتبار نماینده این‌جا ثبت می‌شوند." />
-          ) : (
-            data.ledger.map((l, i) => {
-              const amt = n(l.amount_toman);
-              return (
-                <div key={i} className="flex items-center justify-between gap-2 rounded-xl border border-border bg-white/[0.02] px-3 py-2 text-sm">
-                  <div className="min-w-0">
-                    <div className="text-white">{s(l.kind)}</div>
-                    <code className="text-[0.62rem] text-muted-foreground">{s(l.ref_id)}</code>
-                  </div>
-                  <div className="text-left">
-                    <Badge variant={amt < 0 ? "success" : "warning"}>{toman(amt)}</Badge>
-                    <div className="mt-0.5 text-[0.62rem] text-muted-foreground">{jalaliDate(n(l.created_at))}</div>
-                  </div>
-                </div>
-              );
-            })
-          )}
+        <CardContent className="space-y-3 text-sm">
+          <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] px-3 py-2">
+            <span className="text-muted-foreground">موجودی کیف پول</span>
+            <b className="text-white">{toman(u.wallet_balance)} تومان</b>
+          </div>
+          <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] px-3 py-2">
+            <span className="text-muted-foreground">خرید ۲۴ ساعت اخیر</span>
+            <b className="text-white">{toman(n(data.agent_24h?.total_toman))} تومان</b>
+          </div>
+          <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] px-3 py-2">
+            <span className="text-muted-foreground">حجم ۲۴ ساعت اخیر</span>
+            <b className="text-white">{toman(n(data.agent_24h?.total_gb))} GB</b>
+          </div>
         </CardContent>
       </Card>
 

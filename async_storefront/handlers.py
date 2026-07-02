@@ -689,8 +689,7 @@ def admin_decision_keyboard(prefix: str, ref_id: str) -> InlineKeyboardMarkup:
 def agent_admin_decision_keyboard(ref_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ تایید باز", callback_data=f"agent_admin:approve_open:{ref_id}")],
-            [InlineKeyboardButton("✅ تایید نیازمند پرداخت", callback_data=f"agent_admin:approve_closed:{ref_id}")],
+            [InlineKeyboardButton("✅ تایید نماینده کیف‌پولی", callback_data=f"agent_admin:approve:{ref_id}")],
             [InlineKeyboardButton("❌ رد", callback_data=f"agent_admin:reject:{ref_id}")],
         ]
     )
@@ -710,24 +709,6 @@ def qty_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("✍️ دلخواه", callback_data="buy:qty:custom"),
             ],
             [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
-        ]
-    )
-
-
-def agent_admin_credit_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("۵ میلیون", callback_data="agent_admin:cl:5000000"),
-                InlineKeyboardButton("۱۰ میلیون", callback_data="agent_admin:cl:10000000"),
-            ],
-            [
-                InlineKeyboardButton("۲۰ میلیون", callback_data="agent_admin:cl:20000000"),
-                InlineKeyboardButton("۵۰ میلیون", callback_data="agent_admin:cl:50000000"),
-            ],
-            [InlineKeyboardButton("✍️ مبلغ سفارشی", callback_data="agent_admin:cl:custom")],
-            [InlineKeyboardButton("🔁 پیش‌فرض سیستم", callback_data="agent_admin:cl:def")],
-            [InlineKeyboardButton("❌ لغو تایید", callback_data="agent_admin:cancel")],
         ]
     )
 
@@ -1417,11 +1398,7 @@ async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return BUY_GB
     total = gb * qty * unit_price
-    method_label = (
-        "دسترسی باز نمایندگی (ثبت روی اعتبار)"
-        if agent and db.normalize_agent_access_value(agent["access_level"]) == "open"
-        else "کسر از کیف پول"
-    )
+    method_label = "کیف پول نماینده" if agent else "کسر از کیف پول"
     server_line = f"🌐 سرور: <b>{html.escape(await panel2_label(db))}</b>\n" if p2 else ""
     client_name = str(checkout.get("client_name") or "").strip()
     # Stable idempotency token per built invoice: a double-tap on "confirm"
@@ -1721,36 +1698,12 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
     if not agent:
         access_level = "کاربر عادی"
-        credit_lines = ""
-    elif db.normalize_agent_access_value(agent["access_level"]) == "open":
-        access_level = "نماینده (دسترسی باز)"
-        credit_limit = int(agent["credit_limit_toman"] or 0)
-        credit_used = int(agent["credit_used_toman"] or 0)
-        if credit_limit <= 0:
-            # سقف صفر = نامحدود (هم‌راستا با منطق خرید)
-            credit_lines = (
-                f"\n💳 سقف اعتبار: نامحدود"
-                f"\n📉 اعتبار مصرف‌شده: {credit_used:,} تومان"
-            )
-        else:
-            credit_left = max(0, credit_limit - credit_used)
-            credit_lines = (
-                f"\n💳 سقف اعتبار: {credit_limit:,} تومان"
-                f"\n📉 اعتبار مصرف‌شده: {credit_used:,} تومان"
-                f"\n✅ اعتبار باقی‌مانده: {credit_left:,} تومان"
-            )
+        agent_lines = ""
     else:
-        access_level = "نماینده (نیاز به پرداخت)"
-        credit_limit = int(agent["credit_limit_toman"] or 0)
-        credit_used = int(agent["credit_used_toman"] or 0)
-        credit_left = max(0, credit_limit - credit_used)
-        credit_lines = (
-            f"\n💳 سقف اعتبار: {credit_limit:,} تومان"
-            f"\n📉 اعتبار مصرف‌شده: {credit_used:,} تومان"
-            f"\n✅ اعتبار باقی‌مانده: {credit_left:,} تومان"
-        )
+        access_level = "نماینده"
+        agent_lines = ""
     if agent:
-        credit_lines += agent_extra_lines
+        agent_lines += agent_extra_lines
     username = (user.username or snapshot["username"] or "").strip().lstrip("@")
     username_line = f"@{html.escape(username)}" if username else "ندارد"
     text = (
@@ -1767,7 +1720,7 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"📦 کل حجم خریداری‌شده: {total_gb:,} گیگ\n"
         f"💰 کل هزینه ریالی: {snapshot['total_spent']:,} تومان\n"
         f"👛 موجودی کیف پول: <b>{snapshot['wallet_balance']:,}</b> تومان"
-        f"{credit_lines}"
+        f"{agent_lines}"
     )
     await new_flow_card(update, context, text, back_keyboard())
 
@@ -2154,11 +2107,7 @@ async def build_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return RENEW_GB
     total = gb * unit_price
-    method_label = (
-        "دسترسی باز نمایندگی (ثبت روی اعتبار)"
-        if agent and db.normalize_agent_access_value(agent["access_level"]) == "open"
-        else "کسر از کیف پول"
-    )
+    method_label = "کیف پول نماینده" if agent else "کسر از کیف پول"
     renewal["idem"] = f"renew-{update.effective_user.id}-{secrets.token_hex(8)}"
     renewal.update(unit_price=unit_price, total=total, method_label=method_label)
     await send_flow_prompt(
@@ -2779,21 +2728,10 @@ async def topup_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         changed = await db.approve_wallet_topup(topup_id)
         if changed:
             amount = int(topup["amount_toman"])
-            if isinstance(changed, dict) and changed.get("open_agent"):
-                settled = int(changed.get("settled") or 0)
-                to_wallet = int(changed.get("to_wallet") or 0)
-                lines = [f"🎉 <b>پرداخت شما تایید شد.</b>\n\nمبلغ: <b>{amount:,}</b> تومان"]
-                if settled > 0:
-                    lines.append(f"✅ از بدهی اعتبار شما تسویه شد: <b>{settled:,}</b> تومان")
-                if to_wallet > 0:
-                    lines.append(f"💰 به کیف پول شما اضافه شد: <b>{to_wallet:,}</b> تومان")
-                lines.append("اکنون می‌توانید دوباره خرید کنید.")
-                approve_msg = "\n".join(lines)
-            else:
-                approve_msg = (
-                    "🎉 <b>شارژ کیف پول شما تایید شد.</b>\n\n"
-                    f"مبلغ شارژشده: <b>{amount:,}</b> تومان"
-                )
+            approve_msg = (
+                "🎉 <b>شارژ کیف پول شما تایید شد.</b>\n\n"
+                f"مبلغ شارژشده: <b>{amount:,}</b> تومان"
+            )
             await context.bot.send_message(
                 chat_id=int(topup["user_id"]),
                 text=approve_msg,
@@ -2823,7 +2761,7 @@ async def topup_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def agent_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles approve_open / approve_closed / reject on the original request message."""
+    """Handles approve / reject on the original request message."""
     query = update.callback_query
     if not query:
         return
@@ -2865,12 +2803,11 @@ async def agent_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             LOG.debug("failed to clear agent admin keyboard req_id=%s", req_id, exc_info=True)
         return
 
-    # approve_open or approve_closed → start multi-step settings flow
-    is_open = action == "approve_open"
+    # approve_open/approve_closed are accepted for old in-flight admin messages,
+    # but they now enter the same wallet-only representative flow.
     context.user_data["admin_agent_approval"] = {
         "req_id": req_id,
-        "access_level": "open" if is_open else "closed",
-        "credit_limit": None,
+        "access_level": "closed",
         "price_per_gb": None,
     }
     await query.answer()
@@ -2879,58 +2816,13 @@ async def agent_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception:
         pass
 
-    if is_open:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                f"⚙️ <b>تنظیم نماینده – دسترسی باز</b>\n"
-                f"درخواست: <code>{req_id}</code>\n\n"
-                "📊 <b>سقف اعتبار</b> نماینده را انتخاب کنید:"
-            ),
-            reply_markup=agent_admin_credit_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                f"⚙️ <b>تنظیم نماینده – نیازمند پرداخت</b>\n"
-                f"درخواست: <code>{req_id}</code>\n\n"
-                + await agent_pricing_text(db)
-            ),
-            reply_markup=agent_admin_pricing_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-
-
-async def agent_admin_set_credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Step 2 for open agents: admin selects credit limit."""
-    query = update.callback_query
-    if not await is_bot_admin(update, context):
-        await query.answer("دسترسی ندارید.", show_alert=True)
-        return
-
-    approval = context.user_data.get("admin_agent_approval")
-    if not approval:
-        await query.answer("جلسه تایید نماینده منقضی شده است. درخواست را از نو باز کنید.", show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        return
-
-    amount_str = query.data.split(":")[-1]
-    db: AsyncDatabase = context.application.bot_data["db"]
-    if amount_str == "def":
-        amount = int(await db.get_setting("default_agent_credit_limit_toman", "0") or "0")
-    else:
-        amount = int(amount_str)
-
-    approval["credit_limit"] = amount
-    await query.answer()
-    await query.edit_message_text(
-        f"✅ سقف اعتبار: <b>{amount:,}</b> تومان ثبت شد.\n\n"
-        + await agent_pricing_text(db),
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=(
+            f"⚙️ <b>تنظیم نماینده – کیف‌پولی</b>\n"
+            f"درخواست: <code>{req_id}</code>\n\n"
+            + await agent_pricing_text(db)
+        ),
         reply_markup=agent_admin_pricing_keyboard(),
         parse_mode=ParseMode.HTML,
     )
@@ -2998,19 +2890,14 @@ async def agent_admin_set_daily_test(update: Update, context: ContextTypes.DEFAU
         limit = int(limit_str)
 
     approval["daily_test_limit"] = limit
-    access_level = approval["access_level"]
-    credit_limit = int(approval.get("credit_limit") or 0)
     price_per_gb = int(approval.get("price_per_gb") or 0)
     req_id = approval["req_id"]
 
-    label_access = "باز (اعتباری)" if access_level == "open" else "بسته (نیازمند پرداخت)"
     summary = (
         f"📋 <b>خلاصه تنظیمات نماینده</b>\n\n"
         f"درخواست: <code>{req_id}</code>\n"
-        f"نوع دسترسی: <b>{label_access}</b>\n"
+        "نوع پرداخت: <b>کیف‌پولی</b>\n"
     )
-    if access_level == "open":
-        summary += f"سقف اعتبار: <b>{credit_limit:,}</b> تومان\n"
     summary += (
         "قیمت‌گذاری: <b>بر اساس قیمتِ نماینده‌یِ بسته‌ها</b>\n"
         if price_per_gb <= 0
@@ -3044,16 +2931,14 @@ async def agent_admin_final_confirm(update: Update, context: ContextTypes.DEFAUL
         return
 
     req_id = approval["req_id"]
-    access_level = approval["access_level"]
-    credit_limit = int(approval.get("credit_limit") or 0)
     price_per_gb = int(approval.get("price_per_gb") or 0)
     daily_test_limit = int(approval.get("daily_test_limit") or 0)
 
     db: AsyncDatabase = context.application.bot_data["db"]
     result = await db.approve_agent_request_as_agent(
         req_id=req_id,
-        access_level=access_level,
-        credit_limit_toman=credit_limit if access_level == "open" else 0,
+        access_level="closed",
+        credit_limit_toman=0,
         price_per_gb=price_per_gb,
         daily_test_limit=daily_test_limit,
         created_by=update.effective_user.id,
@@ -3066,18 +2951,15 @@ async def agent_admin_final_confirm(update: Update, context: ContextTypes.DEFAUL
             pass
         return
 
-    label = "نماینده با دسترسی باز" if access_level == "open" else "نماینده نیازمند پرداخت"
     msg = (
         "✅ <b>درخواست نمایندگی شما تایید شد.</b>\n\n"
-        f"سطح جدید شما: <b>{label}</b>\n"
+        "نوع پرداخت شما: <b>کیف‌پولی</b>\n"
     )
-    if access_level == "open":
-        msg += f"سقف اعتبار: <b>{credit_limit:,}</b> تومان\n"
     if price_per_gb > 0:
         msg += f"قیمت هر گیگ: <b>{price_per_gb:,}</b> تومان\n"
     if daily_test_limit > 0:
         msg += f"کانفیگ تست روزانه: <b>{daily_test_limit}</b> عدد\n"
-    msg += "از این لحظه منوی ربات برای حساب شما به‌روزرسانی شده است."
+    msg += "برای خرید کافی است کیف پولتان شارژ باشد؛ سرویس بعد از پرداخت فوری ساخته می‌شود."
 
     try:
         await context.bot.send_message(
@@ -3142,28 +3024,6 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "agent_request":
         return await agent_request_start(update, context)
     return ConversationHandler.END
-
-
-async def agent_admin_custom_credit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt admin to type a custom credit limit."""
-    query = update.callback_query
-    if not await is_bot_admin(update, context):
-        await query.answer("دسترسی ندارید.", show_alert=True)
-        return
-    approval = context.user_data.get("admin_agent_approval")
-    if not approval:
-        await query.answer("جلسه تایید نماینده منقضی شده است.", show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        return
-    approval["awaiting_custom"] = "credit"
-    await query.answer()
-    await query.edit_message_text(
-        "✍️ <b>مبلغ سقف اعتبار</b> را به تومان تایپ کنید:\n\nمثال: <code>30000000</code>",
-        parse_mode=ParseMode.HTML,
-    )
 
 
 async def agent_admin_custom_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3235,18 +3095,7 @@ async def admin_custom_text_handler(update: Update, context: ContextTypes.DEFAUL
     value = int(text)
     del approval["awaiting_custom"]
 
-    if awaiting == "credit":
-        approval["credit_limit"] = value
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=(
-                f"✅ سقف اعتبار: <b>{value:,}</b> تومان ثبت شد.\n\n"
-                "💵 <b>قیمت هر گیگابایت</b> را انتخاب کنید:"
-            ),
-            reply_markup=agent_admin_price_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-    elif awaiting == "price":
+    if awaiting == "price":
         approval["price_per_gb"] = value
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -3257,27 +3106,32 @@ async def admin_custom_text_handler(update: Update, context: ContextTypes.DEFAUL
             reply_markup=agent_admin_daily_test_keyboard(),
             parse_mode=ParseMode.HTML,
         )
-    else:  # daily_test
+    elif awaiting == "daily_test":
         approval["daily_test_limit"] = value
-        access_level = approval["access_level"]
-        credit_limit = int(approval.get("credit_limit") or 0)
         price_per_gb = int(approval.get("price_per_gb") or 0)
         req_id = approval["req_id"]
-        label_access = "باز (اعتباری)" if access_level == "open" else "بسته (نیازمند پرداخت)"
         summary = (
             f"📋 <b>خلاصه تنظیمات نماینده</b>\n\n"
             f"درخواست: <code>{req_id}</code>\n"
-            f"نوع دسترسی: <b>{label_access}</b>\n"
+            "نوع پرداخت: <b>کیف‌پولی</b>\n"
         )
-        if access_level == "open":
-            summary += f"سقف اعتبار: <b>{credit_limit:,}</b> تومان\n"
-        summary += f"قیمت هر گیگ: <b>{price_per_gb:,}</b> تومان\n"
+        summary += (
+            "قیمت‌گذاری: <b>بر اساس قیمتِ نماینده‌یِ بسته‌ها</b>\n"
+            if price_per_gb <= 0
+            else f"قیمت هر گیگ: <b>{price_per_gb:,}</b> تومان\n"
+        )
         summary += f"کانفیگ تست روزانه: <b>{value}</b> عدد\n\n"
         summary += "آیا تایید نهایی می‌کنید؟"
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=summary,
             reply_markup=agent_admin_confirm_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="جلسه تایید نماینده معتبر نیست. لطفاً از پیام مدیریت دوباره شروع کنید.",
             parse_mode=ParseMode.HTML,
         )
     raise ApplicationHandlerStop
@@ -3448,11 +3302,9 @@ def register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_custom_text_handler), group=-1)
     # Admin callbacks (before conversation handlers so they match regardless of state)
     app.add_handler(CallbackQueryHandler(topup_admin_callback, pattern=r"^topup_admin:(approve|reject):"))
-    app.add_handler(CallbackQueryHandler(agent_admin_callback, pattern=r"^agent_admin:(approve_open|approve_closed|reject):"))
-    app.add_handler(CallbackQueryHandler(agent_admin_custom_credit_start, pattern=r"^agent_admin:cl:custom$"))
+    app.add_handler(CallbackQueryHandler(agent_admin_callback, pattern=r"^agent_admin:(approve|approve_open|approve_closed|reject):"))
     app.add_handler(CallbackQueryHandler(agent_admin_custom_price_start, pattern=r"^agent_admin:pg:custom$"))
     app.add_handler(CallbackQueryHandler(agent_admin_custom_daily_test_start, pattern=r"^agent_admin:dt:custom$"))
-    app.add_handler(CallbackQueryHandler(agent_admin_set_credit, pattern=r"^agent_admin:cl:"))
     app.add_handler(CallbackQueryHandler(agent_admin_set_price, pattern=r"^agent_admin:pg:"))
     app.add_handler(CallbackQueryHandler(agent_admin_set_daily_test, pattern=r"^agent_admin:dt:"))
     app.add_handler(CallbackQueryHandler(agent_admin_final_confirm, pattern=r"^agent_admin:ok$"))

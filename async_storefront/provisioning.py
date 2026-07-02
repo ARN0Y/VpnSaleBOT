@@ -78,6 +78,22 @@ class ProvisioningService:
     async def minimum_purchase_gb(self) -> int:
         return _safe_positive_int(await self.db.get_setting("minimum_purchase_gb", "1"), 1)
 
+    async def _reserve_wallet_payment(self, conn, *, user_id: int, amount_toman: int, agent_row=None) -> PaymentMethod:
+        """Reserve money for any checkout by debiting the buyer's wallet.
+
+        Agent credit/open-access is intentionally not supported on this branch:
+        representatives keep their pricing/limits, but every paid action must be
+        backed by wallet balance. The returned payment method is only for
+        reporting; rollback always refunds the same wallet.
+        """
+        amount = int(amount_toman)
+        if amount <= 0:
+            raise ValueError("مبلغ فاکتور معتبر نیست.")
+        debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, amount)
+        if debit.rowcount != 1:
+            raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+        return PaymentMethod.AGENT_WALLET if agent_row else PaymentMethod.WALLET
+
     async def buy_with_wallet(
         self,
         *,
@@ -154,27 +170,12 @@ class ProvisioningService:
                 raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
             effective_unit_price = tx_effective_unit_price
 
-            if agent and self.db.normalize_agent_access_value(agent["access_level"]) == "open":
-                payment_method = PaymentMethod.AGENT_OPEN
-                credit_update = await conn.execute(
-                    """
-                    UPDATE agents
-                    SET credit_used_toman=credit_used_toman+?
-                    WHERE user_id=?
-                      AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
-                    """,
-                    (int(final_total), int(user_id), int(final_total)),
-                )
-                if credit_update.rowcount != 1:
-                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
-                await conn.execute(
-                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
-                )
-            else:
-                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
-                if debit.rowcount != 1:
-                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            payment_method = await self._reserve_wallet_payment(
+                conn,
+                user_id=user_id,
+                amount_toman=final_total,
+                agent_row=agent,
+            )
 
             await conn.execute(
                 """
@@ -221,18 +222,7 @@ class ProvisioningService:
                     await self.panel.delete_subscription(provision.sub_id)
                 except Exception:
                     pass
-            if payment_method == PaymentMethod.AGENT_OPEN:
-                async with self.db.transaction() as conn:
-                    await conn.execute(
-                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
-                        (int(final_total), int(user_id)),
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
-                    )
-            else:
-                await self.db.credit_wallet(user_id, final_total)
+            await self.db.credit_wallet(user_id, final_total)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -296,25 +286,12 @@ class ProvisioningService:
             if existing:
                 raise RuntimeError(f"duplicate purchase request: {existing['status']}")
             agent = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
-            if agent and self.db.normalize_agent_access_value(agent["access_level"]) == "open":
-                payment_method = PaymentMethod.AGENT_OPEN
-                credit_update = await conn.execute(
-                    """
-                    UPDATE agents SET credit_used_toman=credit_used_toman+?
-                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
-                    """,
-                    (int(final_total), int(user_id), int(final_total)),
-                )
-                if credit_update.rowcount != 1:
-                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
-                await conn.execute(
-                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
-                )
-            else:
-                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
-                if debit.rowcount != 1:
-                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            payment_method = await self._reserve_wallet_payment(
+                conn,
+                user_id=user_id,
+                amount_toman=final_total,
+                agent_row=agent,
+            )
             await conn.execute(
                 """
                 INSERT INTO orders
@@ -352,18 +329,7 @@ class ProvisioningService:
                     await self.panel.delete_subscription(provision.sub_id)
                 except Exception:
                     pass
-            if payment_method == PaymentMethod.AGENT_OPEN:
-                async with self.db.transaction() as conn:
-                    await conn.execute(
-                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
-                        (int(final_total), int(user_id)),
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
-                    )
-            else:
-                await self.db.credit_wallet(user_id, final_total)
+            await self.db.credit_wallet(user_id, final_total)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -557,27 +523,12 @@ class ProvisioningService:
                 raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً تمدید را دوباره ثبت کنید.")
             effective_unit_price = tx_effective_unit_price
 
-            if agent and self.db.normalize_agent_access_value(agent["access_level"]) == "open":
-                payment_method = PaymentMethod.AGENT_OPEN
-                credit_update = await conn.execute(
-                    """
-                    UPDATE agents
-                    SET credit_used_toman=credit_used_toman+?
-                    WHERE user_id=?
-                      AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
-                    """,
-                    (int(final_total), int(user_id), int(final_total)),
-                )
-                if credit_update.rowcount != 1:
-                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
-                await conn.execute(
-                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                    (int(user_id), int(final_total), "renewal_credit_reserve", order_id, now_ts()),
-                )
-            else:
-                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
-                if debit.rowcount != 1:
-                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            payment_method = await self._reserve_wallet_payment(
+                conn,
+                user_id=user_id,
+                amount_toman=final_total,
+                agent_row=agent,
+            )
 
             await conn.execute(
                 """
@@ -621,18 +572,7 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
             return detail.sub_link
         except Exception:
-            if payment_method == PaymentMethod.AGENT_OPEN:
-                async with self.db.transaction() as conn:
-                    await conn.execute(
-                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
-                        (int(final_total), int(user_id)),
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                        (int(user_id), -int(final_total), "renewal_credit_refund", f"{order_id}:refund", now_ts()),
-                    )
-            else:
-                await self.db.credit_wallet(user_id, final_total)
+            await self.db.credit_wallet(user_id, final_total)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -662,25 +602,16 @@ class ProvisioningService:
             if existing:
                 raise RuntimeError(f"duplicate purchase request: {existing['status']}")
             agent_row = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
-            if agent_row and self.db.normalize_agent_access_value(agent_row["access_level"]) == "open":
-                payment_method = PaymentMethod.AGENT_OPEN
-                credit_update = await conn.execute(
-                    """
-                    UPDATE agents SET credit_used_toman=credit_used_toman+?
-                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
-                    """,
-                    (int(final_total), int(user_id), int(final_total)),
-                )
-                if credit_update.rowcount != 1:
-                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
-                await conn.execute(
-                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
-                )
-            else:
-                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
-                if debit.rowcount != 1:
-                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            tx_final_total = package_price(pkg, agent_row)
+            if int(final_total) != int(tx_final_total):
+                raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
+            final_total = int(tx_final_total)
+            payment_method = await self._reserve_wallet_payment(
+                conn,
+                user_id=user_id,
+                amount_toman=final_total,
+                agent_row=agent_row,
+            )
             await conn.execute(
                 """
                 INSERT INTO orders
@@ -717,18 +648,7 @@ class ProvisioningService:
                     await self.panel.delete_subscription(provision.sub_id)
                 except Exception:
                     pass
-            if payment_method == PaymentMethod.AGENT_OPEN:
-                async with self.db.transaction() as conn:
-                    await conn.execute(
-                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
-                        (int(final_total), int(user_id)),
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
-                    )
-            else:
-                await self.db.credit_wallet(user_id, final_total)
+            await self.db.credit_wallet(user_id, final_total)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -767,25 +687,16 @@ class ProvisioningService:
             if existing:
                 raise RuntimeError(f"duplicate purchase request: {existing['status']}")
             agent_row = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
-            if agent_row and self.db.normalize_agent_access_value(agent_row["access_level"]) == "open":
-                payment_method = PaymentMethod.AGENT_OPEN
-                credit_update = await conn.execute(
-                    """
-                    UPDATE agents SET credit_used_toman=credit_used_toman+?
-                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
-                    """,
-                    (int(final_total), int(user_id), int(final_total)),
-                )
-                if credit_update.rowcount != 1:
-                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
-                await conn.execute(
-                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
-                )
-            else:
-                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
-                if debit.rowcount != 1:
-                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            tx_final_total = package_price(pkg, agent_row)
+            if int(final_total) != int(tx_final_total):
+                raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
+            final_total = int(tx_final_total)
+            payment_method = await self._reserve_wallet_payment(
+                conn,
+                user_id=user_id,
+                amount_toman=final_total,
+                agent_row=agent_row,
+            )
             await conn.execute(
                 """
                 INSERT INTO orders
@@ -862,18 +773,7 @@ class ProvisioningService:
                     await pg_client.delete_user(uname)
                 except Exception:
                     pass
-            if payment_method == PaymentMethod.AGENT_OPEN:
-                async with self.db.transaction() as conn:
-                    await conn.execute(
-                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
-                        (int(final_total), int(user_id)),
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
-                    )
-            else:
-                await self.db.credit_wallet(user_id, final_total)
+            await self.db.credit_wallet(user_id, final_total)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise

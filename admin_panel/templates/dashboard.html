@@ -3,7 +3,7 @@
 <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
   {% set cards = [
     ("کاربران", stats.users, "Users", "text-cyan-200", "bg-cyan-400/10 border-cyan-400/20", "M16 11a4 4 0 1 0-8 0 4 4 0 0 0 8 0Zm-12 9a8 8 0 0 1 16 0"),
-    ("نمایندگان", stats.agents, "باز " ~ stats.open_agents ~ " / بسته " ~ stats.closed_agents, "text-fuchsia-200", "bg-fuchsia-400/10 border-fuchsia-400/20", "M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7l8-4Z"),
+    ("نمایندگان", stats.agents, "پرداخت از کیف پول", "text-fuchsia-200", "bg-fuchsia-400/10 border-fuchsia-400/20", "M12 3l8 4v6c0 5-3.5 7.5-8 8-4.5-.5-8-3-8-8V7l8-4Z"),
     ("درآمد تاییدشده", toman(stats.revenue) ~ " تومان", "Revenue", "text-emerald-200", "bg-emerald-400/10 border-emerald-400/20", "M12 6v12M8 10h6a3 3 0 0 1 0 6H7M16 8H9a3 3 0 0 0 0 6h7"),
     ("حجم فروخته‌شده", stats.traffic_gb ~ " GB", "Traffic", "text-indigo-200", "bg-indigo-400/10 border-indigo-400/20", "M4 7h16M4 12h16M4 17h10"),
     ("شارژهای معلق", stats.pending_topups, "Topups", "text-amber-200", "bg-amber-400/10 border-amber-400/20", "M3 7h18v12H3V7Zm3-4h12v4H6V3Z"),

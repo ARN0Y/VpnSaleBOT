@@ -87,44 +87,34 @@ async def user_detail(
 async def update_agent(
     request: Request,
     user_id: int,
-    access_level: str = Form(...),
-    credit_limit_toman: int = Form(0),
-    credit_used_toman: int = Form(0),
     daily_test_limit: int = Form(0),
     price_per_gb: int = Form(0),
 ):
     database = db(request)
     old = await database.get_agent(user_id)
-    access = AgentAccess.OPEN if access_level == "open" else AgentAccess.CLOSED
-    limit = max(0, int(credit_limit_toman))
-    used = max(0, int(credit_used_toman))
     test_limit = max(0, int(daily_test_limit))
     price = max(0, int(price_per_gb))
     await database.upsert_agent(
         user_id=user_id,
         price_per_gb=price,
         created_by=0,
-        access_level=access,
-        credit_limit_toman=limit,
-        credit_used_toman=used,
+        access_level=AgentAccess.CLOSED,
+        credit_limit_toman=0,
+        credit_used_toman=0,
         daily_test_limit=test_limit,
         disabled=bool(old["disabled"]) if old else False,
     )
-    old_level = database.normalize_agent_access_value(old["access_level"]) if old else "normal"
-    old_limit = int(old["credit_limit_toman"] or 0) if old else 0
-    old_used = int(old["credit_used_toman"] or 0) if old else 0
     old_price = int(old["price_per_gb"] or 0) if old else 0
     old_test_limit = int(old["daily_test_limit"] or 0) if old and "daily_test_limit" in old.keys() else 0
-    if old_level != database.normalize_agent_access_value(access) or old_limit != limit or old_used != used or old_price != price or old_test_limit != test_limit:
-        label = "نماینده باز" if access == AgentAccess.OPEN else "نماینده بسته (نیاز به پرداخت)"
+    was_agent = old is not None
+    if not was_agent or old_price != price or old_test_limit != test_limit:
         price_label = f"{price:,} تومان" if price > 0 else "تعرفه عمومی"
         await notify_telegram_user(
             request,
             user_id,
-            f"✅ وضعیت نمایندگی شما به <b>{label}</b> تغییر کرد.\n"
-            f"اعتبار مصرف‌شده: <b>{used:,}</b> تومان\n"
-            f"سقف اعتبار: <b>{limit:,}</b> تومان\n"
-            f"تعرفه اختصاصی هر گیگ: <b>{price_label}</b>",
+            "✅ تنظیمات نمایندگی شما تغییر کرد.\n"
+            f"تعرفه اختصاصی هر گیگ: <b>{price_label}</b>\n"
+            "خریدها از کیف پول انجام می‌شود.",
         )
     return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
 

@@ -20,7 +20,6 @@ const RUNTIME_FIELDS: { key: string; label: string; hint?: string }[] = [
   { key: "crypto_address", label: "آدرس تتر" },
   { key: "support_id", label: "آیدی پشتیبانی", hint: "با @ ، مثل @YourSupport" },
   { key: "admin_user_ids", label: "ادمین‌ها", hint: "آیدی‌ها با کاما" },
-  { key: "default_agent_credit_limit_toman", label: "سقف اعتبار پیش‌فرض نماینده" },
   { key: "default_agent_price_per_gb", label: "قیمت پیش‌فرض نماینده" },
 ];
 const PANEL_FIELDS: { key: string; label: string; type?: string }[] = [

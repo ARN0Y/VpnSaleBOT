@@ -22,7 +22,7 @@ class AsyncDatabase:
 
     aiosqlite runs SQLite calls in a worker thread, so handlers do not block the
     asyncio loop. The explicit transaction lock prevents nested BEGIN IMMEDIATE
-    collisions and makes wallet/credit updates deterministic under load.
+    collisions and makes wallet updates deterministic under load.
     """
 
     def __init__(self, path: Path):
@@ -382,9 +382,9 @@ class AsyncDatabase:
 
     @staticmethod
     def normalize_agent_access_value(value: Any) -> str:
-        raw = str(value or "").strip().lower()
-        if raw in {"open", "agentaccess.open", "agentaccess_open", "agent_access.open"} or raw.endswith(".open"):
-            return "open"
+        # Legacy databases may still contain "open", but this branch is
+        # wallet-only for every representative. Keep the column for schema
+        # compatibility and normalize every agent access value to one mode.
         return "closed"
 
     async def normalize_agent_access_levels(self) -> None:
@@ -394,19 +394,8 @@ class AsyncDatabase:
             return
         await self.conn.execute(
             """
-            UPDATE agents
-            SET access_level='open'
-            WHERE lower(COALESCE(access_level,'')) IN ('open','agentaccess.open','agentaccess_open','agent_access.open')
-               OR lower(COALESCE(access_level,'')) LIKE '%.open'
-            """
-        )
-        await self.conn.execute(
-            """
-            UPDATE agents
-            SET access_level='closed'
-            WHERE lower(COALESCE(access_level,'')) IN ('closed','agentaccess.closed','agentaccess_closed','agent_access.closed')
-               OR lower(COALESCE(access_level,'')) LIKE '%.closed'
-               OR COALESCE(access_level,'')=''
+            UPDATE agents SET access_level='closed'
+            WHERE lower(COALESCE(access_level,'')) <> 'closed'
             """
         )
         self._access_levels_normalized = True
@@ -1052,6 +1041,11 @@ class AsyncDatabase:
         return balance
 
     async def credit_wallet(self, user_id: int, amount_toman: int) -> int:
+        amount = int(amount_toman)
+        if amount < 0:
+            raise ValueError("wallet credit amount must be non-negative")
+        if amount == 0:
+            return await self.get_wallet_balance(user_id)
         async with self.transaction() as conn:
             await conn.execute(
                 """
@@ -1061,7 +1055,7 @@ class AsyncDatabase:
                   balance_toman=wallets.balance_toman + excluded.balance_toman,
                   updated_at=excluded.updated_at
                 """,
-                (int(user_id), int(amount_toman), now_ts()),
+                (int(user_id), amount, now_ts()),
             )
             row = await self.fetchone("SELECT balance_toman FROM wallets WHERE user_id=?", (int(user_id),))
             return int(row["balance_toman"]) if row else 0
@@ -1072,13 +1066,16 @@ class AsyncDatabase:
             return cur.rowcount == 1
 
     async def try_debit_wallet_in_transaction(self, conn: aiosqlite.Connection, user_id: int, amount_toman: int) -> aiosqlite.Cursor:
+        amount = int(amount_toman)
+        if amount <= 0:
+            raise ValueError("wallet debit amount must be positive")
         return await conn.execute(
             """
             UPDATE wallets
             SET balance_toman=balance_toman-?, updated_at=?
             WHERE user_id=? AND balance_toman>=?
             """,
-            (int(amount_toman), now_ts(), int(user_id), int(amount_toman)),
+            (amount, now_ts(), int(user_id), amount),
         )
 
     async def create_order(
@@ -1436,6 +1433,9 @@ class AsyncDatabase:
         receipt_file_id: str | None = None,
         txid: str | None = None,
     ) -> None:
+        amount = int(amount_toman)
+        if amount <= 0:
+            raise ValueError("wallet top-up amount must be positive")
         await self.conn.execute(
             """
             INSERT INTO wallet_topups(topup_id,user_id,method,amount_toman,receipt_file_id,txid,status,created_at)
@@ -1445,7 +1445,7 @@ class AsyncDatabase:
                 topup_id,
                 int(user_id),
                 method,
-                int(amount_toman),
+                amount,
                 receipt_file_id,
                 txid,
                 now_ts(),
@@ -1493,8 +1493,8 @@ class AsyncDatabase:
         qty_expr = self._order_column_expr(order_columns, "qty", "1", "")
         users = await self.fetchone("SELECT COUNT(*) AS c FROM users")
         agents = await self.fetchone("SELECT COUNT(*) AS c FROM agents")
-        open_agents = await self.fetchone("SELECT COUNT(*) AS c FROM agents WHERE lower(COALESCE(access_level,''))='open' OR lower(COALESCE(access_level,'')) LIKE '%.open'")
-        closed_agents = await self.fetchone("SELECT COUNT(*) AS c FROM agents WHERE NOT (lower(COALESCE(access_level,''))='open' OR lower(COALESCE(access_level,'')) LIKE '%.open')")
+        open_agents = {"c": 0}
+        closed_agents = agents or {"c": 0}
         revenue = await self.fetchone(f"SELECT COALESCE(SUM({final_price_expr}),0) AS s FROM orders WHERE {status_expr}='approved'")
         traffic = await self.fetchone(f"SELECT COALESCE(SUM({gb_expr} * {qty_expr}),0) AS s FROM orders WHERE {status_expr}='approved'")
         legacy_revenue = await self.fetchone("SELECT COALESCE(SUM(legacy_total_spent_toman),0) AS s FROM users")
@@ -1533,12 +1533,8 @@ class AsyncDatabase:
               COALESCE(u.total_spent,0) + COALESCE(u.legacy_total_spent_toman,0) AS total_spent,
               u.disabled,
               COALESCE(w.balance_toman,0) AS wallet_balance,
-              CASE
-                WHEN lower(COALESCE(a.access_level,''))='open' OR lower(COALESCE(a.access_level,'')) LIKE '%.open' THEN 'open'
-                WHEN a.user_id IS NULL THEN NULL
-                ELSE 'closed'
-              END AS access_level,
-              a.credit_limit_toman, a.credit_used_toman
+              CASE WHEN a.user_id IS NULL THEN NULL ELSE 'closed' END AS access_level,
+              0 AS credit_limit_toman, 0 AS credit_used_toman
               , COALESCE((
                 SELECT SUM(COALESCE(o.gb,0) * COALESCE(o.qty,1))
                 FROM orders o
@@ -1571,12 +1567,8 @@ class AsyncDatabase:
               u.disabled_reason, u.disabled_at,
               COALESCE(w.balance_toman,0) AS wallet_balance,
               a.price_per_gb,
-              CASE
-                WHEN lower(COALESCE(a.access_level,''))='open' OR lower(COALESCE(a.access_level,'')) LIKE '%.open' THEN 'open'
-                WHEN a.user_id IS NULL THEN NULL
-                ELSE 'closed'
-              END AS access_level,
-              a.credit_limit_toman, a.credit_used_toman,
+              CASE WHEN a.user_id IS NULL THEN NULL ELSE 'closed' END AS access_level,
+              0 AS credit_limit_toman, 0 AS credit_used_toman,
               a.daily_gb_limit, a.monthly_gb_limit, a.daily_test_limit, a.disabled,
               COALESCE((
                 SELECT COUNT(*)
@@ -2007,52 +1999,34 @@ class AsyncDatabase:
         return [dict(row) for row in rows]
 
     async def approve_wallet_topup(self, topup_id: str):
-        """Approve a pending top-up. For OPEN (credit) agents the payment first
-        settles their outstanding credit debt (credit_used) — since they buy on
-        credit, not from the wallet — freeing credit to purchase again; any
-        excess goes to the wallet. Everyone else is credited to the wallet as
-        before. Returns a result dict on success, False otherwise."""
+        """Approve a pending top-up by crediting the user's wallet.
+
+        Representatives are wallet-only on this branch; credit debt is legacy
+        data and is not settled or modified during top-up approval.
+        """
         async with self.transaction() as conn:
             row = await self.fetchone("SELECT * FROM wallet_topups WHERE topup_id=?", (topup_id,))
             if not row or row["status"] != "pending":
                 return False
             user_id = int(row["user_id"])
             amount = int(row["amount_toman"])
-            agent = await self.fetchone(
-                "SELECT access_level, credit_used_toman FROM agents WHERE user_id=?", (user_id,)
+            if amount <= 0:
+                return False
+            await conn.execute(
+                """
+                INSERT INTO wallets(user_id,balance_toman,updated_at)
+                VALUES(?,?,?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                  balance_toman=wallets.balance_toman+excluded.balance_toman,
+                  updated_at=excluded.updated_at
+                """,
+                (user_id, amount, now_ts()),
             )
-            is_open = bool(agent) and self.normalize_agent_access_value(agent["access_level"]) == "open"
-            settled = 0
-            to_wallet = amount
-            if is_open:
-                debt = max(0, int(agent["credit_used_toman"] or 0))
-                settled = min(amount, debt)
-                if settled > 0:
-                    await conn.execute(
-                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
-                        (settled, user_id),
-                    )
-                    await conn.execute(
-                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
-                        (user_id, -settled, "credit_repay", f"topup:{topup_id}", now_ts()),
-                    )
-                to_wallet = amount - settled
-            if to_wallet > 0:
-                await conn.execute(
-                    """
-                    INSERT INTO wallets(user_id,balance_toman,updated_at)
-                    VALUES(?,?,?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                      balance_toman=wallets.balance_toman+excluded.balance_toman,
-                      updated_at=excluded.updated_at
-                    """,
-                    (user_id, int(to_wallet), now_ts()),
-                )
             await conn.execute(
                 "UPDATE wallet_topups SET status='approved', approved_at=? WHERE topup_id=?",
                 (now_ts(), topup_id),
             )
-            return {"ok": True, "amount": amount, "settled": settled, "to_wallet": to_wallet, "open_agent": is_open}
+            return {"ok": True, "amount": amount, "settled": 0, "to_wallet": amount, "open_agent": False}
 
     async def reject_wallet_topup(self, topup_id: str) -> bool:
         async with self.transaction() as conn:
@@ -2101,7 +2075,7 @@ class AsyncDatabase:
         daily_test_limit: int = 0,
         created_by: int = 0,
     ) -> dict[str, Any] | None:
-        access_value = self.normalize_agent_access_value(access_level)
+        access_value = AgentAccess.CLOSED.value
         async with self.transaction() as conn:
             row = await self.fetchone("SELECT * FROM agent_requests WHERE req_id=?", (str(req_id),))
             if not row or row["status"] != "pending":
@@ -2130,7 +2104,7 @@ class AsyncDatabase:
                     access_value,
                     now_ts(),
                     int(created_by),
-                    max(0, int(credit_limit_toman)),
+                    0,
                     0,
                     0,
                     0,
@@ -2146,7 +2120,7 @@ class AsyncDatabase:
             result.update(
                 {
                     "access_level": access_value,
-                    "credit_limit_toman": max(0, int(credit_limit_toman)),
+                    "credit_limit_toman": 0,
                     "price_per_gb": max(0, int(price_per_gb)),
                     "daily_test_limit": max(0, int(daily_test_limit)),
                 }
@@ -2325,8 +2299,8 @@ class AsyncDatabase:
         disabled: bool = False,
         credit_used_toman: int | None = None,
     ) -> None:
-        access_value = self.normalize_agent_access_value(access_level)
-        used_value = -1 if credit_used_toman is None else max(0, int(credit_used_toman))
+        access_value = AgentAccess.CLOSED.value
+        used_value = 0
         await self.conn.execute(
             """
             INSERT INTO agents(
@@ -2354,7 +2328,7 @@ class AsyncDatabase:
                 access_value,
                 now_ts(),
                 int(created_by),
-                int(credit_limit_toman),
+                0,
                 used_value,
                 int(daily_gb_limit),
                 int(monthly_gb_limit),
@@ -2363,6 +2337,35 @@ class AsyncDatabase:
                 int(disabled),
             ),
         )
+
+    async def reset_agent_credit_state(self) -> dict[str, int]:
+        """Force every representative into wallet-only mode and zero legacy credit."""
+        async with self.transaction() as conn:
+            before = await self.fetchone(
+                """
+                SELECT
+                  COUNT(*) AS agents,
+                  COALESCE(SUM(CASE WHEN lower(COALESCE(access_level,''))='open'
+                       OR lower(COALESCE(access_level,'')) LIKE '%.open' THEN 1 ELSE 0 END),0) AS open_agents,
+                  COALESCE(SUM(credit_limit_toman),0) AS credit_limit_toman,
+                  COALESCE(SUM(credit_used_toman),0) AS credit_used_toman
+                FROM agents
+                """
+            )
+            await conn.execute(
+                """
+                UPDATE agents
+                SET access_level='closed',
+                    credit_limit_toman=0,
+                    credit_used_toman=0
+                """
+            )
+            return {
+                "agents": int(before["agents"] if before else 0),
+                "open_agents": int(before["open_agents"] if before else 0),
+                "credit_limit_toman": int(before["credit_limit_toman"] if before else 0),
+                "credit_used_toman": int(before["credit_used_toman"] if before else 0),
+            }
 
     async def create_native_backup(self, destination: Path) -> Path:
         destination = Path(destination)

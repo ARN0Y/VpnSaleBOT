@@ -21,19 +21,14 @@
     {% endif %}
     {% if item.status == 'pending' %}
     <div class="mt-5 grid gap-3 rounded-xl border border-white/10 bg-slate-950/35 p-4">
-      <form class="grid gap-3 lg:grid-cols-4" method="post" action="/admin/agent-requests/{{ item.req_id }}/approve">
-        <label class="text-sm text-slate-300">سطح دسترسی
-          <select name="access_level" class="input-base mt-2">
-            <option value="closed">نیازمند پرداخت</option>
-            <option value="open">دسترسی باز</option>
-          </select>
-        </label>
-        <label class="text-sm text-slate-300">سقف اعتبار
-          <input name="credit_limit_toman" type="number" min="0" value="{{ default_credit or 0 }}" class="input-base mt-2">
-        </label>
+      <form class="grid gap-3 lg:grid-cols-3" method="post" action="/admin/agent-requests/{{ item.req_id }}/approve">
         <label class="text-sm text-slate-300">تعرفه اختصاصی
           <input name="price_per_gb" type="number" min="0" value="{{ default_price or 0 }}" class="input-base mt-2">
+          <span class="mt-1 block text-xs text-slate-500">عدد 0 یعنی قیمت نماینده از بسته‌ها/تعرفه عمومی خوانده شود.</span>
         </label>
+        <div class="rounded-xl border border-cyan-400/20 bg-cyan-400/10 p-3 text-sm text-cyan-100">
+          خرید نماینده‌ها فقط از کیف پول انجام می‌شود.
+        </div>
         <div class="flex items-end">
           <button class="btn-success w-full">تایید و ساخت نماینده</button>
         </div>

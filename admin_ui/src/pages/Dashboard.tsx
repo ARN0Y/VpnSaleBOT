@@ -83,7 +83,7 @@ export function Dashboard() {
         <Kpi icon={TrendingUp} label="درآمد کل" value={`${toman(m.revenue)}`} sub="تومان" />
         <Kpi icon={UsersIcon} label="کاربران" value={toman(m.users)} sub={`${toman(m.agents)} نماینده`} />
         <Kpi icon={Gauge} label="ترافیک فروخته‌شده" value={toman(m.traffic_gb)} sub="گیگابایت" />
-        <Kpi icon={Handshake} label="نماینده‌ها" value={toman(m.agents)} sub={`باز ${toman(m.open_agents)} • بسته ${toman(m.closed_agents)}`} />
+        <Kpi icon={Handshake} label="نماینده‌ها" value={toman(m.agents)} sub="پرداخت از کیف پول" />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-3">

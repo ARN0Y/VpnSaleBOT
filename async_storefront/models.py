@@ -42,10 +42,9 @@ class AgentPolicy:
         except Exception:
             permissions = frozenset({"buy", "test"})
 
-        access = str(row["access_level"] or AgentAccess.CLOSED).lower()
         return cls(
             user_id=int(row["user_id"]),
-            access_level=AgentAccess.OPEN if access == AgentAccess.OPEN else AgentAccess.CLOSED,
+            access_level=AgentAccess.CLOSED,
             price_per_gb=int(row["price_per_gb"] or 0),
             credit_limit_toman=int(row["credit_limit_toman"] or 0),
             credit_used_toman=int(row["credit_used_toman"] or 0),

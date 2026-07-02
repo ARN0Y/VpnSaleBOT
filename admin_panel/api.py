@@ -199,19 +199,7 @@ async def approve_topup(request: Request, topup_id: str):
 
 
 def _topup_approved_message(result) -> str:
-    """Build the user-facing approval message. Open agents see their settled
-    credit debt; everyone else sees the wallet top-up."""
     amount = int((result or {}).get("amount") or 0)
-    if isinstance(result, dict) and result.get("open_agent"):
-        settled = int(result.get("settled") or 0)
-        to_wallet = int(result.get("to_wallet") or 0)
-        lines = [f"🎉 پرداخت شما تایید شد! مبلغ: <b>{amount:,}</b> تومان"]
-        if settled > 0:
-            lines.append(f"✅ از بدهی اعتبار شما تسویه شد: <b>{settled:,}</b> تومان")
-        if to_wallet > 0:
-            lines.append(f"💰 به کیف پول شما اضافه شد: <b>{to_wallet:,}</b> تومان")
-        lines.append("اکنون می‌توانید دوباره خرید کنید.")
-        return "\n".join(lines)
     return f"🎉 شارژ کیف پول شما تایید شد!\nمبلغ: <b>{amount:,}</b> تومان"
 
 
@@ -232,24 +220,21 @@ async def reject_topup(request: Request, topup_id: str):
 @router.post("/agent-requests/{req_id}/approve")
 async def approve_agent_request(request: Request, req_id: str):
     body = await _json_body(request)
-    access = AgentAccess.OPEN if str(body.get("access_level")) == "open" else AgentAccess.CLOSED
     database = db(request)
     result = await database.approve_agent_request_as_agent(
         req_id=req_id,
-        access_level=access,
-        credit_limit_toman=max(0, int(body.get("credit_limit_toman") or 0)),
+        access_level=AgentAccess.CLOSED,
+        credit_limit_toman=0,
         price_per_gb=max(0, int(body.get("price_per_gb") or 0)),
         created_by=0,
     )
     if result:
-        label = "نماینده با دسترسی باز" if access == AgentAccess.OPEN else "نماینده نیازمند پرداخت"
         await notify_telegram_user(
             request,
             int(result["user_id"]),
             (
                 f"✅ درخواست نمایندگی شما تایید شد.\n"
-                f"سطح جدید: <b>{label}</b>\n"
-                f"سقف اعتبار: <b>{int(result['credit_limit_toman']):,}</b> تومان"
+                "از این به بعد خریدهای شما با تعرفه نمایندگی و از کیف پول انجام می‌شود."
             ),
         )
     return {"ok": bool(result)}
@@ -391,22 +376,20 @@ async def update_agent(request: Request, user_id: int):
     body = await _json_body(request)
     database = db(request)
     old = await database.get_agent(user_id)
-    access = AgentAccess.OPEN if str(body.get("access_level")) == "open" else AgentAccess.CLOSED
     await database.upsert_agent(
         user_id=user_id,
         price_per_gb=max(0, int(body.get("price_per_gb") or 0)),
         created_by=0,
-        access_level=access,
-        credit_limit_toman=max(0, int(body.get("credit_limit_toman") or 0)),
-        credit_used_toman=max(0, int(body.get("credit_used_toman") or 0)),
+        access_level=AgentAccess.CLOSED,
+        credit_limit_toman=0,
+        credit_used_toman=0,
         daily_test_limit=max(0, int(body.get("daily_test_limit") or 0)),
         disabled=bool(old["disabled"]) if old else False,
     )
-    label = "نماینده باز" if access == AgentAccess.OPEN else "نماینده بسته (نیاز به پرداخت)"
     await notify_telegram_user(
         request,
         user_id,
-        f"✅ وضعیت نمایندگی شما به <b>{label}</b> به‌روزرسانی شد.",
+        "✅ تنظیمات نمایندگی شما به‌روزرسانی شد. خریدها از کیف پول انجام می‌شود.",
     )
     return {"ok": True}
 
