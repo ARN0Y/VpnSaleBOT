@@ -44,10 +44,11 @@ BUY_GB, BUY_CUSTOM_GB, BUY_QTY, BUY_NAME_MODE, BUY_NAME_INPUT, BUY_CONFIRM = ran
 TOPUP_AMOUNT, TOPUP_CUSTOM_AMOUNT, TOPUP_AMOUNT_CONFIRM, TOPUP_C2C_PHOTO, TOPUP_CRYPTO_TXID = range(10, 15)
 AGENT_TEXT, AGENT_CONFIRM = range(30, 32)
 RENEW_SELECT, RENEW_SEARCH, RENEW_GB, RENEW_CUSTOM_GB, RENEW_CONFIRM = range(40, 45)
+PKG_SELECT, PKG_NAME_MODE, PKG_NAME_INPUT, PKG_CONFIRM = range(60, 64)
 
 FLOW_PROMPT_KEY = "_flow_prompt_message_id"
 HOME_MESSAGE_KEY = "_home_message_id"
-FLOW_STATE_KEYS = {"checkout", "topup", "agent_request", "renewal", FLOW_PROMPT_KEY}
+FLOW_STATE_KEYS = {"checkout", "pkg", "topup", "agent_request", "renewal", FLOW_PROMPT_KEY}
 
 BTN_BUY = "⚡ خرید سرویس پرسرعت"
 BTN_RENEW = "🔄 تمدید سرویس"
@@ -432,7 +433,7 @@ async def show_packages(update: Update, context: ContextTypes.DEFAULT_TYPE, pane
     await new_flow_card(update, context, text, InlineKeyboardMarkup(rows))
 
 
-async def pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await _answer_query(query)
     db: AsyncDatabase = context.application.bot_data["db"]
@@ -440,35 +441,146 @@ async def pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         _, _, panel_key, idx_s = query.data.split(":", 3)
         idx = int(idx_s)
     except Exception:
-        return
+        return ConversationHandler.END
     packages = await get_panel_packages(db, panel_key)
     if idx < 0 or idx >= len(packages):
+        clear_flow_state(context)
         await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.", back_keyboard())
-        return
+        return ConversationHandler.END
     pkg = packages[idx]
     agent = await db.get_agent(update.effective_user.id)
     price = package_price(pkg, agent)
-    context.user_data["pkg"] = {"panel": panel_key, "idx": idx, "idem": f"pkg-{update.effective_user.id}-{secrets.token_hex(8)}"}
+    context.user_data["pkg"] = {
+        "panel": panel_key,
+        "idx": idx,
+        "idem": f"pkg-{update.effective_user.id}-{secrets.token_hex(8)}",
+        "client_name": "",
+        "awaiting_name": False,
+    }
     text = (
-        "🧾 <b>تایید خرید بسته</b>\n"
+        "🛒 <b>نام کانفیگ بسته</b>\n"
         "<code>─────────────────────</code>\n"
         f"🎁 بسته: <b>{html.escape(str(pkg['title']))}</b>\n"
         f"{_package_volume_label(pkg)}\n"
         f"{_package_duration_label(pkg)}\n"
         "<code>─────────────────────</code>\n"
         f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
+        "می‌توانید نام کانفیگ را خودتان مشخص کنید یا اجازه بدهید ربات نام رندوم بسازد."
+    )
+    await edit_flow_query(update, context, text, package_name_keyboard(panel_key, idx))
+    return PKG_NAME_MODE
+
+
+def _set_pkg_context_from_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int] | None:
+    query = update.callback_query
+    try:
+        _, _, _, panel_key, idx_s = (query.data or "").split(":", 4)
+        idx = int(idx_s)
+    except Exception:
+        return None
+    data = context.user_data.setdefault("pkg", {})
+    data.update(panel=panel_key, idx=idx)
+    data.setdefault("idem", f"pkg-{update.effective_user.id}-{secrets.token_hex(8)}")
+    return panel_key, idx
+
+
+async def build_package_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    data = context.user_data.get("pkg") or {}
+    try:
+        panel_key = str(data.get("panel") or "")
+        idx = int(data.get("idx"))
+    except Exception:
+        clear_flow_state(context)
+        if update.callback_query:
+            await edit_text(update.callback_query, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+        else:
+            await send_flow_prompt(update, context, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+
+    packages = await get_panel_packages(db, panel_key)
+    if idx < 0 or idx >= len(packages):
+        clear_flow_state(context)
+        text = "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید."
+        if update.callback_query:
+            await edit_text(update.callback_query, text, back_keyboard())
+        else:
+            await send_flow_prompt(update, context, text, back_keyboard())
+        return ConversationHandler.END
+
+    pkg = packages[idx]
+    agent = await db.get_agent(update.effective_user.id)
+    price = package_price(pkg, agent)
+    client_name = str(data.get("client_name") or "").strip()
+    data["awaiting_name"] = False
+    text = (
+        "🧾 <b>تایید خرید بسته</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"🎁 بسته: <b>{html.escape(str(pkg['title']))}</b>\n"
+        f"{_package_volume_label(pkg)}\n"
+        f"{_package_duration_label(pkg)}\n"
+        f"🪪 نام کانفیگ: <b>{html.escape(client_name) if client_name else '🎲 رندوم'}</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
         "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
     )
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{panel_key}:{idx}")],
-            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
-        ]
+    if update.callback_query:
+        await edit_flow_query(update, context, text, package_confirm_keyboard(panel_key, idx))
+    else:
+        await send_flow_prompt(update, context, text, package_confirm_keyboard(panel_key, idx))
+    return PKG_CONFIRM
+
+
+async def pkg_name_random(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    if _set_pkg_context_from_name_callback(update, context) is None:
+        await edit_text(update.callback_query, "⚠️ عملیات نامعتبر است. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+    context.user_data.setdefault("pkg", {})["client_name"] = ""
+    context.user_data.setdefault("pkg", {})["awaiting_name"] = False
+    return await build_package_invoice(update, context)
+
+
+async def pkg_name_custom_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if _set_pkg_context_from_name_callback(update, context) is None:
+        await edit_text(update.callback_query, "⚠️ عملیات نامعتبر است. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+    context.user_data.setdefault("pkg", {})["awaiting_name"] = True
+    await edit_flow_query(
+        update,
+        context,
+        "✍️ <b>نام دلخواه کانفیگ</b>\n\n"
+        "یک نام کوتاه انگلیسی/عددی بفرستید.\n"
+        "مثال: <code>ali-office</code>",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
     )
-    await edit_flow_query(update, context, text, kb)
+    return PKG_NAME_INPUT
 
 
-async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def pkg_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = (update.effective_message.text or "").strip()
+    if not NAME_RE.match(name):
+        await send_flow_prompt(
+            update,
+            context,
+            "⚠️ نام معتبر نیست.\n\n"
+            "از ۲ تا ۳۲ کاراکتر انگلیسی/عددی و علامت‌های <code>- _ .</code> استفاده کنید.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
+        )
+        return PKG_NAME_INPUT
+    context.user_data.setdefault("pkg", {})["client_name"] = name
+    context.user_data.setdefault("pkg", {})["awaiting_name"] = False
+    return await build_package_invoice(update, context)
+
+
+async def pkg_name_input_standalone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.user_data.get("pkg") or {}
+    if not data.get("awaiting_name"):
+        return
+    await pkg_name_input(update, context)
+
+
+async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
@@ -476,33 +588,39 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _, _, panel_key, idx_s = query.data.split(":", 3)
         idx = int(idx_s)
     except Exception:
-        return
+        return ConversationHandler.END
     if not await audience_sales_is_open(db, update.effective_user.id):
+        clear_flow_state(context)
         await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
-        return
+        return ConversationHandler.END
     if panel_key == "1" and not await panel1_enabled(db):
+        clear_flow_state(context)
         await edit_text(query, "🌐 فروش از این سرور موقتاً غیرفعال است.", back_keyboard())
-        return
+        return ConversationHandler.END
     packages = await get_panel_packages(db, panel_key)
     if idx < 0 or idx >= len(packages):
+        clear_flow_state(context)
         await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
-        return
+        return ConversationHandler.END
     pkg = packages[idx]
     qr: QRService = context.application.bot_data["qr"]
     data = context.user_data.get("pkg") or {}
     idem = str(data.get("idem") or query.id)
+    client_name = str(data.get("client_name") or "").strip()
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
         if panel_key == "pg":
             pg_client = await get_pg_client(context)
             if pg_client is None:
+                clear_flow_state(context)
                 await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
-                return
+                return ConversationHandler.END
             group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
             group_ids = await pg_client.resolve_group_ids([group])
             if not group_ids:
+                clear_flow_state(context)
                 await edit_text(query, "گروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
-                return
+                return ConversationHandler.END
             provisioning = context.application.bot_data["provisioning"]
             links = await provisioning.process_pg_package_purchase(
                 pg_client=pg_client,
@@ -510,28 +628,32 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 user_id=update.effective_user.id,
                 pkg=pkg,
                 days=int(pkg.get("days") or 0),
+                client_name=client_name,
                 idempotency_key=idem,
             )
         else:
             provisioning = await _provisioning_for_panel(context, panel_key)
             if provisioning is None:
+                clear_flow_state(context)
                 await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
-                return
-            links = await provisioning.process_package_purchase(user_id=update.effective_user.id, pkg=pkg, idempotency_key=idem)
+                return ConversationHandler.END
+            links = await provisioning.process_package_purchase(user_id=update.effective_user.id, pkg=pkg, client_name=client_name, idempotency_key=idem)
     except ValueError as exc:
+        clear_flow_state(context)
         await edit_text(
             query,
             f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
             InlineKeyboardMarkup([[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")], [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")]]),
         )
-        return
+        return ConversationHandler.END
     except Exception as exc:
         if "duplicate purchase request" in str(exc):
             await _answer_query(query, "این خرید در حال پردازش است…")
-            return
+            return ConversationHandler.END
         LOG.exception("package purchase failed user_id=%s", update.effective_user.id)
+        clear_flow_state(context)
         await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
-        return
+        return ConversationHandler.END
 
     if panel_key != "pg" and str(pkg.get("kind")) == "unlimited":
         uris: list[str] = []
@@ -548,7 +670,8 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "از بخش «اشتراک‌های من» می‌توانید کانفیگ را ببینید یا با پشتیبانی تماس بگیرید.",
                 back_keyboard(),
             )
-            return
+            clear_flow_state(context)
+            return ConversationHandler.END
         await edit_text(query, "✅ <b>بسته با موفقیت فعال شد.</b>\n\nلینک کانفیگ در پیام بعدی ارسال می‌شود.")
         for i, uri in enumerate(uris):
             png = await qr.png(uri)
@@ -565,7 +688,8 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 parse_mode=ParseMode.HTML,
                 reply_markup=back_keyboard() if i == len(uris) - 1 else None,
             )
-        return
+        clear_flow_state(context)
+        return ConversationHandler.END
 
     await edit_text(query, "✅ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
     for i, sub_link in enumerate(links):
@@ -587,6 +711,8 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             parse_mode=ParseMode.HTML,
             reply_markup=back_keyboard() if i == len(links) - 1 else None,
         )
+    clear_flow_state(context)
+    return ConversationHandler.END
 
 
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
@@ -645,6 +771,22 @@ def config_name_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("✍️ نام دلخواه", callback_data="buy:name:custom")],
             [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
         ]
+    )
+
+
+def package_name_keyboard(panel_key: str, idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🎲 نام رندوم", callback_data=f"pkg:name:random:{panel_key}:{idx}")],
+            [InlineKeyboardButton("✍️ نام دلخواه", callback_data=f"pkg:name:custom:{panel_key}:{idx}")],
+            [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
+        ]
+    )
+
+
+def package_confirm_keyboard(panel_key: str, idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{panel_key}:{idx}"), InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]
     )
 
 
@@ -1196,7 +1338,7 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         clear_flow_state(context)
         labels = await resolve_nav_labels(db)
         await show_packages(update, context, "pg", labels["buy"])
-        return ConversationHandler.END
+        return PKG_SELECT
     if not await panel1_enabled(db):
         await new_flow_card(
             update,
@@ -1216,7 +1358,7 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         clear_flow_state(context)
         labels = await resolve_nav_labels(db)
         await show_packages(update, context, "1", labels["buy"])
-        return ConversationHandler.END
+        return PKG_SELECT
     min_gb = await minimum_purchase_gb(db)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
@@ -1246,7 +1388,7 @@ async def buy2_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
         clear_flow_state(context)
         await show_packages(update, context, "2", label)
-        return ConversationHandler.END
+        return PKG_SELECT
     min_gb = await minimum_purchase_gb(db)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
@@ -3193,6 +3335,27 @@ def build_main_conversation() -> ConversationHandler:
             CallbackQueryHandler(buy_confirm, pattern=r"^buy:confirm$"),
             CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
         ],
+        PKG_SELECT: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:(1|2|pg):\d+$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
+        PKG_NAME_MODE: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(pkg_name_random, pattern=r"^pkg:name:random:(1|2|pg):\d+$"),
+            CallbackQueryHandler(pkg_name_custom_start, pattern=r"^pkg:name:custom:(1|2|pg):\d+$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
+        PKG_NAME_INPUT: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, pkg_name_input),
+        ],
+        PKG_CONFIRM: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:(1|2|pg):\d+$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
         RENEW_SELECT: [
             MessageHandler(_nav_filter, handle_nav_btn),
             CallbackQueryHandler(renew_page, pattern=r"^renew:page:\d+$"),
@@ -3311,6 +3474,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(agent_admin_flow_cancel, pattern=r"^agent_admin:cancel$"))
     # Merged conversation handler for all user flows
     app.add_handler(build_main_conversation())
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pkg_name_input_standalone))
     # Standalone menu callbacks (outside conversation)
     app.add_handler(CallbackQueryHandler(send_main_menu, pattern=r"^menu:main$"))
     app.add_handler(CallbackQueryHandler(account_info, pattern=r"^menu:account$"))
@@ -3322,6 +3486,8 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
     app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
     app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:(1|2|pg):\d+$"))
+    app.add_handler(CallbackQueryHandler(pkg_name_random, pattern=r"^pkg:name:random:(1|2|pg):\d+$"))
+    app.add_handler(CallbackQueryHandler(pkg_name_custom_start, pattern=r"^pkg:name:custom:(1|2|pg):\d+$"))
     app.add_handler(CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:(1|2|pg):\d+$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))

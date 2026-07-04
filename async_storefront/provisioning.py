@@ -577,7 +577,14 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
-    async def process_package_purchase(self, *, user_id: int, pkg: dict, idempotency_key: str | None = None) -> list[str]:
+    async def process_package_purchase(
+        self,
+        *,
+        user_id: int,
+        pkg: dict,
+        client_name: str = "",
+        idempotency_key: str | None = None,
+    ) -> list[str]:
         """Buy a per-panel package (volume or fair-usage 'unlimited') on THIS
         provisioning instance's panel. Charges the audience-correct price, sets
         the package's duration as the config expiry, and (for unlimited) caps
@@ -623,7 +630,7 @@ class ProvisioningService:
                     order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
                     int(final_total), 0, int(final_total), now_ts(),
                     payment_method.value, ("infinite" if kind == "unlimited" else "purchase"), None,
-                    (str(pkg.get("title") or "").strip()[:64] or None),
+                    ((client_name or str(pkg.get("title") or "")).strip()[:64] or None),
                 ),
             )
             await conn.execute(
@@ -634,7 +641,7 @@ class ProvisioningService:
         provisions: list = []
         try:
             expiry_ms = (now_ts() + days * 86400) * 1000 if days > 0 else 0
-            provisions = await self.panel.add_subscriptions(user_id=user_id, gb=cap_gb, qty=1, expiry_ms=expiry_ms)
+            provisions = await self.panel.add_subscriptions(user_id=user_id, gb=cap_gb, qty=1, preferred_name=client_name, expiry_ms=expiry_ms)
             await self.db.insert_subscriptions(provisions, order_id=order_id, is_infinite=(kind == "unlimited"))
             approved = await self.db.approve_order(order_id)
             if not approved:
@@ -708,7 +715,7 @@ class ProvisioningService:
                     order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
                     int(final_total), 0, int(final_total), now_ts(),
                     payment_method.value, ("infinite" if kind == "unlimited" else "purchase"), None,
-                    (str(pkg.get("title") or "").strip()[:64] or None),
+                    ((client_name or str(pkg.get("title") or "")).strip()[:64] or None),
                 ),
             )
             await conn.execute(
