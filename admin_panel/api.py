@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
+from async_storefront.provisioning import PG_INBOUND_SENTINEL
 
 from .auth import COOKIE_NAME, current_admin_username, csrf_token, sign_session
 from .routers.common import db, notify_telegram_user, panel
@@ -288,8 +289,28 @@ async def set_wallet(request: Request, user_id: int):
     return {"ok": True, "balance": balance}
 
 
+async def _is_pg_sub(database, sub_id: str) -> bool:
+    """True when this sub lives on PasarGuard (inbound_id sentinel) and so must
+    not be driven through the 3x-ui panel client."""
+    row = await database.admin_subscription_detail(sub_id)
+    return bool(row) and int(row.get("inbound_id") or 0) == PG_INBOUND_SENTINEL
+
+
+def _pg_managed_response() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": "pasarguard_managed",
+            "message": "این سرویس روی سرور PasarGuard است و از این بخش قابل مدیریت نیست؛ از بخش مدیریت PasarGuard اقدام کنید.",
+        },
+        status_code=409,
+    )
+
+
 @router.post("/subscriptions/{sub_id}/enabled")
 async def set_subscription_enabled(request: Request, sub_id: str):
+    if await _is_pg_sub(db(request), sub_id):
+        return _pg_managed_response()
     body = await _json_body(request)
     enabled = bool(body.get("enabled"))
     await panel(request).set_enabled(sub_id, enabled)
@@ -309,6 +330,8 @@ async def subscription_detail(request: Request, sub_id: str):
 
 @router.post("/subscriptions/{sub_id}/sync")
 async def sync_subscription(request: Request, sub_id: str):
+    if await _is_pg_sub(db(request), sub_id):
+        return _pg_managed_response()
     detail = await panel(request).find_subscription(sub_id, use_cache=False)
     if detail:
         await db(request).update_subscription_panel_snapshot(detail)
@@ -317,6 +340,8 @@ async def sync_subscription(request: Request, sub_id: str):
 
 @router.post("/subscriptions/{sub_id}/volume")
 async def set_subscription_volume(request: Request, sub_id: str):
+    if await _is_pg_sub(db(request), sub_id):
+        return _pg_managed_response()
     body = await _json_body(request)
     detail = await panel(request).set_total_volume(sub_id, max(0, int(body.get("total_gb") or 0)))
     await db(request).update_subscription_panel_snapshot(detail)
