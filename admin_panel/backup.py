@@ -60,14 +60,20 @@ def _tehran_now_label() -> str:
     return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y/%m/%d - %H:%M:%S")
 
 
-async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> None:
+async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> bool:
+    """Deliver the backup archive to Telegram. Returns True when delivered,
+    False when delivery is not configured (missing token / chat id) — a missing
+    destination is NOT a backup failure, so the caller keeps the local archive
+    instead of discarding it. Genuine send errors still raise."""
     db: AsyncDatabase = app.state.db
     token = str(getattr(app.state, "bot_token", "") or "").strip()
     chat_id = str(await db.get_setting("backup_telegram_chat_id", "") or "").strip()
-    if not token:
-        raise RuntimeError("BOT_TOKEN is not configured; cannot send backup to Telegram")
-    if not chat_id:
-        raise RuntimeError("backup_telegram_chat_id is not configured")
+    if not token or not chat_id:
+        LOG.warning(
+            "backup Telegram delivery skipped: %s not configured",
+            "BOT_TOKEN" if not token else "backup_telegram_chat_id",
+        )
+        return False
 
     archive = Path(result.archive_path)
     if not archive.exists():
@@ -106,6 +112,23 @@ async def send_backup_to_telegram(app, result: BackupResult, *, source: str) -> 
                 files={"document": (archive.name, handle, "application/zip")},
             )
         response.raise_for_status()
+    return True
+
+
+def _prune_local_backups(backup_dir: Path, *, keep: int = 3) -> None:
+    """Keep only the newest ``keep`` local backup archives so undelivered
+    backups don't accumulate and fill the disk."""
+    try:
+        files = sorted(
+            (p for p in Path(backup_dir).glob("*.zip") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for path in files[keep:]:
+            with contextlib.suppress(Exception):
+                path.unlink(missing_ok=True)
+    except Exception:
+        LOG.exception("failed to prune local backups in %s", backup_dir)
 
 
 async def _json_bytes(payload: Any) -> bytes:
@@ -287,6 +310,7 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
 
     await db.set_setting("backup_last_status", "running")
     result: BackupResult | None = None
+    # Phase 1 — CREATING the archive is the only fatal step.
     try:
         result = await create_full_backup(
             db=db,
@@ -296,21 +320,42 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
             include_xui=include_xui,
             xui_timeout_seconds=xui_timeout_seconds,
         )
-        await send_backup_to_telegram(app, result, source=source)
     except Exception as exc:
-        LOG.exception("backup failed source=%s", source)
+        LOG.exception("backup creation failed source=%s", source)
         await db.set_setting("backup_last_status", "failed")
         await db.set_setting("backup_last_error", str(exc)[:1000])
         if result is not None:
             with contextlib.suppress(Exception):
                 Path(result.archive_path).unlink(missing_ok=True)
         raise
-    await db.set_setting("backup_last_status", "partial" if result.errors else "ok")
-    await db.set_setting("backup_last_error", "\n".join(result.errors)[:1000])
+
+    # Phase 2 — DELIVERY is best-effort: a missing/failed Telegram send must
+    # never discard the backup or fail the whole run (that previously deleted
+    # every backup and spammed errors each minute when no chat id was set).
+    delivered = False
+    delivery_error = ""
+    try:
+        delivered = await send_backup_to_telegram(app, result, source=source)
+    except Exception as exc:
+        delivery_error = str(exc)
+        LOG.warning("backup telegram delivery failed source=%s: %s", source, exc)
+
     await db.set_setting("backup_last_run_ts", str(now_ts()))
-    await db.set_setting("backup_last_file", f"sent:{result.archive_path.name}")
-    with contextlib.suppress(Exception):
-        Path(result.archive_path).unlink(missing_ok=True)
+    base_errs = list(result.errors)
+    if delivered:
+        await db.set_setting("backup_last_status", "partial" if base_errs else "ok")
+        await db.set_setting("backup_last_error", "\n".join(base_errs)[:1000])
+        await db.set_setting("backup_last_file", f"sent:{result.archive_path.name}")
+        with contextlib.suppress(Exception):
+            Path(result.archive_path).unlink(missing_ok=True)
+    else:
+        # Not delivered → keep the archive on disk as the backup of record and
+        # prune old local copies so they can't fill the disk.
+        note = delivery_error or "ارسال به تلگرام انجام نشد (backup_telegram_chat_id تنظیم نشده است)"
+        await db.set_setting("backup_last_status", "local")
+        await db.set_setting("backup_last_error", "\n".join([note, *base_errs])[:1000])
+        await db.set_setting("backup_last_file", f"local:{result.archive_path.name}")
+        _prune_local_backups(backup_dir, keep=3)
     return result
 
 
