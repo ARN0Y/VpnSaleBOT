@@ -2467,20 +2467,25 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     qr: QRService = context.application.bot_data["qr"]
     idem_key = query.id if query else f"test-{update.effective_user.id}-{update.effective_message.message_id}"
     try:
+        # When PasarGuard is the primary backend, BOTH the agent test and the
+        # free test are created there (same as real sales). Resolve the target
+        # group once and hand it to whichever flow runs.
+        pg_client = await get_pg_client(context) if await pg_is_primary(db) else None
+        group_ids = None
+        if pg_client is not None:
+            group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
+            group_ids = await pg_client.resolve_group_ids([group])
+            if not group_ids:
+                raise ValueError("سرور تست در دسترس نیست؛ لطفاً بعداً تلاش کنید.")
         if is_agent:
             sub_link = await provisioning.process_agent_test_config(
                 user_id=update.effective_user.id,
+                pg_client=pg_client,
+                group_ids=group_ids,
                 idempotency_key=idem_key,
             )
         else:
             # One-time free test on the primary backend.
-            pg_client = await get_pg_client(context) if await pg_is_primary(db) else None
-            group_ids = None
-            if pg_client is not None:
-                group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
-                group_ids = await pg_client.resolve_group_ids([group])
-                if not group_ids:
-                    raise ValueError("سرور تست در دسترس نیست؛ لطفاً بعداً تلاش کنید.")
             sub_link = await provisioning.process_free_test(
                 user_id=update.effective_user.id,
                 pg_client=pg_client,

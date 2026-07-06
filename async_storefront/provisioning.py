@@ -334,7 +334,9 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
-    async def process_agent_test_config(self, *, user_id: int, idempotency_key: str | None = None) -> str:
+    async def process_agent_test_config(
+        self, *, user_id: int, pg_client=None, group_ids=None, idempotency_key: str | None = None
+    ) -> str:
         test_id = f"test-{int(user_id)}-{now_ts()}-{secrets.token_hex(3)}"
         idem = idempotency_key or test_id
         expires_at = now_ts() + TEST_CONFIG_TTL_SECONDS
@@ -382,11 +384,32 @@ class ProvisioningService:
             )
 
         try:
-            provision = await self.panel.add_test_subscription(
-                user_id=user_id,
-                total_bytes=TEST_CONFIG_BYTES,
-                ttl_seconds=TEST_CONFIG_TTL_SECONDS,
-            )
+            if pg_client is not None:
+                # Create the agent test on the PasarGuard backend (same as real
+                # sales when PasarGuard is primary). on_hold: the 10-minute window
+                # starts on the user's FIRST connect, not at creation — mirrors
+                # the free-test flow so the config doesn't expire before use.
+                username = f"test{int(user_id)}_{secrets.token_hex(4)}"
+                resp = await pg_client.create_user(
+                    username=username,
+                    group_ids=list(group_ids or []),
+                    data_limit_bytes=TEST_CONFIG_BYTES,
+                    on_hold_duration_seconds=TEST_CONFIG_TTL_SECONDS,
+                    note=f"tg:{int(user_id)} agent-test",
+                )
+                sub_url = str((resp or {}).get("subscription_url") or "")
+                if not sub_url:
+                    raise RuntimeError("PasarGuard did not return a subscription_url")
+                provision = PanelClientPayload(
+                    user_id=int(user_id), sub_id=username, sub_link=sub_url,
+                    inbound_id=PG_INBOUND_SENTINEL, client_uuid="", client_email=username, gb=0,
+                )
+            else:
+                provision = await self.panel.add_test_subscription(
+                    user_id=user_id,
+                    total_bytes=TEST_CONFIG_BYTES,
+                    ttl_seconds=TEST_CONFIG_TTL_SECONDS,
+                )
             await self.db.insert_test_subscription(
                 provision,
                 test_id=test_id,
