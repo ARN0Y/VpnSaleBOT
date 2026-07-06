@@ -60,6 +60,34 @@ class PanelClient:
         seconds = max(1.0, float(timeout_seconds or 1.0))
         return httpx.Timeout(seconds, connect=seconds, pool=seconds)
 
+    def _clear_session_cookies(self) -> None:
+        """Drop every stored 3x-ui/session cookie regardless of domain/path.
+
+        The panel sets a domain-scoped cookie while we also set a domainless one;
+        without clearing first, two entries with the same name accumulate and
+        ``cookies.get("3x-ui")`` raises ``httpx.CookieConflict``."""
+        jar = self._client.cookies.jar
+        for cookie in list(jar):
+            if cookie.name in ("3x-ui", "session"):
+                try:
+                    jar.clear(cookie.domain, cookie.path, cookie.name)
+                except KeyError:
+                    pass
+
+    def _apply_session_cookie(self, value: str) -> None:
+        self._clear_session_cookies()
+        if value:
+            self._client.cookies.set("3x-ui", value)
+
+    @staticmethod
+    def _cookie_value(cookies: httpx.Cookies, name: str) -> str:
+        """Read a cookie by name without raising on duplicate entries."""
+        try:
+            return cookies.get(name) or ""
+        except httpx.CookieConflict:
+            values = [c.value for c in cookies.jar if c.name == name and c.value]
+            return values[-1] if values else ""
+
     async def close(self) -> None:
         await self._client.aclose()
 
@@ -93,10 +121,13 @@ class PanelClient:
         async with self._login_lock:
             settings = await self._settings()
             if settings.cookie and not force:
-                self._client.cookies.set("3x-ui", settings.cookie)
+                self._apply_session_cookie(settings.cookie)
                 return settings.cookie
             if not settings.base_url or not settings.username or not settings.password:
                 raise RuntimeError("3x-ui panel settings are incomplete.")
+            # Forced re-login: drop the stale cookie so the panel's fresh
+            # Set-Cookie does not collide with the old one.
+            self._clear_session_cookies()
 
             request_kwargs: dict[str, Any] = {
                 "data": {"username": settings.username, "password": settings.password, "twoFactorCode": ""},
@@ -118,15 +149,14 @@ class PanelClient:
             # name so it can survive a restart. If neither is found we don't fail —
             # a later 401 just triggers a fresh forced login.
             cookie = (
-                self._client.cookies.get("3x-ui")
-                or self._client.cookies.get("session")
-                or response.cookies.get("3x-ui")
-                or response.cookies.get("session")
-                or ""
+                self._cookie_value(response.cookies, "3x-ui")
+                or self._cookie_value(response.cookies, "session")
+                or self._cookie_value(self._client.cookies, "3x-ui")
+                or self._cookie_value(self._client.cookies, "session")
             )
             if cookie:
                 await self.db.update_panel_cookie(cookie, int(now_ms() / 1000))
-                self._client.cookies.set("3x-ui", cookie)
+                self._apply_session_cookie(cookie)
             return cookie
 
     async def request(
@@ -141,7 +171,7 @@ class PanelClient:
         if not settings.base_url:
             raise RuntimeError("panel_base_url is not configured.")
         if settings.cookie:
-            self._client.cookies.set("3x-ui", settings.cookie)
+            self._apply_session_cookie(settings.cookie)
         else:
             await self.login(timeout_seconds=timeout_seconds)
 
@@ -155,12 +185,24 @@ class PanelClient:
             operation=path,
             **request_kwargs,
         )
-        payload = await self._json(response, path)
-        if payload.get("success") is True:
+        payload = await self._json_or_none(response)
+        if payload is not None and payload.get("success") is True:
             return payload
 
-        msg = str(payload.get("msg", "") or "")
-        if response.status_code in (401, 403) or "login" in msg.lower() or "unauthorized" in msg.lower():
+        # A session cookie that has silently expired makes 3x-ui answer API calls
+        # with its HTML login page — usually as HTTP 404/302 with a non-JSON body,
+        # sometimes as JSON with a "login"/"unauthorized" message. Any of these
+        # means "re-authenticate and retry once", so we detect them uniformly
+        # instead of hard-failing (which previously surfaced as the
+        # "non-JSON response ... HTTP 404" error during inbounds/list).
+        msg = str((payload or {}).get("msg", "") or "")
+        needs_relogin = (
+            payload is None
+            or response.status_code in (401, 403, 404)
+            or "login" in msg.lower()
+            or "unauthorized" in msg.lower()
+        )
+        if needs_relogin:
             await self.login(force=True, timeout_seconds=timeout_seconds)
             response = await self._request_with_retries(
                 method,
@@ -168,9 +210,12 @@ class PanelClient:
                 operation=path,
                 **request_kwargs,
             )
-            payload = await self._json(response, path)
-            if payload.get("success") is True:
+            payload = await self._json_or_none(response)
+            if payload is not None and payload.get("success") is True:
                 return payload
+
+        if payload is None:
+            raise RuntimeError(f"3x-ui non-JSON response during {path}: HTTP {response.status_code}")
         raise RuntimeError(f"3x-ui API error on {path}: {payload.get('msg', response.status_code)}")
 
     async def raw_request(
@@ -185,7 +230,7 @@ class PanelClient:
         if not settings.base_url:
             raise RuntimeError("panel_base_url is not configured.")
         if settings.cookie:
-            self._client.cookies.set("3x-ui", settings.cookie)
+            self._apply_session_cookie(settings.cookie)
         else:
             await self.login(timeout_seconds=timeout_seconds)
         request_kwargs: dict[str, Any] = {"data": data}
@@ -197,7 +242,7 @@ class PanelClient:
             operation=path,
             **request_kwargs,
         )
-        if response.status_code in (401, 403):
+        if response.status_code in (401, 403, 404):
             await self.login(force=True, timeout_seconds=timeout_seconds)
             response = await self._request_with_retries(
                 method,
@@ -236,6 +281,19 @@ class PanelClient:
             if response.is_success:
                 return {"success": True, "msg": body, "obj": None}
             raise RuntimeError(f"3x-ui non-JSON response during {operation}: HTTP {response.status_code}") from exc
+
+    async def _json_or_none(self, response: httpx.Response) -> dict[str, Any] | None:
+        """Parse a panel response as JSON, returning ``None`` (instead of raising)
+        when the body is not JSON on a non-success status. ``None`` signals a
+        likely login-page redirect so the caller can force a re-login and retry.
+        A non-JSON body on a 2xx is still treated as a success envelope."""
+        try:
+            return await asyncio.to_thread(response.json)
+        except Exception:
+            if response.is_success:
+                body = await asyncio.to_thread(lambda: (response.text or "")[:300])
+                return {"success": True, "msg": body, "obj": None}
+            return None
 
     async def list_inbounds(self) -> list[dict[str, Any]]:
         cached = self._get_valid_inbounds_cache()
