@@ -708,6 +708,102 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
+    async def process_pg_same_renewal(
+        self,
+        *,
+        pg_client,
+        user_id: int,
+        sub_id: str,
+        price: int,
+        gb: int,
+        days: int,
+        idempotency_key: str | None = None,
+    ) -> str:
+        """Re-buy the SAME PasarGuard package the user originally purchased, at
+        the original package ``price``. Adds the package's ``gb`` volume and
+        re-arms the package validity (on_hold ``days`` — countdown restarts on the
+        user's next connect, exactly like a fresh package). Wallet-only, price
+        re-checked in-transaction, full refund on any failure."""
+        clean_sub_id = str(sub_id or "").strip()
+        if not clean_sub_id:
+            raise ValueError("اشتراک انتخاب‌شده معتبر نیست.")
+        final_total = int(price)
+        if final_total <= 0:
+            raise ValueError("قیمت این سرویس مشخص نیست؛ لطفاً با پشتیبانی تماس بگیرید.")
+        add_gb = max(0, int(gb))
+        add_days = max(0, int(days))
+
+        subscription = await self.db.get_subscription_for_user(user_id, clean_sub_id)
+        if not subscription:
+            raise ValueError("اشتراک انتخاب‌شده پیدا نشد.")
+        if int(subscription.get("inbound_id") or 0) != PG_INBOUND_SENTINEL:
+            raise ValueError("این سرویس روی سرور اختصاصی نیست.")
+
+        order_id = f"{user_id}-pgsame-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        client_name = str(subscription.get("client_email") or clean_sub_id)
+
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate renewal request: {existing['status']}")
+            agent_row = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            payment_method = await self._reserve_wallet_payment(
+                conn, user_id=user_id, amount_toman=final_total, agent_row=agent_row
+            )
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id, int(user_id), -1, int(add_gb), 1, int(final_total),
+                    int(final_total), 0, int(final_total), now_ts(),
+                    payment_method.value, "renewal", clean_sub_id, client_name,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        try:
+            pg_user = await pg_client.get_user(clean_sub_id)
+            if not pg_user:
+                raise RuntimeError("PasarGuard user not found for renewal")
+            current_limit = int(pg_user.get("data_limit") or 0)
+            fields: dict = {}
+            # Add the package's volume (capped users only; unlimited stays unlimited).
+            if add_gb > 0 and current_limit > 0:
+                fields["data_limit"] = current_limit + gb_to_bytes(add_gb)
+            if add_days > 0:
+                # Re-arm the package: fresh validity window that starts on the
+                # user's next connect (same on_hold model as a new purchase).
+                fields["status"] = "on_hold"
+                fields["on_hold_expire_duration"] = add_days * 86400
+                fields["on_hold_timeout"] = None
+                fields["expire"] = None
+            else:
+                fields["status"] = "active"
+            resp = await pg_client.modify_user(clean_sub_id, fields)
+            sub_url = str((resp or {}).get("subscription_url") or subscription.get("sub_link") or "")
+            await self.db.execute(
+                "UPDATE subscriptions SET gb=COALESCE(gb,0)+?, renewed_count=renewed_count+1, last_renewed_at=? WHERE sub_id=?",
+                (int(add_gb), now_ts(), clean_sub_id),
+            )
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("pg same-service renewal approval failed after panel update")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return sub_url
+        except Exception:
+            await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
     async def process_package_purchase(
         self,
         *,

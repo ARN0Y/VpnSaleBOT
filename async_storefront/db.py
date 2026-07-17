@@ -1423,6 +1423,13 @@ class AsyncDatabase:
         )
         return dict(row) if row else None
 
+    async def get_order(self, order_id: str) -> dict[str, Any] | None:
+        oid = str(order_id or "").strip()
+        if not oid:
+            return None
+        row = await self.fetchone("SELECT * FROM orders WHERE order_id=?", (oid,))
+        return dict(row) if row else None
+
     async def create_wallet_topup_request(
         self,
         *,
