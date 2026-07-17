@@ -600,6 +600,114 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
+    async def process_pg_renewal(
+        self,
+        *,
+        pg_client,
+        user_id: int,
+        sub_id: str,
+        gb: int,
+        unit_price: int,
+        final_total: int,
+        idempotency_key: str | None = None,
+    ) -> str:
+        """Renew a PasarGuard service by adding volume to the existing user.
+
+        Mirrors process_renewal's money rules exactly (wallet-only, in-transaction
+        price re-validation, full refund on failure), but adds the purchased GB to
+        the PasarGuard user's data_limit and reactivates it instead of touching the
+        3x-ui panel. The user keeps the same sub link."""
+        clean_sub_id = str(sub_id or "").strip()
+        if not clean_sub_id:
+            raise ValueError("اشتراک انتخاب‌شده معتبر نیست.")
+        requested_gb = int(gb)
+        if requested_gb <= 0:
+            raise ValueError("حجم تمدید معتبر نیست.")
+        min_gb = await self.minimum_purchase_gb()
+        if requested_gb < min_gb:
+            raise ValueError(f"حداقل حجم مجاز برای تمدید {min_gb} گیگ است.")
+
+        subscription = await self.db.get_subscription_for_user(user_id, clean_sub_id)
+        if not subscription:
+            raise ValueError("اشتراک انتخاب‌شده پیدا نشد.")
+        if int(subscription.get("inbound_id") or 0) != PG_INBOUND_SENTINEL:
+            raise ValueError("این سرویس روی سرور اختصاصی نیست.")
+
+        agent = await self.db.get_agent(user_id)
+        effective_unit_price = int(unit_price)
+        if agent and int(agent["price_per_gb"] or 0) > 0:
+            effective_unit_price = int(agent["price_per_gb"])
+        if effective_unit_price <= 0:
+            raise ValueError("تعرفه حساب شما معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.")
+        expected_total = requested_gb * effective_unit_price
+        if int(final_total) != expected_total:
+            raise ValueError("مبلغ فاکتور تمدید معتبر نیست.")
+
+        order_id = f"{user_id}-pgrenew-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        client_name = str(subscription.get("client_email") or clean_sub_id)
+
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
+            if existing:
+                raise RuntimeError(f"duplicate renewal request: {existing['status']}")
+            agent_row = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
+            tx_unit_price = int(unit_price)
+            if agent_row and int(agent_row["price_per_gb"] or 0) > 0:
+                tx_unit_price = int(agent_row["price_per_gb"])
+            if tx_unit_price <= 0:
+                raise ValueError("تعرفه حساب شما معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.")
+            if int(final_total) != requested_gb * tx_unit_price or int(effective_unit_price) != tx_unit_price:
+                raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً تمدید را دوباره ثبت کنید.")
+            effective_unit_price = tx_unit_price
+            payment_method = await self._reserve_wallet_payment(
+                conn, user_id=user_id, amount_toman=final_total, agent_row=agent_row
+            )
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id, int(user_id), -1, requested_gb, 1, int(effective_unit_price),
+                    int(effective_unit_price) * requested_gb, 0, int(final_total), now_ts(),
+                    payment_method.value, "renewal", clean_sub_id, client_name,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        try:
+            pg_user = await pg_client.get_user(clean_sub_id)
+            if not pg_user:
+                raise RuntimeError("PasarGuard user not found for renewal")
+            current_limit = int(pg_user.get("data_limit") or 0)
+            fields: dict = {"status": "active"}
+            # Only capped (volume) users get more volume; an unlimited user
+            # (data_limit 0) stays unlimited — just reactivate it.
+            if current_limit > 0:
+                fields["data_limit"] = current_limit + gb_to_bytes(requested_gb)
+            resp = await pg_client.modify_user(clean_sub_id, fields)
+            sub_url = str((resp or {}).get("subscription_url") or subscription.get("sub_link") or "")
+            await self.db.execute(
+                "UPDATE subscriptions SET gb=COALESCE(gb,0)+?, renewed_count=renewed_count+1, last_renewed_at=? WHERE sub_id=?",
+                (requested_gb, now_ts(), clean_sub_id),
+            )
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("pg renewal order approval failed after panel update")
+            await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            return sub_url
+        except Exception:
+            await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
     async def process_package_purchase(
         self,
         *,

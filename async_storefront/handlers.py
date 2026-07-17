@@ -2186,14 +2186,18 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await edit_text(query, "⚠️ این اشتراک پیدا نشد. لطفاً دوباره از لیست انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
     if int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL:
-        await edit_text(
-            query,
-            "🌐 <b>این سرویس روی سرور اختصاصی (PasarGuard) است.</b>\n\n"
-            "تمدید این نوع سرویس فعلاً از داخل ربات فعال نیست؛ برای تمدید با پشتیبانی در ارتباط باشید.",
-            back_keyboard(),
-        )
-        return ConversationHandler.END
-    if await is_panel2_subscription(db, sub):
+        # PasarGuard service: renewal adds volume to the existing user. Only
+        # block if PasarGuard is not configured (so we never fail mid-flow).
+        if not await pg_configured(db):
+            await edit_text(
+                query,
+                "🌐 <b>این سرویس روی سرور اختصاصی (PasarGuard) است.</b>\n\n"
+                "تمدید این سرویس فعلاً در دسترس نیست؛ برای تمدید با پشتیبانی در ارتباط باشید.",
+                back_keyboard(),
+            )
+            return ConversationHandler.END
+        # Configured → fall through to the normal volume-renewal flow below.
+    elif await is_panel2_subscription(db, sub):
         # v1: dedicated-panel services are buy-only from the bot; renewal of them
         # isn't wired yet, so guide the user to support instead of failing on the
         # primary panel.
@@ -2348,16 +2352,34 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    # PasarGuard services renew on PasarGuard (add volume to the existing user);
+    # everything else renews on the 3x-ui panel.
+    renew_sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
+    is_pg_sub = bool(renew_sub) and int(renew_sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL
     await edit_flow_query(update, context, "⏳ <b>در حال تمدید اشتراک...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        sub_link = await provisioning.process_renewal(
-            user_id=update.effective_user.id,
-            sub_id=sub_id,
-            gb=gb,
-            unit_price=unit_price,
-            final_total=total,
-            idempotency_key=str(renewal.get("idem") or query.id),
-        )
+        if is_pg_sub:
+            pg_client = await get_pg_client(context)
+            if pg_client is None:
+                raise ValueError("سرور اختصاصی در حال حاضر در دسترس نیست؛ لطفاً بعداً تلاش کنید.")
+            sub_link = await provisioning.process_pg_renewal(
+                pg_client=pg_client,
+                user_id=update.effective_user.id,
+                sub_id=sub_id,
+                gb=gb,
+                unit_price=unit_price,
+                final_total=total,
+                idempotency_key=str(renewal.get("idem") or query.id),
+            )
+        else:
+            sub_link = await provisioning.process_renewal(
+                user_id=update.effective_user.id,
+                sub_id=sub_id,
+                gb=gb,
+                unit_price=unit_price,
+                final_total=total,
+                idempotency_key=str(renewal.get("idem") or query.id),
+            )
     except ValueError as exc:
         clear_flow_state(context)
         await edit_text(
