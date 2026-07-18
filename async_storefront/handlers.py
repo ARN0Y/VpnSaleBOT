@@ -2284,7 +2284,7 @@ async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         idx = int(query.data.split(":", 2)[2])
     except Exception:
         return ConversationHandler.END
-    renewal = context.user_data.get("renewal") or {}
+    renewal = context.user_data.setdefault("renewal", {})
     sub_id = str(renewal.get("sub_id") or "")
     name = str(renewal.get("client_name") or sub_id)
     if not sub_id:
@@ -2297,8 +2297,10 @@ async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     pkg = packages[idx]
     agent = await db.get_agent(update.effective_user.id)
     price = package_price(pkg, agent)
+    # Store the chosen plan snapshot itself (not just its index) so confirmation
+    # never depends on re-deriving/looking up the index again.
     renewal["mode"] = "plan"
-    renewal["pkg_idx"] = idx
+    renewal["pkg"] = dict(pkg)
     renewal["idem"] = f"renew-plan-{update.effective_user.id}-{secrets.token_hex(8)}"
     vol = "♾️ نامحدود (مصرف منصفانه)" if str(pkg.get("kind")) == "unlimited" else f"{int(pkg.get('gb') or 0)} گیگ"
     days = int(pkg.get("days") or 0)
@@ -2415,7 +2417,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await query.answer()
     renewal = context.user_data.get("renewal") or {}
     sub_id = str(renewal.get("sub_id") or "")
-    if renewal.get("mode") == "plan":
+    if renewal.get("mode") == "plan" or isinstance(renewal.get("pkg"), dict):
         return await renew_confirm_plan(update, context)
     gb = int(renewal.get("gb") or 0)
     unit_price = int(renewal.get("unit_price") or 0)
@@ -2497,13 +2499,11 @@ async def renew_confirm_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
     renewal = context.user_data.get("renewal") or {}
     sub_id = str(renewal.get("sub_id") or "")
     name = str(renewal.get("client_name") or sub_id)
-    idx = int(renewal.get("pkg_idx")) if str(renewal.get("pkg_idx") or "").lstrip("-").isdigit() else -1
-    packages = await get_panel_packages(db, "pg")
-    if not sub_id or idx < 0 or idx >= len(packages):
+    pkg = renewal.get("pkg")
+    if not sub_id or not isinstance(pkg, dict) or int(pkg.get("gb") or 0) <= 0:
         clear_flow_state(context)
         await edit_text(query, "⚠️ اطلاعات تمدید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
         return ConversationHandler.END
-    pkg = packages[idx]
     price = package_price(pkg, await db.get_agent(update.effective_user.id))
     if not await audience_sales_is_open(db, update.effective_user.id):
         clear_flow_state(context)
