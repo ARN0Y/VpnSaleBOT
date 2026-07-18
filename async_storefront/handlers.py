@@ -2176,23 +2176,14 @@ async def renew_clear_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await render_renewal_list(update, context, 0)
 
 
-async def resolve_same_service(db: AsyncDatabase, sub: dict) -> dict | None:
-    """Resolve the 'renew the exact same package' offer for a PasarGuard sub:
-    price = the original purchase order's amount (exactly what the user paid),
-    gb = the package volume, days = the matching current package's validity.
-    Returns None when the price cannot be determined (so the option is hidden)."""
-    order = await db.get_order(str(sub.get("order_id") or ""))
-    price = int((order or {}).get("final_price") or 0)
-    if price <= 0:
-        return None
-    gb = int(sub.get("gb") or 0)
+async def _pg_current_plan_index(sub: dict, packages: list[dict]) -> int | None:
+    """Index of the package matching the sub's current plan (kind + volume), or None."""
     kind = "unlimited" if int(sub.get("is_infinite") or 0) == 1 else "volume"
-    days = 0
-    for pkg in await get_panel_packages(db, "pg"):
+    gb = int(sub.get("gb") or 0)
+    for i, pkg in enumerate(packages):
         if pkg.get("kind") == kind and int(pkg.get("gb") or 0) == gb:
-            days = int(pkg.get("days") or 0)
-            break
-    return {"price": price, "gb": gb, "days": days, "kind": kind}
+            return i
+    return None
 
 
 async def renew_show_gb_options(update: Update, context: ContextTypes.DEFAULT_TYPE, *, sub_id: str, name: str) -> int:
@@ -2208,6 +2199,42 @@ async def renew_show_gb_options(update: Update, context: ContextTypes.DEFAULT_TY
     )
     context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
     return RENEW_GB
+
+
+async def renew_show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE, *, sub_id: str, name: str, sub: dict) -> int:
+    """Show every PasarGuard plan for renewal — the user's current plan is
+    flagged, and any plan can be chosen (renew the same one or upgrade)."""
+    query = update.callback_query
+    db: AsyncDatabase = context.application.bot_data["db"]
+    agent = await db.get_agent(update.effective_user.id)
+    packages = await get_panel_packages(db, "pg")
+    if not packages:
+        await edit_text(
+            query,
+            "🌐 در حال حاضر پلنی برای تمدید تعریف نشده است؛ لطفاً با پشتیبانی در ارتباط باشید.",
+            back_keyboard(),
+        )
+        return ConversationHandler.END
+    cur_idx = await _pg_current_plan_index(sub, packages)
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, pkg in enumerate(packages):
+        price = package_price(pkg, agent)
+        prefix = "♻️ پلن فعلی · " if idx == cur_idx else ""
+        rows.append([InlineKeyboardButton(f"{prefix}{pkg.get('title') or '-'} — {price:,} ت", callback_data=f"renew:pkg:{idx}")])
+    rows.append([InlineKeyboardButton("❌ انصراف", callback_data="renew:cancel")])
+    cur_line = ""
+    if cur_idx is not None:
+        cur_line = f"🎁 پلن فعلی شما: <b>{html.escape(str(packages[cur_idx].get('title') or ''))}</b>\n"
+    await edit_text(
+        query,
+        "🔁 <b>تمدید سرویس</b>\n\n"
+        f"🪪 کانفیگ: <b>{html.escape(name)}</b>\n"
+        f"{cur_line}\n"
+        "می‌توانید همین پلن را تمدید کنید یا پلن دیگری (بالاتر) را انتخاب کنید 👇",
+        InlineKeyboardMarkup(rows),
+    )
+    context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
+    return RENEW_SELECT
 
 
 async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2242,73 +2269,52 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ConversationHandler.END
     name = str(sub.get("client_email") or sub_id)
     context.user_data["renewal"] = {"sub_id": sub_id, "client_name": name}
-
-    # PasarGuard services offer two renewal modes: re-buy the exact same package
-    # (original price) OR add à-la-carte volume (per-GB price). Everything else
-    # goes straight to the volume flow.
+    # PasarGuard services renew by choosing a plan (same plan or an upgrade);
+    # legacy panel services keep the per-GB volume flow.
     if is_pg:
-        same = await resolve_same_service(db, sub)
-        context.user_data["renewal"]["same"] = same
-        rows: list[list[InlineKeyboardButton]] = []
-        if same:
-            days_txt = f" · {same['days']} روزه" if int(same.get("days") or 0) > 0 else ""
-            rows.append([InlineKeyboardButton(f"♻️ تمدید همین سرویس — {same['price']:,} تومان{days_txt}", callback_data="renew:mode:same")])
-        rows.append([InlineKeyboardButton("➕ افزودن حجم (قیمت گیگی)", callback_data="renew:mode:volume")])
-        rows.append([InlineKeyboardButton("❌ انصراف", callback_data="renew:cancel")])
-        await edit_text(
-            query,
-            "🔁 <b>تمدید سرویس</b>\n\n"
-            f"کانفیگ: <b>{html.escape(name)}</b>\n"
-            f"شناسه: <code>{html.escape(sub_id)}</code>\n\n"
-            "یکی از روش‌های تمدید را انتخاب کنید:",
-            InlineKeyboardMarkup(rows),
-        )
-        context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
-        return RENEW_SELECT
-
+        return await renew_show_plans(update, context, sub_id=sub_id, name=name, sub=sub)
     return await renew_show_gb_options(update, context, sub_id=sub_id, name=name)
 
 
-async def renew_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    mode = query.data.split(":", 2)[2]
+    db: AsyncDatabase = context.application.bot_data["db"]
+    try:
+        idx = int(query.data.split(":", 2)[2])
+    except Exception:
+        return ConversationHandler.END
     renewal = context.user_data.get("renewal") or {}
     sub_id = str(renewal.get("sub_id") or "")
     name = str(renewal.get("client_name") or sub_id)
     if not sub_id:
         await edit_text(query, "⚠️ اطلاعات تمدید ناقص است. لطفاً دوباره شروع کنید.", back_keyboard())
         return ConversationHandler.END
-    if mode == "same":
-        same = renewal.get("same") or {}
-        if not same or int(same.get("price") or 0) <= 0:
-            await edit_text(
-                query,
-                "قیمت این سرویس مشخص نیست؛ لطفاً گزینهٔ «افزودن حجم» را انتخاب کنید یا با پشتیبانی تماس بگیرید.",
-                back_keyboard(),
-            )
-            return ConversationHandler.END
-        renewal["mode"] = "same"
-        renewal["idem"] = f"renew-same-{update.effective_user.id}-{secrets.token_hex(8)}"
-        price = int(same["price"])
-        gb = int(same.get("gb") or 0)
-        days = int(same.get("days") or 0)
-        vol_line = "نامحدود (مصرف منصفانه)" if same.get("kind") == "unlimited" else f"{gb} گیگ"
-        days_line = f"⏳ اعتبار: <b>{days}</b> روز (از اولین اتصال)\n" if days > 0 else ""
-        await edit_text(
-            query,
-            "♻️ <b>تمدید همین سرویس</b>\n\n"
-            f"🪪 کانفیگ: <b>{html.escape(name)}</b>\n"
-            f"📦 حجم: <b>{vol_line}</b>\n"
-            f"{days_line}"
-            f"💰 مبلغ: <b>{price:,}</b> تومان\n\n"
-            "در صورت تایید، همین سرویس با همان مشخصات تمدید می‌شود.",
-            renew_confirm_keyboard(),
-        )
-        return RENEW_CONFIRM
-
-    renewal["mode"] = "volume"
-    return await renew_show_gb_options(update, context, sub_id=sub_id, name=name)
+    packages = await get_panel_packages(db, "pg")
+    if idx < 0 or idx >= len(packages):
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+    pkg = packages[idx]
+    agent = await db.get_agent(update.effective_user.id)
+    price = package_price(pkg, agent)
+    renewal["mode"] = "plan"
+    renewal["pkg_idx"] = idx
+    renewal["idem"] = f"renew-plan-{update.effective_user.id}-{secrets.token_hex(8)}"
+    vol = "♾️ نامحدود (مصرف منصفانه)" if str(pkg.get("kind")) == "unlimited" else f"{int(pkg.get('gb') or 0)} گیگ"
+    days = int(pkg.get("days") or 0)
+    days_line = f"⏳ اعتبار: <b>{days}</b> روز (از اولین اتصال)\n" if days > 0 else ""
+    await edit_text(
+        query,
+        "🧾 <b>تایید تمدید سرویس</b>\n\n"
+        f"🪪 کانفیگ: <b>{html.escape(name)}</b>\n"
+        f"🎁 پلن: <b>{html.escape(str(pkg.get('title') or '-'))}</b>\n"
+        f"📦 حجم: <b>{vol}</b>\n"
+        f"{days_line}"
+        f"💰 مبلغ: <b>{price:,}</b> تومان\n\n"
+        "با تایید، همین کانفیگ با این پلن تمدید می‌شود (لینک اشتراک تغییر نمی‌کند).",
+        renew_confirm_keyboard(),
+    )
+    return RENEW_CONFIRM
 
 
 async def renew_gb_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2409,8 +2415,8 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await query.answer()
     renewal = context.user_data.get("renewal") or {}
     sub_id = str(renewal.get("sub_id") or "")
-    if renewal.get("mode") == "same":
-        return await renew_confirm_same(update, context)
+    if renewal.get("mode") == "plan":
+        return await renew_confirm_plan(update, context)
     gb = int(renewal.get("gb") or 0)
     unit_price = int(renewal.get("unit_price") or 0)
     total = int(renewal.get("total") or 0)
@@ -2442,34 +2448,18 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
-    # PasarGuard services renew on PasarGuard (add volume to the existing user);
-    # everything else renews on the 3x-ui panel.
-    renew_sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
-    is_pg_sub = bool(renew_sub) and int(renew_sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL
+    # This per-GB volume path only runs for legacy 3x-ui subs; PasarGuard subs
+    # renew via the plan flow (mode == "plan" → renew_confirm_plan) above.
     await edit_flow_query(update, context, "⏳ <b>در حال تمدید اشتراک...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        if is_pg_sub:
-            pg_client = await get_pg_client(context)
-            if pg_client is None:
-                raise ValueError("سرور اختصاصی در حال حاضر در دسترس نیست؛ لطفاً بعداً تلاش کنید.")
-            sub_link = await provisioning.process_pg_renewal(
-                pg_client=pg_client,
-                user_id=update.effective_user.id,
-                sub_id=sub_id,
-                gb=gb,
-                unit_price=unit_price,
-                final_total=total,
-                idempotency_key=str(renewal.get("idem") or query.id),
-            )
-        else:
-            sub_link = await provisioning.process_renewal(
-                user_id=update.effective_user.id,
-                sub_id=sub_id,
-                gb=gb,
-                unit_price=unit_price,
-                final_total=total,
-                idempotency_key=str(renewal.get("idem") or query.id),
-            )
+        sub_link = await provisioning.process_renewal(
+            user_id=update.effective_user.id,
+            sub_id=sub_id,
+            gb=gb,
+            unit_price=unit_price,
+            final_total=total,
+            idempotency_key=str(renewal.get("idem") or query.id),
+        )
     except ValueError as exc:
         clear_flow_state(context)
         await edit_text(
@@ -2500,21 +2490,21 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 
-async def renew_confirm_same(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Confirm 'renew the exact same PasarGuard package' at the original price."""
+async def renew_confirm_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Confirm renewing a PasarGuard service with the chosen plan (same or upgrade)."""
     query = update.callback_query
     db: AsyncDatabase = context.application.bot_data["db"]
     renewal = context.user_data.get("renewal") or {}
     sub_id = str(renewal.get("sub_id") or "")
-    same = renewal.get("same") or {}
-    price = int(same.get("price") or 0)
-    gb = int(same.get("gb") or 0)
-    days = int(same.get("days") or 0)
     name = str(renewal.get("client_name") or sub_id)
-    if not sub_id or price <= 0:
+    idx = int(renewal.get("pkg_idx")) if str(renewal.get("pkg_idx") or "").lstrip("-").isdigit() else -1
+    packages = await get_panel_packages(db, "pg")
+    if not sub_id or idx < 0 or idx >= len(packages):
         clear_flow_state(context)
         await edit_text(query, "⚠️ اطلاعات تمدید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
         return ConversationHandler.END
+    pkg = packages[idx]
+    price = package_price(pkg, await db.get_agent(update.effective_user.id))
     if not await audience_sales_is_open(db, update.effective_user.id):
         clear_flow_state(context)
         await edit_text(
@@ -2531,13 +2521,11 @@ async def renew_confirm_same(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pg_client = await get_pg_client(context)
         if pg_client is None:
             raise ValueError("سرور اختصاصی در حال حاضر در دسترس نیست؛ لطفاً بعداً تلاش کنید.")
-        sub_link = await provisioning.process_pg_same_renewal(
+        sub_link = await provisioning.process_pg_plan_renewal(
             pg_client=pg_client,
             user_id=update.effective_user.id,
             sub_id=sub_id,
-            price=price,
-            gb=gb,
-            days=days,
+            pkg=pkg,
             idempotency_key=str(renewal.get("idem") or query.id),
         )
     except ValueError as exc:
@@ -2552,18 +2540,20 @@ async def renew_confirm_same(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if "duplicate renewal request" in str(exc):
             await _answer_query(query, "این تمدید در حال پردازش است…")
             return ConversationHandler.END
-        LOG.exception("same-service renewal failed user_id=%s sub_id=%s", update.effective_user.id, sub_id)
+        LOG.exception("plan renewal failed user_id=%s sub_id=%s", update.effective_user.id, sub_id)
         clear_flow_state(context)
         await edit_text(query, f"❌ خطا در تمدید سرویس:\n{html.escape(str(exc))}", back_keyboard())
         return ConversationHandler.END
 
     clear_flow_state(context)
-    vol_line = "نامحدود (مصرف منصفانه)" if same.get("kind") == "unlimited" else f"{gb} گیگ"
+    vol_line = "♾️ نامحدود (مصرف منصفانه)" if str(pkg.get("kind")) == "unlimited" else f"{int(pkg.get('gb') or 0)} گیگ"
+    days = int(pkg.get("days") or 0)
     days_line = f"⏳ اعتبار: <b>{days}</b> روز (از اولین اتصال)\n" if days > 0 else ""
     await edit_text(
         query,
         "✅ <b>سرویس با موفقیت تمدید شد.</b>\n\n"
         f"🪪 کانفیگ: <b>{html.escape(name)}</b>\n"
+        f"🎁 پلن: <b>{html.escape(str(pkg.get('title') or '-'))}</b>\n"
         f"📦 حجم: <b>{vol_line}</b>\n"
         f"{days_line}"
         f"💰 مبلغ ثبت‌شده: <b>{price:,}</b> تومان\n\n"
@@ -3552,7 +3542,7 @@ def build_main_conversation() -> ConversationHandler:
             CallbackQueryHandler(renew_page, pattern=r"^renew:page:\d+$"),
             CallbackQueryHandler(renew_search_start, pattern=r"^renew:search$"),
             CallbackQueryHandler(renew_clear_search, pattern=r"^renew:clear_search$"),
-            CallbackQueryHandler(renew_mode, pattern=r"^renew:mode:(volume|same)$"),
+            CallbackQueryHandler(renew_pkg_select, pattern=r"^renew:pkg:\d+$"),
             CallbackQueryHandler(renew_select, pattern=r"^renew:sub:"),
             CallbackQueryHandler(renew_cancel, pattern=r"^renew:cancel$"),
         ],
