@@ -1,5 +1,6 @@
 import * as React from "react";
-import { Crown, BookText } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { Crown, BookText, ShieldCheck, KeyRound, CheckCircle2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,9 +9,70 @@ import { Field } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { EmptyState } from "@/components/ui/empty-state";
+import { CopyButton } from "@/components/ui/copy-button";
+import { useToast } from "@/components/ui/toast";
+import { api, ApiError } from "@/lib/api";
 import { toman, jalaliDate } from "@/lib/utils";
 import { n, s, type UserMutations } from "./helpers";
 import type { UserDetailBundle } from "@/lib/types";
+
+function PgResellerAdminCard({ userId, existing }: { userId: number; existing: string }) {
+  const { toast } = useToast();
+  const [result, setResult] = React.useState<{ username: string; password: string; panel_url?: string } | null>(null);
+  const create = useMutation({
+    mutationFn: () => api.pgCreateAdminForReseller(userId),
+    onSuccess: (d) => {
+      if (!d.ok) { toast({ title: "ساخت ناموفق", description: d.error, variant: "error" }); return; }
+      setResult({ username: d.username!, password: d.password!, panel_url: d.panel_url });
+      toast({ title: "اکانت ادمین پاسارگارد ساخته شد", variant: "success" });
+    },
+    onError: (e: Error) =>
+      toast({
+        title: e instanceof ApiError && e.status === 409 ? "این نماینده از قبل اکانت ادمین دارد" : "خطا",
+        description: e.message,
+        variant: "error",
+      }),
+  });
+
+  const Cred = ({ label, value, icon }: { label: string; value: string; icon?: boolean }) => (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] px-3 py-2.5">
+      <span className="flex items-center gap-2 text-xs text-muted-foreground">{icon && <KeyRound className="h-4 w-4" />} {label}</span>
+      <span className="flex items-center gap-2"><span className="font-mono text-sm text-white" dir="ltr">{value}</span><CopyButton value={value} /></span>
+    </div>
+  );
+
+  return (
+    <Card className="lg:col-span-2 border-brand/25">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-brand" /> اکانت ادمین پاسارگارد برای این نماینده</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs leading-6 text-muted-foreground">
+          با یک کلیک یک حساب ادمینِ اختصاصی در پنل پاسارگارد برای این نماینده صادر می‌شود (یوزرنیم بر اساس آیدی او،
+          پسوردِ امنِ تصادفی، نقشِ «نماینده» با کنترل کامل فقط روی کاربرانِ خودش).
+        </p>
+        {existing && !result && (
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
+            این نماینده از قبل اکانت ادمین دارد: <span className="font-mono">{existing}</span>
+          </div>
+        )}
+        {result ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-bold text-emerald-200"><CheckCircle2 className="h-4 w-4" /> مشخصات را به نماینده بدهید:</div>
+            <Cred label="آدرس پنل" value={result.panel_url || "—"} />
+            <Cred label="یوزرنیم" value={result.username} />
+            <Cred label="پسورد" value={result.password} icon />
+            <p className="text-[11px] text-amber-300">⚠️ پسورد فقط همین حالا نمایش داده می‌شود؛ ذخیره‌اش کنید.</p>
+          </div>
+        ) : (
+          <Button disabled={create.isPending} onClick={() => create.mutate()}>
+            <ShieldCheck className="h-4 w-4" /> {create.isPending ? "در حال ساخت…" : existing ? "ساخت اکانت ادمین جدید" : "ساخت اکانت ادمین پاسارگارد"}
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 export function AgentTab({ data, mutations }: { data: UserDetailBundle; mutations: UserMutations }) {
   const u = data.user;
@@ -141,6 +203,13 @@ export function AgentTab({ data, mutations }: { data: UserDetailBundle; mutation
           )}
         </CardContent>
       </Card>
+
+      {isAgent && (
+        <PgResellerAdminCard
+          userId={n(u.user_id)}
+          existing={s((data as unknown as { pg_admin_username?: string }).pg_admin_username)}
+        />
+      )}
     </div>
   );
 }

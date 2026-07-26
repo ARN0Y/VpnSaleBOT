@@ -17,6 +17,8 @@ const SubscriptionDetail = React.lazy(() => import("@/pages/SubscriptionDetail")
 const Broadcast = React.lazy(() => import("@/pages/Broadcast").then((m) => ({ default: m.Broadcast })));
 const Events = React.lazy(() => import("@/pages/Events").then((m) => ({ default: m.Events })));
 const Settings = React.lazy(() => import("@/pages/Settings").then((m) => ({ default: m.Settings })));
+const PasarGuardManage = React.lazy(() => import("@/pages/PasarGuardManage").then((m) => ({ default: m.PasarGuardManage })));
+const PasarGuardAdminDetail = React.lazy(() => import("@/pages/PasarGuardAdminDetail").then((m) => ({ default: m.PasarGuardAdminDetail })));
 
 function PageFallback() {
   return (
@@ -55,6 +57,8 @@ export function App() {
             <Route path="subscriptions" element={<Subscriptions />} />
             <Route path="subscriptions/:subId" element={<SubscriptionDetail />} />
             <Route path="broadcast" element={<Broadcast />} />
+            <Route path="pasarguard" element={<PasarGuardManage />} />
+            <Route path="pasarguard/admin/:username" element={<PasarGuardAdminDetail />} />
             <Route path="events" element={<Events />} />
             <Route path="settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />

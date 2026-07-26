@@ -632,6 +632,12 @@ class AsyncDatabase:
             "backup_interval_unit": "minutes",
             "backup_include_bot": "1",
             "backup_include_xui": "1",
+            "backup_include_pg": "0",
+            "backup_include_pg_db": "0",
+            "pg_db_dump_cmd": "",
+            "pg_db_container": "",
+            "pg_db_user": "pasarguard",
+            "pg_db_name": "pasarguard",
             "backup_xui_timeout_seconds": "180",
             "backup_last_run_ts": "0",
             "backup_last_status": "never",
@@ -654,6 +660,22 @@ class AsyncDatabase:
             "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
+            # Which backend the MAIN buy flow sells from: "xui" (3x-ui) or
+            # "pasarguard". Lets the admin move the primary panel to PasarGuard.
+            "primary_backend": "xui",
+            # ── PasarGuard panel (optional second backend, stored in the settings
+            #    KV so there is no schema change). Sold at ElsaVPN's per-GB rate. ──
+            "pg_enabled": "0",
+            "pg_label": "سرور اختصاصی",
+            "pg_base_url": "",
+            "pg_username": "",
+            "pg_password": "",
+            "pg_group": "",
+            "pg_verify_tls": "1",
+            "pg_price_per_gb": "0",
+            # Validity of a PasarGuard purchase in days. Empty = follow the shop's
+            # own «purchase_duration_days» (the 30-day window volume buys get).
+            "pg_default_days": "",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
@@ -1329,6 +1351,7 @@ class AsyncDatabase:
         rows = await self.fetchall(
             """
             SELECT sub_id, gb, qty, created_at, client_email,
+                   COALESCE(inbound_id,0) AS inbound_id,
                    panel_total_bytes, panel_used_bytes, panel_remaining_bytes,
                    panel_enabled, panel_expiry_time, panel_synced_at,
                    COALESCE(is_test,0) AS is_test,
@@ -1740,8 +1763,10 @@ class AsyncDatabase:
         return int(row["c"] if row else 0)
 
     async def admin_user_subscription_ids(self, user_id: int) -> list[str]:
+        # PasarGuard-backed subs (inbound_id -100) are excluded: bulk enable /
+        # disable drives the 3x-ui panel, which knows nothing about them.
         rows = await self.fetchall(
-            "SELECT sub_id FROM subscriptions WHERE user_id=? ORDER BY created_at DESC",
+            "SELECT sub_id FROM subscriptions WHERE user_id=? AND COALESCE(inbound_id,0)<>-100 ORDER BY created_at DESC",
             (int(user_id),),
         )
         return [str(row["sub_id"]) for row in rows if str(row["sub_id"] or "").strip()]

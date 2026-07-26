@@ -133,7 +133,7 @@ def backup_values_from_form(form) -> dict[str, str]:
     xui_timeout_seconds = normalize_xui_backup_timeout(
         form.get("backup_xui_timeout_seconds", str(DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS))
     )
-    return {
+    values = {
         "backup_enabled": "1" if form.get("backup_enabled") == "on" else "0",
         "backup_include_bot": "1" if form.get("backup_include_bot") == "on" else "0",
         "backup_include_xui": "1" if form.get("backup_include_xui") == "on" else "0",
@@ -144,6 +144,17 @@ def backup_values_from_form(form) -> dict[str, str]:
         "backup_send_to_telegram": "1",
         "backup_telegram_chat_id": str(form.get("backup_telegram_chat_id", "") or "").strip(),
     }
+    # PasarGuard backup toggles + full-DB-dump config. Only touched when the
+    # field is actually present, so the classic Jinja form (which has no such
+    # inputs) can never silently wipe what was set in the modern panel.
+    for key in ("backup_include_pg", "backup_include_pg_db"):
+        if key in form:
+            values[key] = "1" if form.get(key) == "on" else "0"
+    _pg_db_defaults = {"pg_db_dump_cmd": "", "pg_db_container": "", "pg_db_user": "pasarguard", "pg_db_name": "pasarguard"}
+    for key, default in _pg_db_defaults.items():
+        if key in form:
+            values[key] = str(form.get(key) or "").strip() or default
+    return values
 
 
 def panel_values_from_form(form, current) -> dict[str, str | int]:

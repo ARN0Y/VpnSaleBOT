@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LockOpen, Lock, Save, Plus, Trash2 } from "lucide-react";
+import { LockOpen, Lock, Save, Plus, Trash2, ShieldCheck, Server, DatabaseBackup } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,260 @@ function SalesRow({ title, audience, status, onToggle, busy }: {
         <Button size="sm" variant="destructive" disabled={busy || !open} onClick={() => onToggle(audience, "closed")}><Lock className="h-4 w-4" /> بستن</Button>
       </div>
     </div>
+  );
+}
+
+function PrimaryBackendCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const current = (items.primary_backend ?? "xui") === "pasarguard" ? "pasarguard" : "xui";
+  const pgReady = (items.pg_enabled ?? "0") === "1" && !!(items.pg_base_url ?? "").trim();
+  const save = useMutation({
+    mutationFn: (backend: "xui" | "pasarguard") => api.setPrimaryBackend(backend),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const options = [
+    { key: "xui" as const, title: "پنل 3x-ui", hint: "فروش از طریق پنل 3x-ui (حالت پیش‌فرض)" },
+    { key: "pasarguard" as const, title: "پنل PasarGuard", hint: "فروش از طریق PasarGuard (باید پایین فعال و متصل باشد)" },
+  ];
+  return (
+    <Card className="border-brand/20">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><Server className="h-5 w-5 text-brand" /> پنل اصلی فروش</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          دکمه‌ی «خرید سرویس» در ربات از کدام پنل بفروشد. هر زمان می‌توانید آن را جابه‌جا کنید؛ سرویس‌های قبلی دست‌نخورده می‌مانند.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {options.map((o) => {
+            const active = current === o.key;
+            return (
+              <button
+                key={o.key}
+                onClick={() => save.mutate(o.key)}
+                disabled={save.isPending || active}
+                className={`rounded-2xl border p-4 text-right transition ${active ? "border-white/30 bg-white/[0.06]" : "border-border hover:border-white/20"}`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-white">{o.title}</span>
+                  {active && <Badge variant="success">فعال</Badge>}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{o.hint}</p>
+              </button>
+            );
+          })}
+        </div>
+        {current === "pasarguard" && !pgReady && (
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
+            ⚠️ پنل PasarGuard هنوز فعال/پیکربندی نشده است؛ تا زمانی که کارت پایین کامل و تست نشود، خرید از این پنل انجام نمی‌شود.
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PasarGuardCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const [pg, setPg] = React.useState(() => ({
+    enabled: (items.pg_enabled ?? "0") === "1",
+    label: items.pg_label || "سرور اختصاصی",
+    base_url: items.pg_base_url ?? "",
+    username: items.pg_username ?? "",
+    password: "",
+    group: items.pg_group ?? "",
+    verify_tls: (items.pg_verify_tls ?? "1") !== "0",
+    price_per_gb: items.pg_price_per_gb ?? "0",
+    default_days: items.pg_default_days ?? "",
+  }));
+  type TestReport = { ok: boolean; error?: string; admin_username?: string; is_owner?: boolean; panel_version?: string; groups?: { id: number; name: string }[] };
+  const [test, setTest] = React.useState<TestReport | null>(null);
+  const upd = (k: string, v: string | boolean) => setPg((s) => ({ ...s, [k]: v }));
+  const save = useMutation({
+    mutationFn: () => api.setPasarGuard({ ...pg, price_per_gb: Number(pg.price_per_gb) || 0, default_days: pg.default_days.trim() }),
+    onSuccess: () => { setPg((s) => ({ ...s, password: "" })); qc.invalidateQueries({ queryKey: ["settings"] }); },
+  });
+  const testConn = useMutation({
+    mutationFn: () => api.testPasarGuard({ base_url: pg.base_url, username: pg.username, password: pg.password || undefined, verify_tls: pg.verify_tls }),
+    onSuccess: (r) => setTest(r),
+    onError: (e) => setTest({ ok: false, error: String(e) }),
+  });
+  return (
+    <Card className="border-brand/20">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5 text-brand" /> اتصال پنل PasarGuard</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          اطلاعات اتصال ربات به پنل PasarGuard را وارد کنید. توصیه می‌شود یک حساب ادمینِ اختصاصی برای ربات در پنل بسازید و از همان استفاده کنید.
+          سرویس‌های این پنل با همان تعرفه‌ی گیگیِ ElsaVPN فروخته می‌شوند. برای حفظ رمز فعلی، فیلد رمز عبور را خالی بگذارید.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-white">وضعیت پنل PasarGuard</span>
+            <Badge variant={pg.enabled ? "success" : "danger"}>{pg.enabled ? "فعال" : "غیرفعال"}</Badge>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={pg.enabled} onClick={() => upd("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
+            <Button size="sm" variant="destructive" disabled={!pg.enabled} onClick={() => upd("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="نام نمایشی سرویس (در ربات)"><Input value={pg.label} onChange={(e) => upd("label", e.target.value)} placeholder="سرور اختصاصی" /></Field>
+          <Field label="گروه (group) پنل" hint="کاربر در این گروه ساخته می‌شود — دقیقاً همان نام داخل پنل">
+            <Input value={pg.group} onChange={(e) => upd("group", e.target.value)} placeholder="Elsa-Bot" dir="ltr" />
+          </Field>
+          <Field label="آدرس پنل (با https و پورت)"><Input value={pg.base_url} onChange={(e) => upd("base_url", e.target.value)} placeholder="https://panel.example:8000" dir="ltr" /></Field>
+          <Field label="یوزرنیم ادمینِ ربات"><Input value={pg.username} onChange={(e) => upd("username", e.target.value)} dir="ltr" /></Field>
+          <Field label="پسورد ادمینِ ربات"><Input type="password" value={pg.password} onChange={(e) => upd("password", e.target.value)} placeholder="بدون تغییر" dir="ltr" /></Field>
+          <Field label="قیمت هر گیگ (تومان)" hint="۰ = همان تعرفه‌ی معمولِ فروشگاه"><Input value={pg.price_per_gb} inputMode="numeric" onChange={(e) => upd("price_per_gb", e.target.value)} /></Field>
+          <Field label="مدت اعتبار (روز)" hint="خالی = همان «مدت اعتبار خرید» فروشگاه (۳۰ روز)"><Input value={pg.default_days} inputMode="numeric" onChange={(e) => upd("default_days", e.target.value)} placeholder="خالی = پیش‌فرض فروشگاه" /></Field>
+          <div className="flex items-center gap-2 pt-6">
+            <input id="pg_verify" type="checkbox" checked={pg.verify_tls} onChange={(e) => upd("verify_tls", e.target.checked)} className="h-4 w-4 accent-[hsl(var(--brand))]" />
+            <label htmlFor="pg_verify" className="text-sm text-muted-foreground">بررسی گواهی TLS (اگر cert معتبر دارید روشن بماند)</label>
+          </div>
+        </div>
+        {test && (
+          <div className={`rounded-xl border p-3 text-sm ${test.ok ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-rose-400/30 bg-rose-400/10 text-rose-100"}`}>
+            {test.ok ? (
+              <span>
+                ✅ اتصال موفق — ادمین: <b>{test.admin_username}</b>{test.panel_version ? ` · نسخه: ${test.panel_version}` : ""}
+                {test.groups && test.groups.length ? ` · گروه‌ها: ${test.groups.map((g) => g.name).join(", ")}` : ""}
+              </span>
+            ) : (
+              <span>❌ اتصال ناموفق: {test.error}</span>
+            )}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button variant="outline" size="sm" disabled={testConn.isPending} onClick={() => testConn.mutate()}>
+            {testConn.isPending ? "در حال تست…" : "تست اتصال"}
+          </Button>
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره PasarGuard"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function BackupCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const [f, setF] = React.useState({
+    enabled: (items.backup_enabled ?? "1") === "1",
+    bot: (items.backup_include_bot ?? "1") === "1",
+    xui: (items.backup_include_xui ?? "1") === "1",
+    pg: (items.backup_include_pg ?? "0") === "1",
+    pg_db: (items.backup_include_pg_db ?? "0") === "1",
+    pg_db_container: items.pg_db_container ?? "",
+    pg_db_user: items.pg_db_user || "pasarguard",
+    pg_db_name: items.pg_db_name || "pasarguard",
+    pg_db_dump_cmd: items.pg_db_dump_cmd ?? "",
+    interval_value: items.backup_interval_value || "20",
+    interval_unit: items.backup_interval_unit || "minutes",
+    chat_id: items.backup_telegram_chat_id ?? "",
+  });
+  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateSettings({
+        backup_enabled: f.enabled ? "on" : "off",
+        backup_include_bot: f.bot ? "on" : "off",
+        backup_include_xui: f.xui ? "on" : "off",
+        backup_include_pg: f.pg ? "on" : "off",
+        backup_include_pg_db: f.pg_db ? "on" : "off",
+        pg_db_container: f.pg_db_container.trim(),
+        pg_db_user: f.pg_db_user.trim() || "pasarguard",
+        pg_db_name: f.pg_db_name.trim() || "pasarguard",
+        pg_db_dump_cmd: f.pg_db_dump_cmd.trim(),
+        backup_interval_value: String(Math.max(1, Number(f.interval_value) || 1)),
+        backup_interval_unit: f.interval_unit,
+        backup_telegram_chat_id: f.chat_id.trim(),
+        backup_xui_timeout_seconds: items.backup_xui_timeout_seconds ?? "180",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+  const Check = ({ k, label, hint }: { k: keyof typeof f; label: string; hint?: string }) => (
+    <label className="flex items-start gap-2 rounded-xl border border-border bg-white/[0.02] p-3 text-sm">
+      <input type="checkbox" checked={Boolean(f[k])} onChange={(e) => set(k, e.target.checked)} className="mt-0.5 h-4 w-4 accent-[hsl(var(--brand))]" />
+      <span><span className="font-bold text-white">{label}</span>{hint && <span className="block text-[11px] text-muted-foreground">{hint}</span>}</span>
+    </label>
+  );
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><DatabaseBackup className="h-5 w-5 text-muted-foreground" /> بکاپ‌گیری خودکار</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          بکاپِ زمان‌بندی‌شده به‌صورت خودکار ساخته و به تلگرام ارسال می‌شود. اگر آیدی چت خالی باشد، آرشیو روی خود سرور نگه داشته می‌شود (۳ نسخه‌ی آخر).
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-white">بکاپ خودکار</span>
+            <Badge variant={f.enabled ? "success" : "danger"}>{f.enabled ? "فعال" : "غیرفعال"}</Badge>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={f.enabled} onClick={() => set("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
+            <Button size="sm" variant="destructive" disabled={!f.enabled} onClick={() => set("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Check k="bot" label="دیتابیس ربات" hint="کاربران، سفارش‌ها، کیف پول" />
+          <Check k="xui" label="پنل x-ui" hint="دیتابیس/اینباندهای 3x-ui" />
+          <Check k="pg" label="PasarGuard (JSON)" hint="کاربران، ادمین‌ها و گروه‌ها (از API)" />
+        </div>
+
+        <div className="space-y-3 rounded-xl border border-brand/25 bg-brand/[0.04] p-4">
+          <Check k="pg_db" label="بکاپ کامل دیتابیس PasarGuard (دامپ SQL)" hint="کلِ دیتابیس Postgres با pg_dump — شاملِ تمام کاربران، مصرف و تاریخچه" />
+          {f.pg_db && (
+            <>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <Field label="نام کانتینر دیتابیس" hint="خالی = تشخیص خودکار"><Input value={f.pg_db_container} onChange={(e) => set("pg_db_container", e.target.value)} placeholder="auto-detect" dir="ltr" /></Field>
+                <Field label="یوزر دیتابیس"><Input value={f.pg_db_user} onChange={(e) => set("pg_db_user", e.target.value)} placeholder="pasarguard" dir="ltr" /></Field>
+                <Field label="نام دیتابیس"><Input value={f.pg_db_name} onChange={(e) => set("pg_db_name", e.target.value)} placeholder="pasarguard" dir="ltr" /></Field>
+              </div>
+              <Field label="دستور دلخواهِ بکاپ (پیشرفته — اختیاری)" hint="اگر پر شود به‌جای حالت بالا اجرا می‌شود؛ باید دامپ را در STDOUT بدهد. می‌تواند ssh به سرور مستر هم باشد.">
+                <textarea
+                  value={f.pg_db_dump_cmd}
+                  onChange={(e) => set("pg_db_dump_cmd", e.target.value)}
+                  rows={2}
+                  dir="ltr"
+                  placeholder="مثال: docker exec -i pasarguard-db pg_dump -U pasarguard pasarguard"
+                  className="w-full rounded-xl border border-input bg-card px-3 py-2 font-mono text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                />
+              </Field>
+              <p className="text-[11px] text-amber-300">⚠️ نیازمندِ دسترسیِ پنل به Docker روی همان سرورِ PasarGuard است (یا یک دستورِ ssh دلخواه). خروجی به‌صورت <code>.sql.gz</code> در همان آرشیوِ تلگرام قرار می‌گیرد.</p>
+            </>
+          )}
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="فاصله‌ی بکاپ"><Input value={f.interval_value} inputMode="numeric" onChange={(e) => set("interval_value", e.target.value)} /></Field>
+          <Field label="واحد">
+            <select
+              value={f.interval_unit}
+              onChange={(e) => set("interval_unit", e.target.value)}
+              className="h-10 w-full rounded-xl border border-input bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="minutes">دقیقه</option>
+              <option value="hours">ساعت</option>
+              <option value="days">روز</option>
+              <option value="weeks">هفته</option>
+            </select>
+          </Field>
+          <Field label="آیدی چت تلگرام (مقصد بکاپ)"><Input value={f.chat_id} onChange={(e) => set("chat_id", e.target.value)} dir="ltr" placeholder="-100..." /></Field>
+        </div>
+
+        <div className="flex justify-end">
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات بکاپ"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -330,6 +584,8 @@ export function Settings() {
         </CardContent>
       </Card>
 
+      <PrimaryBackendCard items={items} />
+
       <Card>
         <CardHeader>
           <CardTitle>اتصال پنل 3x-ui</CardTitle>
@@ -343,6 +599,10 @@ export function Settings() {
           ))}
         </CardContent>
       </Card>
+
+      <PasarGuardCard items={items} />
+
+      <BackupCard items={items} />
 
       <div className="sticky bottom-4 flex justify-end">
         <Button size="lg" disabled={save.isPending} onClick={() => save.mutate()}>

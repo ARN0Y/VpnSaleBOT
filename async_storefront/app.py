@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 import warnings
 
@@ -23,6 +24,8 @@ from .handlers import register_handlers
 from .panel import PanelClient
 from .provisioning import ProvisioningService
 from .qr import QRService
+
+LOG = logging.getLogger(__name__)
 
 if load_dotenv:
     load_dotenv()
@@ -64,6 +67,12 @@ async def post_shutdown(app: Application) -> None:
     panel: PanelClient | None = app.bot_data.get("panel")
     if panel:
         await panel.close()
+    pg_client = app.bot_data.get("pg_client")
+    if pg_client is not None:
+        try:
+            await pg_client.close()
+        except Exception:
+            LOG.debug("closing the PasarGuard client failed", exc_info=True)
     db: AsyncDatabase | None = app.bot_data.get("db")
     if db:
         await db.close()

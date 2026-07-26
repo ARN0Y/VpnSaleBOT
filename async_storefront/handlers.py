@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -26,7 +27,8 @@ from telegram.ext import (
 
 from .config import Settings
 from .db import AsyncDatabase
-from .provisioning import ProvisioningService
+from .pasarguard import PasarGuardClient, _iso_to_epoch as _pg_iso_to_epoch
+from .provisioning import PG_INBOUND_SENTINEL, ProvisioningService
 from .qr import QRService
 from .util import now_ms, now_ts
 
@@ -162,6 +164,92 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
 
 async def infinite_enabled(db: AsyncDatabase) -> bool:
     return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
+# ───────────────────────── PasarGuard backend ─────────────────────────
+async def pg_configured(db: AsyncDatabase) -> bool:
+    enabled = str(await db.get_setting("pg_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    if not enabled:
+        return False
+    return bool((await db.get_setting("pg_base_url", "")).strip()) and bool((await db.get_setting("pg_username", "")).strip())
+
+
+async def pg_is_primary(db: AsyncDatabase) -> bool:
+    """True when the main 'buy' flow should sell from PasarGuard instead of 3x-ui."""
+    backend = str(await db.get_setting("primary_backend", "xui") or "xui").strip().lower()
+    return backend == "pasarguard" and await pg_configured(db)
+
+
+async def pg_unit_price_override(db: AsyncDatabase) -> int:
+    """When PasarGuard is the primary backend, its own per-GB price
+    (``pg_price_per_gb``) overrides the shop's flat/tiered price for regular
+    users. ``0`` means "use ElsaVPN's normal pricing". Agents with their own flat
+    rate are unaffected (that check runs before this one)."""
+    if not await pg_is_primary(db):
+        return 0
+    try:
+        return max(0, int(float(await db.get_setting("pg_price_per_gb", "0") or "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def pg_purchase_days(db: AsyncDatabase) -> int:
+    """Validity window (days) for a PasarGuard purchase/renewal.
+
+    ``pg_default_days`` overrides it when set; empty/0 falls back to the shop's
+    own ``purchase_duration_days`` so PasarGuard services expire on exactly the
+    same schedule as 3x-ui ones (ElsaVPN's 30-day rule) with one setting to
+    change instead of two."""
+    raw = str(await db.get_setting("pg_default_days", "") or "").strip()
+    if raw:
+        try:
+            return max(0, int(float(raw)))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(0, int(float(await db.get_setting("purchase_duration_days", "30") or "30")))
+    except (TypeError, ValueError):
+        return 30
+
+
+async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
+    """Build (and cache) a PasarGuardClient from settings; rebuild it when the
+    panel address/username/TLS changes so admin edits apply without a restart."""
+    app = context.application
+    db: AsyncDatabase = app.bot_data["db"]
+    if not await pg_configured(db):
+        return None
+    base = (await db.get_setting("pg_base_url", "")).strip().rstrip("/")
+    user = (await db.get_setting("pg_username", "")).strip()
+    pwd = (await db.get_setting("pg_password", "")).strip()
+    verify = str(await db.get_setting("pg_verify_tls", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+    key = f"{base}|{user}|{int(verify)}"
+    client = app.bot_data.get("pg_client")
+    if client is not None and app.bot_data.get("pg_client_key") == key:
+        return client
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.close()
+    try:
+        client = PasarGuardClient(base_url=base, username=user, password=pwd, verify_tls=verify)
+    except Exception:
+        LOG.exception("failed to build PasarGuard client")
+        return None
+    app.bot_data["pg_client"] = client
+    app.bot_data["pg_client_key"] = key
+    return client
+
+
+async def pg_group_ids(db: AsyncDatabase, pg_client) -> list[int]:
+    """Resolve the configured PasarGuard group name to its panel id(s)."""
+    group = str(await db.get_setting("pg_group", "") or "").strip()
+    if not group:
+        return []
+    return await pg_client.resolve_group_ids([group])
+
+
+def is_pg_subscription(sub: dict) -> bool:
+    return int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL
 
 
 async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
@@ -625,6 +713,9 @@ async def unit_price_for_gb(db: AsyncDatabase, user_id: int, gb: int, agent=None
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     if agent_price > 0:
         return agent_price
+    pg_unit = await pg_unit_price_override(db)
+    if pg_unit > 0:
+        return pg_unit
     tiers = await get_price_tiers(db)
     if tiers:
         chosen = tiers[0]["price_per_gb"]
@@ -646,6 +737,9 @@ async def effective_unit_price(db: AsyncDatabase, user_id: int, agent=None) -> i
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     if agent_price > 0:
         return agent_price
+    pg_unit = await pg_unit_price_override(db)
+    if pg_unit > 0:
+        return pg_unit
     tiers = await get_price_tiers(db)
     if tiers:
         return int(tiers[0]["price_per_gb"])
@@ -982,16 +1076,36 @@ async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     qr: QRService = context.application.bot_data["qr"]
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        links = await provisioning.process_checkout(
-            user_id=update.effective_user.id,
-            plan_id=0,
-            gb=gb,
-            qty=qty,
-            unit_price=unit_price,
-            final_total=total,
-            client_name=client_name,
-            idempotency_key=str(checkout.get("idem") or query.id),
-        )
+        if await pg_is_primary(db):
+            pg_client = await get_pg_client(context)
+            if pg_client is None:
+                raise ValueError("اتصال به سرور برقرار نشد. لطفاً با پشتیبانی تماس بگیرید.")
+            group_ids = await pg_group_ids(db, pg_client)
+            if not group_ids:
+                raise ValueError("گروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.")
+            links = await provisioning.process_pg_checkout(
+                pg_client=pg_client,
+                group_ids=group_ids,
+                user_id=update.effective_user.id,
+                gb=gb,
+                qty=qty,
+                unit_price=unit_price,
+                final_total=total,
+                days=await pg_purchase_days(db),
+                client_name=client_name,
+                idempotency_key=str(checkout.get("idem") or query.id),
+            )
+        else:
+            links = await provisioning.process_checkout(
+                user_id=update.effective_user.id,
+                plan_id=0,
+                gb=gb,
+                qty=qty,
+                unit_price=unit_price,
+                final_total=total,
+                client_name=client_name,
+                idempotency_key=str(checkout.get("idem") or query.id),
+            )
     except ValueError as exc:
         clear_flow_state(context)
         await edit_text(
@@ -1266,7 +1380,14 @@ async def _sync_subscriptions_snapshot(panel, db: AsyncDatabase, subs: list[dict
     if panel is None:
         return
     now_s = now_ts()
-    stale = [s for s in subs if now_s - int(s.get("panel_synced_at") or 0) > 60 and str(s.get("sub_id") or "").strip()]
+    # PasarGuard subs live on a different backend — never look them up in 3x-ui
+    # (they are refreshed by _sync_pg_snapshot instead).
+    stale = [
+        s for s in subs
+        if now_s - int(s.get("panel_synced_at") or 0) > 60
+        and str(s.get("sub_id") or "").strip()
+        and not is_pg_subscription(s)
+    ]
     if not stale:
         return
 
@@ -1287,6 +1408,58 @@ async def _sync_subscriptions_snapshot(panel, db: AsyncDatabase, subs: list[dict
     await asyncio.gather(*[_one(s) for s in stale])
 
 
+async def _sync_pg_snapshot(context: ContextTypes.DEFAULT_TYPE, subs: list[dict]) -> None:
+    """Refresh the visible PasarGuard subs from their own panel so «اشتراک‌های من»
+    shows live volume/remaining/expiry for them too. Updates the row dicts in
+    place and never raises."""
+    db: AsyncDatabase = context.application.bot_data["db"]
+    now_s = now_ts()
+    stale = [
+        s for s in subs
+        if is_pg_subscription(s)
+        and str(s.get("sub_id") or "").strip()
+        and now_s - int(s.get("panel_synced_at") or 0) > 60
+    ]
+    if not stale or not await pg_configured(db):
+        return
+    client = await get_pg_client(context)
+    if client is None:
+        return
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+
+    async def _one(s: dict) -> None:
+        try:
+            pg_user = await client.get_user(str(s.get("sub_id") or ""))
+            if not pg_user:
+                return
+            await provisioning._sync_pg_subscription_row(str(s.get("sub_id")), pg_user)
+            total = int(pg_user.get("data_limit") or 0)
+            used = int(pg_user.get("used_traffic") or 0)
+            s["panel_total_bytes"] = total
+            s["panel_used_bytes"] = used
+            s["panel_remaining_bytes"] = max(0, total - used) if total > 0 else 0
+            s["panel_enabled"] = 1 if str(pg_user.get("status") or "active") in {"active", "on_hold"} else 0
+            s["panel_expiry_time"] = int(_pg_iso_to_epoch(pg_user.get("expire")) * 1000)
+            s["panel_synced_at"] = now_s
+            s["_pg_status"] = str(pg_user.get("status") or "")
+        except Exception:
+            LOG.debug("PasarGuard my-subs sync failed sub_id=%s", s.get("sub_id"), exc_info=True)
+
+    await asyncio.gather(*[_one(s) for s in stale])
+
+
+def pg_status_label(sub: dict) -> str:
+    """Human status for a PasarGuard service (falls back to the shared 3x-ui
+    style label when the panel status is unknown)."""
+    return {
+        "active": "فعال",
+        "on_hold": "در انتظار اولین اتصال",
+        "limited": "اتمام حجم",
+        "expired": "منقضی",
+        "disabled": "غیرفعال",
+    }.get(str(sub.get("_pg_status") or ""), subscription_status_label(sub))
+
+
 async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int, *, new_card: bool) -> None:
     db: AsyncDatabase = context.application.bot_data["db"]
     page_size = 8
@@ -1298,18 +1471,34 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
     total_pages = max(1, (total + page_size - 1) // page_size)
     safe_page = min(max(0, int(page)), total_pages - 1)
     subs = await db.get_user_subscription_page(update.effective_user.id, safe_page, page_size)
-    # Refresh the visible page from the panel so status/remaining/expiry are live.
+    # Refresh the visible page from the panels so status/remaining/expiry are live.
     await _sync_subscriptions_snapshot(context.application.bot_data.get("panel"), db, subs)
+    await _sync_pg_snapshot(context, subs)
     lines = [
         "📋 <b>اشتراک‌های من</b>",
         f"صفحه <b>{safe_page + 1}</b> از <b>{total_pages}</b> | مجموع: <b>{total}</b>",
         "",
     ]
+    pg_buttons: list[InlineKeyboardButton] = []
     for idx, sub in enumerate(subs, start=safe_page * page_size + 1):
         name = html.escape(str(sub.get("client_email") or "بدون نام"))
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
         is_infinite = int(sub.get("is_infinite") or 0) == 1
+        if is_pg_subscription(sub):
+            # PasarGuard service: the connection link is token-based and fetched
+            # live, so we show the live numbers plus a button to (re)deliver it.
+            gb_label = f"{int(sub.get('gb') or 0)} گیگ" if not is_test else f"{int(sub.get('panel_total_bytes') or 0) / (1024 ** 2):.0f} MB"
+            lines.append(
+                f"{idx}. <b>{name}</b> | 🌐 سرور اختصاصی{' | 🧪 تست' if is_test else ''}\n"
+                f"   📦 حجم: {gb_label} | باقی‌مانده: {subscription_remaining_label(sub)}\n"
+                f"   ⏳ زمان باقی‌مانده: {subscription_expiry_label(sub)} | وضعیت: {pg_status_label(sub)}"
+            )
+            raw_name = str(sub.get("client_email") or sub.get("sub_id") or "")
+            pg_buttons.append(
+                InlineKeyboardButton(f"🔗 لینک {raw_name[:18]}", callback_data=f"pgsub:link:{sub.get('sub_id')}")
+            )
+            continue
         if is_infinite:
             # Fair-usage "infinite" config: never reveal the volume cap or the
             # remaining traffic — only the type and on/off status.
@@ -1350,6 +1539,8 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
     if safe_page < total_pages - 1:
         nav.append(InlineKeyboardButton("بعدی", callback_data=f"subs:page:{safe_page + 1}"))
     rows = []
+    for pg_button in pg_buttons:
+        rows.append([pg_button])
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")])
@@ -1371,6 +1562,48 @@ async def my_subscriptions_page(update: Update, context: ContextTypes.DEFAULT_TY
     await ensure_user(update, context)
     page = int(update.callback_query.data.rsplit(":", 1)[1])
     await render_my_subscriptions(update, context, page, new_card=False)
+
+
+async def pgsub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-deliver a PasarGuard service's subscription link (fetched live by
+    username). Ownership is enforced via get_subscription_for_user."""
+    query = update.callback_query
+    await query.answer()
+    await ensure_user(update, context)
+    sub_id = query.data.split(":", 2)[2]
+    db: AsyncDatabase = context.application.bot_data["db"]
+    sub = await db.get_subscription_for_user(update.effective_user.id, sub_id)
+    if not sub or not is_pg_subscription(sub):
+        await _answer_query(query, "این سرویس پیدا نشد.", show_alert=True)
+        return
+    client = await get_pg_client(context)
+    if client is None:
+        await _answer_query(query, "سرور در حال حاضر در دسترس نیست.", show_alert=True)
+        return
+    try:
+        pg_user = await client.get_user(sub_id)
+    except Exception:
+        LOG.exception("pgsub_link get_user failed sub_id=%s", sub_id)
+        await _answer_query(query, "خطا در دریافت لینک. بعداً تلاش کنید.", show_alert=True)
+        return
+    sub_url = str((pg_user or {}).get("subscription_url") or "")
+    if not sub_url:
+        await _answer_query(query, "لینک این سرویس یافت نشد. با پشتیبانی تماس بگیرید.", show_alert=True)
+        return
+    qr: QRService = context.application.bot_data["qr"]
+    png = await qr.png(sub_url)
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=BytesIO(png),
+        caption=(
+            "🌐 <b>سرور اختصاصی</b>\n\n"
+            "🔗 <b>لینک اشتراک شما:</b>\n"
+            f"<code>{html.escape(sub_url)}</code>\n\n"
+            "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_keyboard(),
+    )
 
 
 def renewal_label(sub: dict) -> str:
@@ -1518,12 +1751,21 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await edit_text(query, "⚠️ این اشتراک پیدا نشد. لطفاً دوباره از لیست انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
     name = str(sub.get("client_email") or sub_id)
+    is_pg = is_pg_subscription(sub)
+    if is_pg and not await pg_configured(db):
+        await edit_text(
+            query,
+            "🌐 <b>این سرویس روی سرور اختصاصی است.</b>\n\n"
+            "تمدید آن در حال حاضر ممکن نیست؛ لطفاً با پشتیبانی در ارتباط باشید.",
+            back_keyboard(),
+        )
+        return ConversationHandler.END
     min_gb = await minimum_purchase_gb(db)
-    context.user_data["renewal"] = {"sub_id": sub_id, "client_name": name}
+    context.user_data["renewal"] = {"sub_id": sub_id, "client_name": name, "is_pg": is_pg}
     await edit_text(
         query,
         "🔁 <b>تمدید اشتراک</b>\n\n"
-        f"کانفیگ انتخابی: <b>{html.escape(name)}</b>\n"
+        f"کانفیگ انتخابی: <b>{html.escape(name)}</b>{' | 🌐 سرور اختصاصی' if is_pg else ''}\n"
         f"شناسه: <code>{html.escape(sub_id)}</code>\n\n"
         f"چه مقدار حجم اضافه شود؟\nحداقل حجم مجاز: <b>{min_gb}</b> گیگ",
         await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb),
@@ -1667,14 +1909,29 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
     await edit_flow_query(update, context, "⏳ <b>در حال تمدید اشتراک...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
-        sub_link = await provisioning.process_renewal(
-            user_id=update.effective_user.id,
-            sub_id=sub_id,
-            gb=gb,
-            unit_price=unit_price,
-            final_total=total,
-            idempotency_key=str(renewal.get("idem") or query.id),
-        )
+        if renewal.get("is_pg"):
+            pg_client = await get_pg_client(context)
+            if pg_client is None:
+                raise ValueError("اتصال به سرور برقرار نشد. لطفاً با پشتیبانی تماس بگیرید.")
+            sub_link = await provisioning.process_pg_renewal(
+                pg_client=pg_client,
+                user_id=update.effective_user.id,
+                sub_id=sub_id,
+                gb=gb,
+                unit_price=unit_price,
+                final_total=total,
+                days=await pg_purchase_days(db),
+                idempotency_key=str(renewal.get("idem") or query.id),
+            )
+        else:
+            sub_link = await provisioning.process_renewal(
+                user_id=update.effective_user.id,
+                sub_id=sub_id,
+                gb=gb,
+                unit_price=unit_price,
+                final_total=total,
+                idempotency_key=str(renewal.get("idem") or query.id),
+            )
     except ValueError as exc:
         clear_flow_state(context)
         await edit_text(
@@ -1712,8 +1969,11 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     db: AsyncDatabase = context.application.bot_data["db"]
     agent = await db.get_agent(update.effective_user.id)
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
+    pg_unit = await pg_unit_price_override(db)
     tiers = await get_price_tiers(db)
-    if agent_price <= 0 and tiers:
+    # A PasarGuard flat rate replaces the tier table — showing stale brackets
+    # that nobody is charged from would be misleading.
+    if agent_price <= 0 and pg_unit <= 0 and tiers:
         lines = [
             "❄️ <b>تعرفه پلکانی سرویس‌ها</b>",
             "هر چه بیشتر بخرید، هر گیگ ارزان‌تر! 📉",
@@ -1736,12 +1996,22 @@ async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await new_flow_card(update, context, "\n".join(lines), back_keyboard())
         return
     unit_price = await effective_unit_price(db, update.effective_user.id, agent)
+    # Volume purchases carry a validity window (default 30 days) — the tariff
+    # card used to promise "no time limit", which stopped being true.
+    duration_days = await pg_purchase_days(db) if await pg_is_primary(db) else _positive_int(
+        await db.get_setting("purchase_duration_days", "30"), 30
+    )
+    validity_line = (
+        f"<i>پرداخت بر اساس حجم مصرفی — اعتبار زمانی هر سرویس {duration_days} روز است.</i>"
+        if duration_days > 0
+        else "<i>پرداخت بر اساس حجم مصرفی — بدون محدودیت زمانی.</i>"
+    )
     await new_flow_card(
         update,
         context,
         "🏷 <b>تعرفه سرویس‌ها</b>\n\n"
         f"💎 قیمت هر گیگابایت برای شما: <b>{unit_price:,}</b> تومان\n\n"
-        "<i>پرداخت بر اساس حجم مصرفی — بدون محدودیت زمانی.</i>",
+        f"{validity_line}",
         back_keyboard(),
     )
 
@@ -1773,12 +2043,31 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "⏳ <b>در حال ساخت کانفیگ تست...</b>\n\n"
         "حجم تست ۲۰۰ مگابایت و اعتبار زمانی آن ۱۰ دقیقه است.",
     )
+    db: AsyncDatabase = context.application.bot_data["db"]
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
     qr: QRService = context.application.bot_data["qr"]
     idem_key = query.id if query else f"test-{update.effective_user.id}-{update.effective_message.message_id}"
+    # The test config must be created on whichever panel is actually selling —
+    # otherwise it silently hits 3x-ui on a PasarGuard-primary deployment.
+    pg_client = None
+    group_ids: list[int] = []
+    if await pg_is_primary(db):
+        pg_client = await get_pg_client(context)
+        if pg_client is not None:
+            group_ids = await pg_group_ids(db, pg_client)
+            if not group_ids:
+                await send_flow_prompt(
+                    update,
+                    context,
+                    "⚠️ <b>کانفیگ تست ساخته نشد.</b>\n\nگروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.",
+                    back_keyboard(),
+                )
+                return
     try:
         sub_link = await provisioning.process_agent_test_config(
             user_id=update.effective_user.id,
+            pg_client=pg_client,
+            group_ids=group_ids,
             idempotency_key=idem_key,
         )
     except ValueError as exc:
@@ -2788,6 +3077,32 @@ def build_main_conversation() -> ConversationHandler:
     )
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global safety net: log any unhandled exception and reassure the user so a
+    crash in one handler can never leave the bot silent or in a broken state.
+    Never raises (any failure while reporting is swallowed)."""
+    LOG.exception("Unhandled error while processing update", exc_info=context.error)
+    try:
+        if isinstance(update, Update):
+            chat = update.effective_chat
+            if update.callback_query:
+                with contextlib.suppress(Exception):
+                    await update.callback_query.answer()
+            if chat is not None:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=(
+                        "⚠️ <b>یک خطای غیرمنتظره رخ داد.</b>\n\n"
+                        "اگر مبلغی کسر شده ولی سرویس را دریافت نکرده‌اید نگران نباشید؛ "
+                        "تراکنش‌های ناقص به‌صورت خودکار برگشت می‌خورند. لطفاً دوباره تلاش کنید "
+                        "یا با پشتیبانی در تماس باشید."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+    except Exception:
+        LOG.exception("Failed to deliver the error notice to the user")
+
+
 def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start))
     # Admin custom text input (group=-1 runs before ConversationHandler)
@@ -2810,9 +3125,12 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(account_info, pattern=r"^menu:account$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions, pattern=r"^menu:subs$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions_page, pattern=r"^subs:page:\d+$"))
+    app.add_handler(CallbackQueryHandler(pgsub_link, pattern=r"^pgsub:link:"))
     app.add_handler(CallbackQueryHandler(tariffs_info, pattern=r"^menu:tariffs$"))
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
     app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
     app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))
+    # Global safety net for any unhandled exception in any handler.
+    app.add_error_handler(on_error)
