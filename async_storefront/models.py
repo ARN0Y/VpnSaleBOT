@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+# Subscriptions created on the PasarGuard backend are tagged with this sentinel
+# inbound_id so the bot can tell them apart from 3x-ui subs (schema-free marker).
+# It lives here — the dependency-free module — so db.py and provisioning.py can
+# both use it without an import cycle.
+PG_INBOUND_SENTINEL = -100
+
 
 class AgentAccess(str ,Enum):
     OPEN = "open"

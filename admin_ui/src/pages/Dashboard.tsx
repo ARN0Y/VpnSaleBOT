@@ -17,6 +17,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { UserLink } from "@/components/UserLink";
+import { PanelBadge } from "@/components/ui/panel-badge";
+import type { Backend } from "@/lib/backend";
 import { toman, jalaliDate } from "@/lib/utils";
 import { statusBadge } from "@/lib/status";
 
@@ -135,7 +137,7 @@ export function Dashboard() {
           <Table>
             <THead>
               <TR>
-                <TH>کاربر</TH><TH>کانفیگ</TH><TH>نوع</TH><TH>حجم</TH><TH>مبلغ</TH><TH>وضعیت</TH><TH>تاریخ</TH>
+                <TH>کاربر</TH><TH>کانفیگ</TH><TH>پنل</TH><TH>نوع</TH><TH>حجم</TH><TH>مبلغ</TH><TH>وضعیت</TH><TH>تاریخ</TH>
               </TR>
             </THead>
             <TBody>
@@ -149,6 +151,7 @@ export function Dashboard() {
                       <div className="text-white">{String(o.subscription_name || o.client_name || "رندوم")}{extra}</div>
                       {o.subscription_id ? <code className="text-[0.68rem] text-muted-foreground">{String(o.subscription_id)}</code> : null}
                     </TD>
+                    <TD><PanelBadge backend={(o.backend as Backend) || "xui"} /></TD>
                     <TD className="text-xs">{o.order_type === "renewal" ? "تمدید" : "خرید"}</TD>
                     <TD>{o.gb}×{o.qty}</TD>
                     <TD>{toman(o.final_price)}</TD>
@@ -158,7 +161,7 @@ export function Dashboard() {
                 );
               })}
               {data.recent_orders.length === 0 && (
-                <TR><TD colSpan={7} className="py-8 text-center text-muted-foreground">هنوز سفارشی ثبت نشده است.</TD></TR>
+                <TR><TD colSpan={8} className="py-8 text-center text-muted-foreground">هنوز سفارشی ثبت نشده است.</TD></TR>
               )}
             </TBody>
           </Table>

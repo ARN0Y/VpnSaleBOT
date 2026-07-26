@@ -6,7 +6,7 @@ import secrets
 
 from .agent import AgentService
 from .db import AsyncDatabase
-from .models import PaymentMethod, PanelClientPayload
+from .models import PG_INBOUND_SENTINEL, PaymentMethod, PanelClientPayload
 from .panel import PanelClient
 from .pasarguard import _iso_to_epoch
 from .util import gb_to_bytes, now_ts, sanitize_client_name
@@ -16,9 +16,7 @@ LOG = logging.getLogger(__name__)
 TEST_CONFIG_BYTES = 200 * 1024 * 1024
 TEST_CONFIG_TTL_SECONDS = 10 * 60
 
-# Subscriptions created on the PasarGuard backend are tagged with this sentinel
-# inbound_id so the bot can tell them apart from 3x-ui subs (schema-free marker).
-PG_INBOUND_SENTINEL = -100
+__all__ = ["ProvisioningService", "PG_INBOUND_SENTINEL", "TEST_CONFIG_BYTES", "TEST_CONFIG_TTL_SECONDS"]
 
 
 def _safe_positive_int(value, default: int = 1) -> int:

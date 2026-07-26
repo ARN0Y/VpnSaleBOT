@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator, Iterable
 import aiosqlite
 
 from .env_sync import BUSINESS_ENV_TO_SETTING, INFRA_ENV_TO_SETTING, PANEL_ENV_TO_COLUMN
-from .models import AgentAccess, PaymentMethod
+from .models import PG_INBOUND_SENTINEL, AgentAccess, PaymentMethod
 from .util import iran_day_bounds_ts, now_ts
 
 
@@ -626,6 +626,9 @@ class AsyncDatabase:
             "card_name": "",
             "crypto_address": "TRC20 Address Not Set",
             "minimum_purchase_gb": "1",
+            # Validity window (days) granted to a volume purchase / renewal.
+            # 0 = no time limit (the pre-556b7dd behaviour).
+            "purchase_duration_days": "30",
             "backup_enabled": "1",
             "backup_interval_days": "1",
             "backup_interval_value": "20",
@@ -1763,11 +1766,11 @@ class AsyncDatabase:
         return int(row["c"] if row else 0)
 
     async def admin_user_subscription_ids(self, user_id: int) -> list[str]:
-        # PasarGuard-backed subs (inbound_id -100) are excluded: bulk enable /
-        # disable drives the 3x-ui panel, which knows nothing about them.
+        # PasarGuard-backed subs are excluded: bulk enable/disable drives the
+        # 3x-ui panel, which knows nothing about them.
         rows = await self.fetchall(
-            "SELECT sub_id FROM subscriptions WHERE user_id=? AND COALESCE(inbound_id,0)<>-100 ORDER BY created_at DESC",
-            (int(user_id),),
+            "SELECT sub_id FROM subscriptions WHERE user_id=? AND COALESCE(inbound_id,0)<>? ORDER BY created_at DESC",
+            (int(user_id), PG_INBOUND_SENTINEL),
         )
         return [str(row["sub_id"]) for row in rows if str(row["sub_id"] or "").strip()]
 
@@ -2170,6 +2173,14 @@ class AsyncDatabase:
                 LIMIT 1
               ) AS subscription_id,
               (
+                SELECT s.inbound_id
+                FROM subscriptions s
+                WHERE (COALESCE(orders_view.target_sub_id,'')<>'' AND s.sub_id=orders_view.target_sub_id)
+                   OR (COALESCE(orders_view.target_sub_id,'')='' AND s.order_id={order_id_expr})
+                ORDER BY s.created_at ASC
+                LIMIT 1
+              ) AS subscription_inbound_id,
+              (
                 SELECT COUNT(*)
                 FROM subscriptions s
                 WHERE (COALESCE(orders_view.target_sub_id,'')<>'' AND s.sub_id=orders_view.target_sub_id)
@@ -2231,6 +2242,18 @@ class AsyncDatabase:
         row["subscription_name"] = primary_name or fallback_name or row.get("client_name")
         row["subscription_id"] = primary_id or fallback_id or ""
         row["subscription_count"] = int(primary_count or fallback_count or 0)
+        # Which panel served this order. Normally read from the subscription's
+        # inbound_id; when the config row is gone (deleted/rolled back) the
+        # order_id prefix still tells us — PasarGuard orders are "<uid>-pg-…"
+        # and "<uid>-pgrenew-…".
+        inbound = row.get("subscription_inbound_id")
+        if inbound is not None:
+            backend = "pasarguard" if int(inbound) == PG_INBOUND_SENTINEL else "xui"
+        else:
+            oid = str(row.get("order_id") or "")
+            backend = "pasarguard" if ("-pg-" in oid or "-pgrenew-" in oid) else "xui"
+        row["backend"] = backend
+        row["backend_label"] = "PasarGuard" if backend == "pasarguard" else "3x-ui"
         return row
 
     async def delete_load_test_artifacts(self, user_id: int = 990000001) -> dict[str, int]:

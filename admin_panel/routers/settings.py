@@ -22,6 +22,7 @@ LOG = logging.getLogger(__name__)
 EDITABLE_KEYS = (
     "price_per_gb",
     "minimum_purchase_gb",
+    "purchase_duration_days",
     "card_number",
     "card_name",
     "crypto_address",
@@ -35,6 +36,7 @@ EDITABLE_KEYS = (
 INT_SETTING_KEYS = {
     "price_per_gb",
     "minimum_purchase_gb",
+    "purchase_duration_days",
     "default_agent_credit_limit_toman",
     "default_agent_price_per_gb",
     "broadcast_rate_per_second",
@@ -43,6 +45,7 @@ INT_SETTING_KEYS = {
 SETTING_FORM_DEFAULTS = {
     "price_per_gb": "200000",
     "minimum_purchase_gb": "1",
+    "purchase_duration_days": "30",
     "default_agent_credit_limit_toman": "0",
     "default_agent_price_per_gb": "0",
     "broadcast_rate_per_second": "25",
@@ -62,6 +65,12 @@ SETTING_META = {
         "help": "کمترین حجم مجاز برای خرید جدید و تمدید. دکمه‌های ربات با ضریب‌های ۱، ۲، ۳ و ۴ همین مقدار ساخته می‌شوند.",
         "type": "number",
         "min": "1",
+    },
+    "purchase_duration_days": {
+        "label": "مدت اعتبار خرید (روز)",
+        "help": "هر خرید/تمدید حجمی این مدت اعتبار زمانی می‌گیرد. ۰ یعنی بدون محدودیت زمانی.",
+        "type": "number",
+        "min": "0",
     },
     "card_number": {"label": "شماره کارت"},
     "card_name": {"label": "نام صاحب کارت"},

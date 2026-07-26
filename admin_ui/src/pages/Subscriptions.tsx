@@ -10,6 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { UserLink } from "@/components/UserLink";
+import { PanelBadge } from "@/components/ui/panel-badge";
+import { isPasarGuard } from "@/lib/backend";
 import { formatGb } from "@/lib/utils";
 
 function useDebounced<T>(value: T, delay = 350): T {
@@ -68,6 +70,7 @@ export function Subscriptions() {
                 <TR>
                   <TH>نام کانفیگ</TH>
                   <TH>کاربر</TH>
+                  <TH>پنل</TH>
                   <TH>حجم</TH>
                   <TH>وضعیت</TH>
                   <TH>اقدام</TH>
@@ -77,6 +80,9 @@ export function Subscriptions() {
                 {data.items.map((s) => {
                   const subId = String(s.sub_id);
                   const enabled = Number(s.panel_enabled) === 1;
+                  // PasarGuard configs are not on 3x-ui — the enable/disable call
+                  // targets x-ui, so it is offered only for x-ui configs.
+                  const pg = isPasarGuard(s.inbound_id);
                   return (
                     <TR key={subId}>
                       <TD className="font-mono text-xs">
@@ -85,27 +91,32 @@ export function Subscriptions() {
                         </Link>
                       </TD>
                       <TD className="text-sm"><UserLink userId={String(s.user_id)} name={s.first_name} username={s.username} /></TD>
+                      <TD><PanelBadge inboundId={s.inbound_id} /></TD>
                       <TD>{formatGb(s.gb as number)} GB</TD>
                       <TD>
                         <Badge variant={enabled ? "success" : "muted"}>{enabled ? "فعال" : "غیرفعال"}</Badge>
                       </TD>
                       <TD>
-                        <Button
-                          size="sm"
-                          variant={enabled ? "destructive" : "default"}
-                          disabled={toggle.isPending}
-                          onClick={() => toggle.mutate({ subId, enabled: !enabled })}
-                        >
-                          {enabled ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
-                          {enabled ? "غیرفعال" : "فعال"}
-                        </Button>
+                        {pg ? (
+                          <span className="text-[0.68rem] text-muted-foreground">مدیریت از پنل PasarGuard</span>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant={enabled ? "destructive" : "default"}
+                            disabled={toggle.isPending}
+                            onClick={() => toggle.mutate({ subId, enabled: !enabled })}
+                          >
+                            {enabled ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
+                            {enabled ? "غیرفعال" : "فعال"}
+                          </Button>
+                        )}
                       </TD>
                     </TR>
                   );
                 })}
                 {data.items.length === 0 && (
                   <TR>
-                    <TD colSpan={5} className="py-8 text-center text-muted-foreground">موردی یافت نشد.</TD>
+                    <TD colSpan={6} className="py-8 text-center text-muted-foreground">موردی یافت نشد.</TD>
                   </TR>
                 )}
               </TBody>

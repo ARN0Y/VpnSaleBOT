@@ -10,8 +10,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 import { Pager } from "@/components/ui/pager";
 import { UserLink } from "@/components/UserLink";
+import { PanelBadge } from "@/components/ui/panel-badge";
 import { toman, jalaliDate } from "@/lib/utils";
 import { statusBadge } from "@/lib/status";
+import type { Backend } from "@/lib/backend";
 
 function useDebounced<T>(value: T, delay = 350): T {
   const [v, setV] = React.useState(value);
@@ -64,6 +66,7 @@ export function Orders() {
               <TR>
                 <TH>کاربر</TH>
                 <TH>کانفیگ</TH>
+                <TH>پنل</TH>
                 <TH>نوع</TH>
                 <TH>حجم</TH>
                 <TH>مبلغ</TH>
@@ -82,6 +85,7 @@ export function Orders() {
                       <div className="text-white">{String(o.subscription_name || o.client_name || "رندوم")}{extra}</div>
                       {o.subscription_id ? <code className="text-[0.68rem] text-muted-foreground">{String(o.subscription_id)}</code> : null}
                     </TD>
+                    <TD><PanelBadge backend={(o.backend as Backend) || "xui"} /></TD>
                     <TD className="text-xs">{o.order_type === "renewal" ? "تمدید" : "خرید"}</TD>
                     <TD>{o.gb}×{o.qty} GB</TD>
                     <TD>{toman(o.final_price)}</TD>
@@ -94,7 +98,7 @@ export function Orders() {
               })}
               {data.items.length === 0 && (
                 <TR>
-                  <TD colSpan={7} className="py-8 text-center text-muted-foreground">
+                  <TD colSpan={8} className="py-8 text-center text-muted-foreground">
                     موردی یافت نشد.
                   </TD>
                 </TR>

@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { CopyButton } from "@/components/ui/copy-button";
 import { EmptyState } from "@/components/ui/empty-state";
+import { PanelBadge } from "@/components/ui/panel-badge";
+import { isPasarGuard } from "@/lib/backend";
 import { gbFromBytes, jalaliDate } from "@/lib/utils";
 import { n, s, type UserMutations } from "./helpers";
 import type { UserDetailBundle } from "@/lib/types";
@@ -80,6 +82,7 @@ export function SubscriptionsTab({
             const subId = s(sub.sub_id);
             const enabled = n(sub.panel_enabled) === 1;
             const isTest = n(sub.is_test) === 1;
+            const pg = isPasarGuard(sub.inbound_id);
             const total = n(sub.panel_total_bytes);
             const used = n(sub.panel_used_bytes);
             const pct = total > 0 ? (used / total) * 100 : 0;
@@ -90,6 +93,7 @@ export function SubscriptionsTab({
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <b className="text-white">{s(sub.client_email) || "بدون نام"}</b>
+                      <PanelBadge inboundId={sub.inbound_id} />
                       {isTest && (
                         <Badge variant="warning" className="gap-1">
                           <FlaskConical className="h-3 w-3" /> تست
@@ -103,15 +107,19 @@ export function SubscriptionsTab({
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant={enabled ? "destructive" : "default"}
-                      disabled={mutations.subToggle.isPending}
-                      onClick={() => mutations.subToggle.mutate({ subId, enabled: !enabled })}
-                    >
-                      {enabled ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
-                      {enabled ? "غیرفعال" : "فعال"}
-                    </Button>
+                    {/* Enable/disable drives 3x-ui; PasarGuard configs are managed
+                        from their own panel, so the button is not offered. */}
+                    {!pg && (
+                      <Button
+                        size="sm"
+                        variant={enabled ? "destructive" : "default"}
+                        disabled={mutations.subToggle.isPending}
+                        onClick={() => mutations.subToggle.mutate({ subId, enabled: !enabled })}
+                      >
+                        {enabled ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
+                        {enabled ? "غیرفعال" : "فعال"}
+                      </Button>
+                    )}
                     <Link to={`/subscriptions/${encodeURIComponent(subId)}`}>
                       <Button size="sm" variant="outline">
                         <ExternalLink className="h-4 w-4" /> جزئیات
