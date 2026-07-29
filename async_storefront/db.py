@@ -663,6 +663,15 @@ class AsyncDatabase:
             "price_tiers": "",
             "broadcast_rate_per_second": "25",
             "broadcast_concurrency": "16",
+            # ── Free test config ──
+            # Every user may take `test_config_user_limit` tests in total (not per
+            # day). Agents holding the "test" permission get a DAILY quota instead:
+            # their own agents.daily_test_limit, or this default when that is 0.
+            "test_config_enabled": "1",
+            "test_config_mb": "200",
+            "test_config_minutes": "10",
+            "test_config_user_limit": "1",
+            "default_agent_daily_test_limit": "5",
             # Which backend the MAIN buy flow sells from: "xui" (3x-ui) or
             # "pasarguard". Lets the admin move the primary panel to PasarGuard.
             "primary_backend": "xui",
@@ -1238,6 +1247,24 @@ class AsyncDatabase:
             "used": int(row["used"] if row else 0),
             "limit": int(agent["daily_test_limit"] or 0) if agent and "daily_test_limit" in agent.keys() else 0,
         }
+
+    async def get_test_config_total_usage(self, user_id: int) -> int:
+        """Lifetime count of test configs a user actually received.
+
+        Failed attempts are excluded so a panel error never burns the single test
+        a regular user gets.
+        """
+        await self.ensure_admin_runtime_schema()
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS used
+            FROM agent_test_configs
+            WHERE user_id=?
+              AND status IN ('pending','created','active')
+            """,
+            (int(user_id),),
+        )
+        return int(row["used"] if row else 0)
 
     async def get_active_subscriptions(self, user_id: int) -> list[dict[str, Any]]:
         rows = await self.fetchall(

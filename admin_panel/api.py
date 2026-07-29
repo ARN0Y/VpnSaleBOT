@@ -659,6 +659,44 @@ async def set_infinite_package(request: Request):
     }
 
 
+@router.post("/test-config")
+async def set_test_config(request: Request):
+    """Configure the free test config: enabled flag, volume in MB, validity in
+    minutes, the lifetime allowance for ordinary users and the default daily quota
+    for agents that have no per-agent limit of their own."""
+    body = await _json_body(request)
+
+    def _int(value, default=0, minimum=0):
+        try:
+            n = int(float(value))
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, n)
+
+    enabled = "1" if bool(body.get("enabled")) else "0"
+    mb = _int(body.get("mb"), default=200, minimum=1)
+    minutes = _int(body.get("minutes"), default=10, minimum=1)
+    user_limit = _int(body.get("user_limit"), default=1, minimum=0)
+    agent_default = _int(body.get("agent_default_limit"), default=5, minimum=0)
+    await db(request).admin_update_settings(
+        {
+            "test_config_enabled": enabled,
+            "test_config_mb": str(mb),
+            "test_config_minutes": str(minutes),
+            "test_config_user_limit": str(user_limit),
+            "default_agent_daily_test_limit": str(agent_default),
+        }
+    )
+    return {
+        "ok": True,
+        "enabled": enabled == "1",
+        "mb": mb,
+        "minutes": minutes,
+        "user_limit": user_limit,
+        "agent_default_limit": agent_default,
+    }
+
+
 async def _pg_settings(database) -> dict[str, str]:
     rows = {row["key"]: row["value"] for row in await database.admin_list_settings()}
     return {k: str(rows.get(k, "")) for k in (

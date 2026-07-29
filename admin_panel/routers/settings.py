@@ -30,6 +30,10 @@ EDITABLE_KEYS = (
     "admin_user_ids",
     "default_agent_credit_limit_toman",
     "default_agent_price_per_gb",
+    "default_agent_daily_test_limit",
+    "test_config_mb",
+    "test_config_minutes",
+    "test_config_user_limit",
     "broadcast_rate_per_second",
     "broadcast_concurrency",
 )
@@ -39,6 +43,10 @@ INT_SETTING_KEYS = {
     "purchase_duration_days",
     "default_agent_credit_limit_toman",
     "default_agent_price_per_gb",
+    "default_agent_daily_test_limit",
+    "test_config_mb",
+    "test_config_minutes",
+    "test_config_user_limit",
     "broadcast_rate_per_second",
     "broadcast_concurrency",
 }
@@ -48,6 +56,10 @@ SETTING_FORM_DEFAULTS = {
     "purchase_duration_days": "30",
     "default_agent_credit_limit_toman": "0",
     "default_agent_price_per_gb": "0",
+    "default_agent_daily_test_limit": "5",
+    "test_config_mb": "200",
+    "test_config_minutes": "10",
+    "test_config_user_limit": "1",
     "broadcast_rate_per_second": "25",
     "broadcast_concurrency": "16",
 }
@@ -82,6 +94,20 @@ SETTING_META = {
     },
     "default_agent_credit_limit_toman": {"label": "سقف اعتبار پیش‌فرض نماینده", "type": "number", "min": "0"},
     "default_agent_price_per_gb": {"label": "قیمت پیش‌فرض نماینده", "type": "number", "min": "0"},
+    "default_agent_daily_test_limit": {
+        "label": "سهمیه روزانه تست نماینده (پیش‌فرض)",
+        "help": "برای نماینده‌هایی که سهمیه اختصاصی ندارند استفاده می‌شود.",
+        "type": "number",
+        "min": "0",
+    },
+    "test_config_mb": {"label": "حجم کانفیگ تست (مگابایت)", "type": "number", "min": "1"},
+    "test_config_minutes": {"label": "اعتبار کانفیگ تست (دقیقه)", "type": "number", "min": "1"},
+    "test_config_user_limit": {
+        "label": "سهمیه کل کانفیگ تست کاربر عادی",
+        "help": "کل سهمیه در طول عمر حساب، نه روزانه. ۰ یعنی کاربران عادی تست نمی‌گیرند.",
+        "type": "number",
+        "min": "0",
+    },
     "broadcast_rate_per_second": {
         "label": "سرعت ارسال پیام همگانی",
         "help": "حداکثر پیام در ثانیه برای broadcast؛ برای امنیت زیر سقف تلگرام clamp می‌شود.",

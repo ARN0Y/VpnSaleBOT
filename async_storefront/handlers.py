@@ -252,8 +252,26 @@ def is_pg_subscription(sub: dict) -> bool:
     return int(sub.get("inbound_id") or 0) == PG_INBOUND_SENTINEL
 
 
-async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardMarkup:
+async def test_config_available(user_id: int, db: AsyncDatabase, provisioning=None) -> bool:
+    """True when this user can still take a free test config.
+
+    Regular users get one for life, agents with the "test" permission get a daily
+    quota — so the button is hidden once the allowance is used up rather than
+    offered and then refused.
+    """
+    if provisioning is None:
+        return False
+    try:
+        quota = await provisioning.test_config_quota(user_id)
+    except Exception:
+        LOG.debug("test_config_quota failed user_id=%s", user_id, exc_info=True)
+        return False
+    return bool(quota["enabled"] and quota["remaining"] > 0)
+
+
+async def main_menu_keyboard(user_id: int, db: AsyncDatabase, provisioning=None) -> InlineKeyboardMarkup:
     agent = await db.get_agent(user_id)
+    has_test = await test_config_available(user_id, db, provisioning)
     rows = [
         [InlineKeyboardButton("❄️ خرید سرویس پرسرعت", callback_data="menu:buy")],
         [
@@ -267,27 +285,16 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
     ]
     if await infinite_enabled(db):
         rows.insert(1, [InlineKeyboardButton("♾️ بسته‌ی بی‌نهایت", callback_data="menu:infinite")])
-    if agent and not int(agent["disabled"] or 0):
-        try:
-            permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
-        except Exception:
-            permissions = {"buy", "test"}
-        if "test" in permissions:
-            rows.append(
-                [
-                    InlineKeyboardButton("🆓 دریافت تست رایگان", callback_data="menu:test_config"),
-                    InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
-                ]
-            )
-        else:
-            rows.append([InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs")])
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu:agent_request"),
-                InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"),
-            ]
-        )
+    last_row: list[InlineKeyboardButton] = []
+    if has_test:
+        last_row.append(InlineKeyboardButton("🆓 دریافت تست رایگان", callback_data="menu:test_config"))
+    if not (agent and not int(agent["disabled"] or 0)):
+        last_row.append(InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu:agent_request"))
+    last_row.append(InlineKeyboardButton("🏷 تعرفه‌ها", callback_data="menu:tariffs"))
+    # Telegram renders at most 3 buttons per row comfortably in RTL; split if needed.
+    for chunk in (last_row[:2], last_row[2:]):
+        if chunk:
+            rows.append(chunk)
     rows.append([InlineKeyboardButton("🛟 تماس با پشتیبانی", callback_data="menu:support")])
     return InlineKeyboardMarkup(rows)
 
@@ -430,7 +437,7 @@ def agent_admin_daily_test_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("۱۰ کانفیگ/روز", callback_data="agent_admin:dt:10"),
             ],
             [InlineKeyboardButton("✍️ تعداد سفارشی", callback_data="agent_admin:dt:custom")],
-            [InlineKeyboardButton("🔁 پیش‌فرض سیستم (۰)", callback_data="agent_admin:dt:def")],
+            [InlineKeyboardButton("🔁 پیش‌فرض سیستم", callback_data="agent_admin:dt:def")],
             [InlineKeyboardButton("❌ لغو تایید", callback_data="agent_admin:cancel")],
         ]
     )
@@ -457,7 +464,7 @@ def main_reply_keyboard(*, is_agent: bool = False, has_test: bool = False, has_i
     if has_infinite:
         rows.insert(1, [KeyboardButton(BTN_INFINITE)])
     fourth = []
-    if is_agent and has_test:
+    if has_test:
         fourth.append(KeyboardButton(BTN_TEST_CONFIG))
     if not is_agent:
         fourth.append(KeyboardButton(BTN_AGENT_REQ))
@@ -603,19 +610,15 @@ async def ensure_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def menu_for_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     db: AsyncDatabase = context.application.bot_data["db"]
-    return await main_menu_keyboard(update.effective_user.id, db)
+    return await main_menu_keyboard(
+        update.effective_user.id, db, context.application.bot_data.get("provisioning")
+    )
 
 
-async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboardMarkup:
+async def _build_reply_keyboard(user_id: int, db: AsyncDatabase, provisioning=None) -> ReplyKeyboardMarkup:
     agent = await db.get_agent(user_id)
     is_agent = bool(agent and not int(agent["disabled"] or 0))
-    has_test = False
-    if is_agent:
-        try:
-            permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
-            has_test = "test" in permissions
-        except Exception:
-            has_test = True
+    has_test = await test_config_available(user_id, db, provisioning)
     has_infinite = await infinite_enabled(db)
     return main_reply_keyboard(is_agent=is_agent, has_test=has_test, has_infinite=has_infinite)
 
@@ -656,7 +659,9 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Text-triggered: send reply keyboard (persists at bottom of chat)
     await remove_keyboard(context, chat_id, old_home_id)
     await remove_keyboard(context, chat_id, old_flow_id)
-    reply_kb = await _build_reply_keyboard(update.effective_user.id, db)
+    reply_kb = await _build_reply_keyboard(
+        update.effective_user.id, db, context.application.bot_data.get("provisioning")
+    )
     message = await context.bot.send_message(
         chat_id=chat_id,
         text=welcome,
@@ -1276,15 +1281,21 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     snapshot = await db.get_user_account_snapshot(user.id)
     total_gb = await db.get_user_total_purchased_gb(user.id)
     agent = await db.get_agent(user.id)
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    quota = await provisioning.test_config_quota(user.id)
+    if not quota["enabled"]:
+        test_line = ""
+    elif quota["scope"] == "daily":
+        test_line = f"\n🧪 کانفیگ تست امروز: {quota['used']:,} / {quota['limit']:,}"
+    else:
+        test_line = f"\n🧪 کانفیگ تست: {quota['used']:,} / {quota['limit']:,}"
     agent_extra_lines = ""
     if agent:
         recent = await db.get_agent_recent_purchase_summary(user.id)
-        test_usage = await db.get_agent_test_usage_today(user.id)
         agent_extra_lines = (
             f"\n🧾 خرید ۲۴ ساعت اخیر: {recent['total_toman']:,} تومان"
             f"\n📦 گیگ ۲۴ ساعت اخیر: {recent['total_gb']:,} گیگ"
             f"\n✅ سفارش ۲۴ ساعت اخیر: {recent['order_count']:,}"
-            f"\n🧪 کانفیگ تست امروز: {test_usage['used']:,} / {test_usage['limit']:,}"
         )
     if not agent:
         access_level = "کاربر عادی"
@@ -1318,6 +1329,7 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
     if agent:
         credit_lines += agent_extra_lines
+    credit_lines += test_line
     username = (user.username or snapshot["username"] or "").strip().lstrip("@")
     username_line = f"@{html.escape(username)}" if username else "ندارد"
     text = (
@@ -2067,15 +2079,35 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     if query:
         await query.answer()
+    db: AsyncDatabase = context.application.bot_data["db"]
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    qr: QRService = context.application.bot_data["qr"]
+    quota = await provisioning.test_config_quota(update.effective_user.id)
+    if not quota["enabled"]:
+        await new_flow_card(
+            update, context,
+            "🆓 <b>کانفیگ تست</b>\n\nدریافت کانفیگ تست در حال حاضر غیرفعال است.",
+            back_keyboard(),
+        )
+        return
+    if quota["remaining"] <= 0:
+        await new_flow_card(
+            update, context,
+            "🆓 <b>کانفیگ تست</b>\n\n"
+            + (
+                "سهمیه کانفیگ تست امروز شما تمام شده است. فردا دوباره تلاش کنید."
+                if quota["scope"] == "daily"
+                else "شما قبلاً کانفیگ تست خود را دریافت کرده‌اید و امکان دریافت مجدد وجود ندارد."
+            ),
+            back_keyboard(),
+        )
+        return
     await new_flow_card(
         update,
         context,
         "⏳ <b>در حال ساخت کانفیگ تست...</b>\n\n"
-        "حجم تست ۲۰۰ مگابایت و اعتبار زمانی آن ۱۰ دقیقه است.",
+        f"حجم تست {quota['mb']} مگابایت و اعتبار زمانی آن {quota['minutes']} دقیقه است.",
     )
-    db: AsyncDatabase = context.application.bot_data["db"]
-    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
-    qr: QRService = context.application.bot_data["qr"]
     idem_key = query.id if query else f"test-{update.effective_user.id}-{update.effective_message.message_id}"
     # The test config must be created on whichever panel is actually selling —
     # otherwise it silently hits 3x-ui on a PasarGuard-primary deployment.
@@ -2094,7 +2126,7 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
                 return
     try:
-        sub_link = await provisioning.process_agent_test_config(
+        sub_link = await provisioning.process_test_config(
             user_id=update.effective_user.id,
             pg_client=pg_client,
             group_ids=group_ids,
@@ -2118,12 +2150,20 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    left = max(0, int(quota["remaining"]) - 1)
+    if quota["scope"] == "daily":
+        left_line = f"🎟 سهمیه امروز شما: <b>{left}</b> عدد باقی‌مانده\n"
+    else:
+        left_line = "" if left > 0 else "🎟 این تنها کانفیگ تست شما بود.\n"
+        if left > 0:
+            left_line = f"🎟 <b>{left}</b> کانفیگ تست دیگر می‌توانید دریافت کنید.\n"
     await send_flow_prompt(
         update,
         context,
         "✅ <b>کانفیگ تست آماده شد.</b>\n\n"
-        "📦 حجم: <b>۲۰۰ مگابایت</b>\n"
-        "⏱ اعتبار: <b>۱۰ دقیقه</b>\n\n"
+        f"📦 حجم: <b>{quota['mb']}</b> مگابایت\n"
+        f"⏱ اعتبار: <b>{quota['minutes']}</b> دقیقه\n"
+        f"{left_line}\n"
         "لینک و QR Code در پیام بعدی ارسال می‌شود.",
         back_keyboard(),
     )
@@ -2132,10 +2172,11 @@ async def agent_test_config(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         chat_id=update.effective_chat.id,
         photo=BytesIO(png),
         caption=(
-            "🧪 <b>کانفیگ تست نماینده</b>\n\n"
-            "📦 حجم: <b>۲۰۰ مگابایت</b>\n"
-            "⏱ اعتبار: <b>۱۰ دقیقه</b>\n\n"
-            f"<code>{html.escape(sub_link)}</code>"
+            "🧪 <b>کانفیگ تست</b>\n\n"
+            f"📦 حجم: <b>{quota['mb']}</b> مگابایت\n"
+            f"⏱ اعتبار: <b>{quota['minutes']}</b> دقیقه\n\n"
+            f"🔗 <b>لینک اشتراک:</b>\n<code>{html.escape(sub_link)}</code>\n\n"
+            "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
         ),
         parse_mode=ParseMode.HTML,
     )
@@ -2764,8 +2805,12 @@ async def agent_admin_final_confirm(update: Update, context: ContextTypes.DEFAUL
         msg += f"سقف اعتبار: <b>{credit_limit:,}</b> تومان\n"
     if price_per_gb > 0:
         msg += f"قیمت هر گیگ: <b>{price_per_gb:,}</b> تومان\n"
-    if daily_test_limit > 0:
-        msg += f"کانفیگ تست روزانه: <b>{daily_test_limit}</b> عدد\n"
+    # 0 = follow the shop-wide default rather than "no tests".
+    effective_test_limit = daily_test_limit or int(
+        await db.get_setting("default_agent_daily_test_limit", "5") or "5"
+    )
+    if effective_test_limit > 0:
+        msg += f"کانفیگ تست روزانه: <b>{effective_test_limit}</b> عدد\n"
     msg += "از این لحظه منوی ربات برای حساب شما به‌روزرسانی شده است."
 
     try:

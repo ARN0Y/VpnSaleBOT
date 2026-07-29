@@ -14,6 +14,7 @@ import {
   Tags,
   CreditCard,
   MonitorCog,
+  FlaskConical,
   Info,
   type LucideIcon,
 } from "lucide-react";
@@ -329,6 +330,74 @@ function PasarGuardCard({ items }: { items: Items }) {
   );
 }
 
+// ─────────────────────────── free test config ───────────────────────────
+
+function TestConfigCard({ items }: { items: Items }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [f, setF] = React.useState(() => ({
+    enabled: (items.test_config_enabled ?? "1") === "1",
+    mb: items.test_config_mb || "200",
+    minutes: items.test_config_minutes || "10",
+    user_limit: items.test_config_user_limit ?? "1",
+    agent_default_limit: items.default_agent_daily_test_limit || "5",
+  }));
+  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+  const save = useMutation({
+    mutationFn: () =>
+      api.setTestConfig({
+        enabled: f.enabled,
+        mb: Number(f.mb) || 200,
+        minutes: Number(f.minutes) || 10,
+        user_limit: Math.max(0, Number(f.user_limit) || 0),
+        agent_default_limit: Math.max(0, Number(f.agent_default_limit) || 0),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      toast({ title: "تنظیمات کانفیگ تست ذخیره شد", variant: "success" });
+    },
+    onError: (e: Error) => toast({ title: "ذخیره ناموفق بود", description: e.message, variant: "error" }),
+  });
+  const userLimit = Math.max(0, Number(f.user_limit) || 0);
+
+  return (
+    <Section
+      icon={FlaskConical}
+      title="کانفیگ تست رایگان"
+      desc="کانفیگ تست همیشه از همان پنلی ساخته می‌شود که «پنل اصلی فروش» است. کاربر عادی سهمیه‌ی مادام‌العمر دارد و نماینده‌ها سهمیه‌ی روزانه."
+    >
+      <ToggleRow title="دریافت کانفیگ تست" on={f.enabled} onChange={(v) => set("enabled", v)} />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="حجم (مگابایت)" hint="حجم هر کانفیگ تست.">
+          <Input value={f.mb} inputMode="numeric" onChange={(e) => set("mb", e.target.value)} />
+        </Field>
+        <Field label="اعتبار (دقیقه)" hint="روی PasarGuard شمارش از اولین اتصال کاربر شروع می‌شود.">
+          <Input value={f.minutes} inputMode="numeric" onChange={(e) => set("minutes", e.target.value)} />
+        </Field>
+        <Field label="سهمیه کاربر عادی (کل، نه روزانه)" hint="۰ = کاربران عادی تست نمی‌گیرند و دکمه برایشان نمایش داده نمی‌شود.">
+          <Input value={f.user_limit} inputMode="numeric" onChange={(e) => set("user_limit", e.target.value)} />
+        </Field>
+        <Field label="سهمیه روزانه نماینده (پیش‌فرض)" hint="برای نماینده‌هایی که سهمیه اختصاصی ندارند.">
+          <Input value={f.agent_default_limit} inputMode="numeric" onChange={(e) => set("agent_default_limit", e.target.value)} />
+        </Field>
+      </div>
+      <Note>
+        {userLimit === 0
+          ? "الان فقط نماینده‌ها می‌توانند کانفیگ تست بگیرند."
+          : userLimit === 1
+            ? "هر کاربر عادی فقط یک کانفیگ تست در طول عمر حسابش می‌گیرد؛ بعد از آن دکمه برایش پنهان می‌شود."
+            : `هر کاربر عادی مجموعاً ${userLimit} کانفیگ تست می‌گیرد (نه روزانه).`}{" "}
+        سهمیه‌ی اختصاصی هر نماینده را از صفحه‌ی همان کاربر می‌توانید جدا تنظیم کنید.
+      </Note>
+      <div className="flex justify-end">
+        <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+          <SaveButton m={save} label="ذخیره کانفیگ تست" />
+        </Button>
+      </div>
+    </Section>
+  );
+}
+
 // ─────────────────────────── backup ───────────────────────────
 
 function BackupCard({ items }: { items: Items }) {
@@ -605,6 +674,8 @@ export function Settings() {
             </div>
           </Section>
         ))}
+
+        <TestConfigCard items={items} />
       </TabsContent>
 
       {/* ───────────── تعرفه و بسته ───────────── */}

@@ -237,6 +237,56 @@ class ProvisioningService:
             "price": max(0, int(str(await self.db.get_setting("infinite_price", "0") or "0").strip() or "0")),
         }
 
+    async def test_config_policy(self) -> dict:
+        """Admin-configured free-test-config rules.
+
+        ``user_limit`` is a LIFETIME allowance for ordinary users; agents holding
+        the "test" permission get ``agent_default_limit`` per DAY instead (or their
+        own ``agents.daily_test_limit`` when that is set to a non-zero value).
+        """
+        enabled = str(await self.db.get_setting("test_config_enabled", "1") or "1").strip().lower() in {"1", "true", "on", "yes"}
+        return {
+            "enabled": enabled,
+            "mb": _safe_positive_int(await self.db.get_setting("test_config_mb", "200"), 200),
+            "minutes": _safe_positive_int(await self.db.get_setting("test_config_minutes", "10"), 10),
+            "user_limit": max(0, _safe_positive_int(await self.db.get_setting("test_config_user_limit", "1"), 1)),
+            "agent_default_limit": max(0, _safe_positive_int(await self.db.get_setting("default_agent_daily_test_limit", "5"), 5)),
+        }
+
+    async def test_config_quota(self, user_id: int) -> dict:
+        """How many free tests this user has left, and under which rule.
+
+        Regular users (and agents without the "test" permission) get a lifetime
+        allowance; agents with it get a daily one.
+        """
+        policy = await self.test_config_policy()
+        agent = await self.db.get_agent(user_id)
+        agent_quota = False
+        if agent and not int(agent["disabled"] or 0):
+            try:
+                permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
+            except Exception:
+                permissions = {"buy", "test"}
+            agent_quota = "test" in permissions
+        if agent_quota:
+            own = int(agent["daily_test_limit"] or 0) if "daily_test_limit" in agent.keys() else 0
+            limit = own if own > 0 else policy["agent_default_limit"]
+            used = int((await self.db.get_agent_test_usage_today(user_id))["used"])
+            scope = "daily"
+        else:
+            limit = policy["user_limit"]
+            used = await self.db.get_test_config_total_usage(user_id)
+            scope = "lifetime"
+        return {
+            "enabled": policy["enabled"],
+            "scope": scope,
+            "limit": int(limit),
+            "used": int(used),
+            "remaining": max(0, int(limit) - int(used)),
+            "mb": policy["mb"],
+            "minutes": policy["minutes"],
+        }
+
     async def process_infinite_purchase(
         self,
         *,
@@ -383,51 +433,82 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
-    async def process_agent_test_config(
+    async def process_test_config(
         self, *, user_id: int, pg_client=None, group_ids=None, idempotency_key: str | None = None
     ) -> str:
-        """Daily test config for an agent, created on the PRIMARY backend.
+        """Free test config for any user, created on the PRIMARY backend.
+
+        Ordinary users get a LIFETIME allowance (``test_config_user_limit``, 1 by
+        default); agents holding the "test" permission get a daily one instead.
+        Volume and validity come from settings (200 MB / 10 minutes by default).
 
         When ``pg_client`` is given the test lives on PasarGuard, otherwise on
         3x-ui. (Without this the test always hit 3x-ui and broke on PasarGuard-
         primary deployments.)"""
+        policy = await self.test_config_policy()
+        if not policy["enabled"]:
+            raise ValueError("دریافت کانفیگ تست در حال حاضر غیرفعال است.")
+        total_bytes = int(policy["mb"]) * 1024 * 1024
+        ttl_seconds = int(policy["minutes"]) * 60
         test_id = f"test-{int(user_id)}-{now_ts()}-{secrets.token_hex(3)}"
         idem = idempotency_key or test_id
-        expires_at = now_ts() + TEST_CONFIG_TTL_SECONDS
+        expires_at = now_ts() + ttl_seconds
         async with self.db.transaction() as conn:
             existing = await self.db.fetchone("SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,))
             if existing:
                 raise RuntimeError(f"duplicate test config request: {existing['status']}")
             agent = await self.db.fetchone("SELECT * FROM agents WHERE user_id=?", (int(user_id),))
-            if not agent:
-                raise ValueError("این قابلیت فقط برای نماینده‌ها فعال است.")
-            if int(agent["disabled"] or 0):
-                raise ValueError("دسترسی نمایندگی شما غیرفعال است.")
-            try:
-                permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
-            except Exception:
-                permissions = {"buy", "test"}
-            if "test" not in permissions:
-                raise ValueError("مجوز دریافت کانفیگ تست برای حساب شما فعال نیست.")
-            daily_limit = int(agent["daily_test_limit"] or 0) if "daily_test_limit" in agent.keys() else 0
-            if daily_limit <= 0:
-                raise ValueError("سهمیه روزانه کانفیگ تست برای حساب شما تنظیم نشده است.")
-            from .util import iran_day_bounds_ts
+            # An agent with the "test" permission is on a daily quota; everyone
+            # else — including a disabled agent or one without the permission —
+            # falls back to the ordinary lifetime allowance.
+            agent_quota = False
+            if agent and not int(agent["disabled"] or 0):
+                try:
+                    permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
+                except Exception:
+                    permissions = {"buy", "test"}
+                agent_quota = "test" in permissions
+            if agent_quota:
+                own_limit = int(agent["daily_test_limit"] or 0) if "daily_test_limit" in agent.keys() else 0
+                # 0 means "not set for this agent" → use the shop-wide default.
+                daily_limit = own_limit if own_limit > 0 else int(policy["agent_default_limit"])
+                if daily_limit <= 0:
+                    raise ValueError("سهمیه کانفیگ تست برای حساب شما تنظیم نشده است.")
+                from .util import iran_day_bounds_ts
 
-            day_start, day_end = iran_day_bounds_ts()
-            used_row = await self.db.fetchone(
-                """
-                SELECT COUNT(*) AS used
-                FROM agent_test_configs
-                WHERE user_id=?
-                  AND created_at>=?
-                  AND created_at<?
-                  AND status IN ('pending','created','active')
-                """,
-                (int(user_id), day_start, day_end),
-            )
-            if int(used_row["used"] if used_row else 0) >= daily_limit:
-                raise ValueError("سهمیه کانفیگ تست امروز شما تمام شده است.")
+                day_start, day_end = iran_day_bounds_ts()
+                used_row = await self.db.fetchone(
+                    """
+                    SELECT COUNT(*) AS used
+                    FROM agent_test_configs
+                    WHERE user_id=?
+                      AND created_at>=?
+                      AND created_at<?
+                      AND status IN ('pending','created','active')
+                    """,
+                    (int(user_id), day_start, day_end),
+                )
+                if int(used_row["used"] if used_row else 0) >= daily_limit:
+                    raise ValueError("سهمیه کانفیگ تست امروز شما تمام شده است. فردا دوباره تلاش کنید.")
+            else:
+                user_limit = int(policy["user_limit"])
+                if user_limit <= 0:
+                    raise ValueError("دریافت کانفیگ تست در حال حاضر غیرفعال است.")
+                used_row = await self.db.fetchone(
+                    """
+                    SELECT COUNT(*) AS used
+                    FROM agent_test_configs
+                    WHERE user_id=?
+                      AND status IN ('pending','created','active')
+                    """,
+                    (int(user_id),),
+                )
+                if int(used_row["used"] if used_row else 0) >= user_limit:
+                    raise ValueError(
+                        "شما قبلاً کانفیگ تست خود را دریافت کرده‌اید و امکان دریافت مجدد وجود ندارد."
+                        if user_limit == 1
+                        else f"سهمیه کانفیگ تست شما ({user_limit} عدد) تمام شده است."
+                    )
             await conn.execute(
                 "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
                 (idem, int(user_id), test_id, "reserved", now_ts()),
@@ -441,13 +522,13 @@ class ProvisioningService:
             if pg_client is not None:
                 username = f"test{int(user_id)}_{secrets.token_hex(4)}"
                 # on_hold: the test window starts on FIRST connect, not at
-                # creation — otherwise a 10-minute test usually expires before
-                # the buyer even imports the link (looks broken in the panel).
+                # creation — otherwise a short test usually expires before the
+                # user even imports the link (looks broken in the panel).
                 resp = await pg_client.create_user(
                     username=username,
                     group_ids=list(group_ids or []),
-                    data_limit_bytes=TEST_CONFIG_BYTES,
-                    on_hold_duration_seconds=TEST_CONFIG_TTL_SECONDS,
+                    data_limit_bytes=total_bytes,
+                    on_hold_duration_seconds=ttl_seconds,
                     note=f"tg:{int(user_id)} test",
                 )
                 sub_url = str((resp or {}).get("subscription_url") or "")
@@ -460,14 +541,14 @@ class ProvisioningService:
             else:
                 provision = await self.panel.add_test_subscription(
                     user_id=user_id,
-                    total_bytes=TEST_CONFIG_BYTES,
-                    ttl_seconds=TEST_CONFIG_TTL_SECONDS,
+                    total_bytes=total_bytes,
+                    ttl_seconds=ttl_seconds,
                 )
             await self.db.insert_test_subscription(
                 provision,
                 test_id=test_id,
                 expires_at=expires_at,
-                total_bytes=TEST_CONFIG_BYTES,
+                total_bytes=total_bytes,
             )
             await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
             return provision.sub_link
