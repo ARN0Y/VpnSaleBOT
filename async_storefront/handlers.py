@@ -1161,11 +1161,11 @@ async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await new_flow_card(update, context, "♾️ <b>بسته‌ی بی‌نهایت</b>\n\nاین بسته در حال حاضر فعال نیست.", back_keyboard())
         return
     text = (
-        "♾️ <b>بسته‌ی بی‌نهایت (مصرف منصفانه)</b>\n\n"
-        "🌊 ترافیک نامحدود با سیاست مصرف منصفانه\n"
+        "♾️ <b>بسته‌ی بی‌نهایت</b>\n\n"
+        "🌊 ترافیک نامحدود\n"
         f"⏳ مدت اعتبار: <b>{pkg['duration_days']:,}</b> روز\n"
         f"💰 قیمت: <b>{pkg['price']:,}</b> تومان\n\n"
-        "✅ پس از خرید، <b>لینک مستقیم کانفیگ</b> برایتان ارسال می‌شود.\n"
+        "✅ پس از خرید، <b>لینک اشتراک</b> برایتان ارسال می‌شود.\n"
         "✅ امکان خرید چند بسته وجود دارد."
     )
     # Fresh idempotency token per shown offer → a double-tap on buy cannot
@@ -1173,7 +1173,7 @@ async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data["infinite_idem"] = f"inf-{update.effective_user.id}-{secrets.token_hex(8)}"
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ خرید و دریافت کانفیگ", callback_data="infinite:buy")],
+            [InlineKeyboardButton("✅ خرید و دریافت لینک اشتراک", callback_data="infinite:buy")],
             [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
         ]
     )
@@ -1188,7 +1188,6 @@ async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
         return
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
-    panel = context.application.bot_data["panel"]
     qr: QRService = context.application.bot_data["qr"]
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت بسته‌ی بی‌نهایت...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
@@ -1213,37 +1212,35 @@ async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await edit_text(query, f"❌ خطا در ساخت بسته:\n{html.escape(str(exc))}", back_keyboard())
         return
 
-    uris: list[str] = []
-    for link in links:
-        try:
-            uris.extend(await panel.fetch_config_uris(link))
-        except Exception:
-            LOG.exception("fetch_config_uris failed for infinite package")
-    uris = [u for u in uris if u]
-    if not uris:
+    links = [str(link) for link in links if link]
+    if not links:
         await edit_text(
             query,
-            "✅ بسته ساخته شد، اما دریافت لینک کانفیگ کمی طول کشید.\n"
-            "از بخش «اشتراک‌های من» می‌توانید کانفیگ را ببینید یا با پشتیبانی تماس بگیرید.",
+            "✅ بسته ساخته شد، اما دریافت لینک اشتراک کمی طول کشید.\n"
+            "از بخش «اشتراک‌های من» می‌توانید سرویس را ببینید یا با پشتیبانی تماس بگیرید.",
             back_keyboard(),
         )
         return
-    await edit_text(query, "♾️ <b>بسته‌ی بی‌نهایت ساخته شد.</b>\n\nلینک کانفیگ در پیام بعدی ارسال می‌شود.")
-    for idx, uri in enumerate(uris):
+    pkg = await provisioning.infinite_package()
+    await edit_text(query, "♾️ <b>بسته‌ی بی‌نهایت ساخته شد.</b>\n\nلینک اشتراک و QR Code در پیام بعدی ارسال می‌شود.")
+    for idx, sub_link in enumerate(links):
         caption = (
             "✅ <b>بسته‌ی بی‌نهایت فعال شد!</b>\n"
-            "<i>مصرف منصفانه فعال است.</i>\n\n"
-            "🔗 <b>لینک کانفیگ شما:</b>\n"
-            f"<code>{html.escape(uri)}</code>\n\n"
-            "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+            "<i>از خرید شما سپاسگزاریم 🌟</i>\n\n"
+            "🌊 ترافیک نامحدود\n"
+            f"⏳ مدت اعتبار: <b>{int(pkg['duration_days']):,}</b> روز\n"
+            f"💰 مبلغ پرداختی: <b>{int(pkg['price']):,}</b> تومان\n\n"
+            "🔗 <b>لینک اشتراک شما:</b>\n"
+            f"<code>{html.escape(sub_link)}</code>\n\n"
+            "برای اتصال، لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
         )
-        png = await qr.png(uri)
+        png = await qr.png(sub_link)
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
             photo=BytesIO(png),
             caption=caption,
             parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard() if idx == len(uris) - 1 else None,
+            reply_markup=back_keyboard() if idx == len(links) - 1 else None,
         )
 
 
@@ -1337,13 +1334,13 @@ def subscription_status_label(sub: dict) -> str:
     is_infinite = int(sub.get("is_infinite") or 0) == 1
     total_bytes = int(sub.get("panel_total_bytes") or 0)
     remaining = int(sub.get("panel_remaining_bytes") or 0)
-    # Infinite (fair-usage) configs are auto-disabled by the panel once the cap
-    # is reached; treat a synced & depleted infinite config as disabled even if
-    # the panel hasn't flipped the enable flag yet.
+    # Infinite configs are auto-disabled by the panel once the cap is reached;
+    # treat a synced & depleted infinite config as disabled even if the panel
+    # hasn't flipped the enable flag yet.
     if is_infinite and total_bytes > 0 and remaining <= 0:
-        return "غیرفعال (سقف منصفانه)"
+        return "غیرفعال (پایان حجم)"
     if enabled is not None and int(enabled) == 0:
-        return "غیرفعال (سقف منصفانه)" if is_infinite else "غیرفعال"
+        return "غیرفعال (پایان حجم)" if is_infinite else "غیرفعال"
     if enabled is None:
         return "نامشخص"
     return "فعال"
@@ -1500,20 +1497,20 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
             )
             continue
         if is_infinite:
-            # Fair-usage "infinite" config: never reveal the volume cap or the
-            # remaining traffic — only the type and on/off status.
+            # "Infinite" config: show the type and on/off status, not the volume
+            # cap or the remaining traffic.
             sub_enabled = sub.get("panel_enabled")
             total_b = int(sub.get("panel_total_bytes") or 0)
             remain_b = int(sub.get("panel_remaining_bytes") or 0)
             depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
-            status = "غیرفعال (سقف منصفانه)" if depleted else "فعال"
+            status = "غیرفعال (پایان حجم)" if depleted else "فعال"
             lines.append(
                 f"{idx}. <b>{name}</b> | ♾️ بی‌نهایت\n"
                 f"   🆔 <code>{sub_id}</code>\n"
-                f"   ♾️ بسته‌ی بی‌نهایت (مصرف منصفانه) | وضعیت: {status}"
+                f"   ♾️ بسته‌ی بی‌نهایت | وضعیت: {status}"
             )
             if depleted:
-                lines.append("   ♾️ این کانفیگ به سقف مصرف منصفانه رسیده و غیرفعال شده است.")
+                lines.append("   ♾️ این کانفیگ به پایان حجم خود رسیده و غیرفعال شده است.")
             continue
 
         if is_test:

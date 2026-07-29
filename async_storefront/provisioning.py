@@ -238,11 +238,11 @@ class ProvisioningService:
         }
 
     async def process_infinite_purchase(self, *, user_id: int, client_name: str = "", idempotency_key: str | None = None) -> list[str]:
-        """Buy a fair-usage 'unlimited' config: a config capped at cap_gb traffic
-        and duration_days, charged at the admin's custom price. xray enforces the
-        cap (auto-stops at it). Users may buy several. Returns the sub_link(s) of
-        the created config(s) — the bot then delivers raw config URIs, not the sub
-        link itself.
+        """Buy an 'unlimited' config: a config capped at cap_gb traffic and
+        duration_days, charged at the admin's custom price. xray enforces the cap
+        (auto-stops at it). Users may buy several. Returns the sub_link(s) of the
+        created config(s), which the bot delivers to the buyer like any other
+        purchase.
         """
         pkg = await self.infinite_package()
         if not pkg["enabled"]:
