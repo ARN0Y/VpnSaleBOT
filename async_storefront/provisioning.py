@@ -237,12 +237,22 @@ class ProvisioningService:
             "price": max(0, int(str(await self.db.get_setting("infinite_price", "0") or "0").strip() or "0")),
         }
 
-    async def process_infinite_purchase(self, *, user_id: int, client_name: str = "", idempotency_key: str | None = None) -> list[str]:
-        """Buy an 'unlimited' config: a config capped at cap_gb traffic and
-        duration_days, charged at the admin's custom price. xray enforces the cap
-        (auto-stops at it). Users may buy several. Returns the sub_link(s) of the
-        created config(s), which the bot delivers to the buyer like any other
-        purchase.
+    async def process_infinite_purchase(
+        self,
+        *,
+        user_id: int,
+        client_name: str = "",
+        pg_client=None,
+        group_ids=None,
+        idempotency_key: str | None = None,
+    ) -> list[str]:
+        """Buy an 'unlimited' config on the PRIMARY backend: a config capped at
+        cap_gb traffic and duration_days, charged at the admin's custom flat price.
+        The panel enforces the cap (auto-stops at it). Users may buy several.
+
+        When ``pg_client`` is given the package is created on PasarGuard, otherwise
+        on 3x-ui. Returns the sub_link(s) of the created config(s), which the bot
+        delivers to the buyer like any other purchase.
         """
         pkg = await self.infinite_package()
         if not pkg["enabled"]:
@@ -297,25 +307,66 @@ class ProvisioningService:
                 (idem, int(user_id), order_id, "reserved", now_ts()),
             )
 
-        provisions = []
+        provisions: list[PanelClientPayload] = []
         try:
-            expiry_ms = (now_ts() + int(pkg["duration_days"]) * 86400) * 1000
-            provisions = await self.panel.add_subscriptions(
-                user_id=user_id, gb=cap_gb, qty=1, preferred_name=client_name, expiry_ms=expiry_ms
-            )
+            days = int(pkg["duration_days"])
+            expire_ts = (now_ts() + days * 86400) if days > 0 else 0
+            if pg_client is not None:
+                data_bytes = gb_to_bytes(cap_gb)
+                base = "".join(c for c in sanitize_client_name(client_name) if c.isalnum() or c == "_")
+                base = base[:18].strip("_") or f"u{int(user_id)}"
+                username = f"{base}_{secrets.token_hex(4)}"
+                resp = await pg_client.create_user(
+                    username=username,
+                    group_ids=list(group_ids or []),
+                    data_limit_bytes=data_bytes,
+                    expire=expire_ts,
+                    note=f"tg:{int(user_id)} infinite",
+                )
+                sub_url = str((resp or {}).get("subscription_url") or "")
+                if not sub_url:
+                    raise RuntimeError("PasarGuard did not return a subscription_url")
+                provisions = [
+                    PanelClientPayload(
+                        user_id=int(user_id), sub_id=username, sub_link=sub_url,
+                        inbound_id=PG_INBOUND_SENTINEL, client_uuid="",
+                        client_email=username, gb=cap_gb,
+                    )
+                ]
+            else:
+                provisions = await self.panel.add_subscriptions(
+                    user_id=user_id, gb=cap_gb, qty=1, preferred_name=client_name,
+                    expiry_ms=expire_ts * 1000,
+                )
             await self.db.insert_subscriptions(provisions, order_id=order_id, is_infinite=True)
             approved = await self.db.approve_order(order_id)
             if not approved:
                 raise RuntimeError("infinite order approval failed after provisioning")
             await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
+            if pg_client is not None:
+                # Seed the local snapshot so «اشتراک‌های من» is accurate before the
+                # first sync (and so the cap-reached check has numbers to compare).
+                for row in provisions:
+                    await self.db.execute(
+                        """
+                        UPDATE subscriptions
+                        SET panel_total_bytes=?, panel_used_bytes=0, panel_remaining_bytes=?,
+                            panel_enabled=1, panel_expiry_time=?, panel_synced_at=?
+                        WHERE sub_id=?
+                        """,
+                        (gb_to_bytes(cap_gb), gb_to_bytes(cap_gb), expire_ts * 1000, now_ts(), row.sub_id),
+                    )
             return [p.sub_link for p in provisions]
         except Exception:
             await self.db.delete_subscriptions([p.sub_id for p in provisions])
             for provision in provisions:
                 try:
-                    await self.panel.delete_subscription(provision.sub_id)
+                    if pg_client is not None:
+                        await pg_client.delete_user(provision.sub_id)
+                    else:
+                        await self.panel.delete_subscription(provision.sub_id)
                 except Exception:
-                    pass
+                    LOG.exception("infinite rollback: could not delete %s", provision.sub_id)
             if payment_method == PaymentMethod.AGENT_OPEN:
                 async with self.db.transaction() as conn:
                     await conn.execute(

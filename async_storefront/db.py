@@ -1280,6 +1280,7 @@ class AsyncDatabase:
             FROM subscriptions
             WHERE user_id=?
               AND COALESCE(is_test,0)=0
+              AND COALESCE(is_infinite,0)=0
               AND (
                 ?=''
                 OR sub_id LIKE ?
@@ -1304,11 +1305,13 @@ class AsyncDatabase:
         rows = await self.fetchall(
             """
             SELECT sub_id, gb, qty, created_at, client_email,
+                   COALESCE(inbound_id,0) AS inbound_id,
                    panel_total_bytes, panel_used_bytes, panel_remaining_bytes,
                    panel_enabled, panel_expiry_time, panel_synced_at
             FROM subscriptions
             WHERE user_id=?
               AND COALESCE(is_test,0)=0
+              AND COALESCE(is_infinite,0)=0
               AND (
                 ?=''
                 OR sub_id LIKE ?

@@ -1189,10 +1189,25 @@ async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
     qr: QRService = context.application.bot_data["qr"]
+    # The package must come from whichever panel is currently primary — same rule
+    # as a normal purchase and an agent test config.
+    pg_client = None
+    group_ids: list[int] = []
+    if await pg_is_primary(db):
+        pg_client = await get_pg_client(context)
+        if pg_client is None:
+            await edit_text(query, "❌ اتصال به سرور برقرار نشد. لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
+            return
+        group_ids = await pg_group_ids(db, pg_client)
+        if not group_ids:
+            await edit_text(query, "❌ سرور به‌درستی پیکربندی نشده است. لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
+            return
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت بسته‌ی بی‌نهایت...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
         links = await provisioning.process_infinite_purchase(
             user_id=update.effective_user.id,
+            pg_client=pg_client,
+            group_ids=group_ids,
             idempotency_key=str(context.user_data.get("infinite_idem") or query.id),
         )
     except ValueError as exc:
@@ -1482,7 +1497,31 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
         sub_id = html.escape(str(sub.get("sub_id") or ""))
         is_test = int(sub.get("is_test") or 0) == 1
         is_infinite = int(sub.get("is_infinite") or 0) == 1
-        if is_pg_subscription(sub):
+        is_pg = is_pg_subscription(sub)
+        # The infinite check comes FIRST: an infinite package is sold as
+        # "unlimited", so its cap must stay hidden on either backend.
+        if is_infinite:
+            sub_enabled = sub.get("panel_enabled")
+            total_b = int(sub.get("panel_total_bytes") or 0)
+            remain_b = int(sub.get("panel_remaining_bytes") or 0)
+            depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
+            status = "غیرفعال (پایان حجم)" if depleted else "فعال"
+            lines.append(
+                f"{idx}. <b>{name}</b> | ♾️ بی‌نهایت\n"
+                f"   🆔 <code>{sub_id}</code>\n"
+                f"   ♾️ بسته‌ی بی‌نهایت | ⏳ زمان باقی‌مانده: {subscription_expiry_label(sub)} | وضعیت: {status}"
+            )
+            if depleted:
+                lines.append("   ♾️ این کانفیگ به پایان حجم خود رسیده و غیرفعال شده است.")
+            if is_pg:
+                # PasarGuard links are token-based and fetched live, so offer the
+                # re-delivery button for these too.
+                raw_name = str(sub.get("client_email") or sub.get("sub_id") or "")
+                pg_buttons.append(
+                    InlineKeyboardButton(f"🔗 لینک {raw_name[:18]}", callback_data=f"pgsub:link:{sub.get('sub_id')}")
+                )
+            continue
+        if is_pg:
             # PasarGuard service: the connection link is token-based and fetched
             # live, so we show the live numbers plus a button to (re)deliver it.
             gb_label = f"{int(sub.get('gb') or 0)} گیگ" if not is_test else f"{int(sub.get('panel_total_bytes') or 0) / (1024 ** 2):.0f} MB"
@@ -1495,22 +1534,6 @@ async def render_my_subscriptions(update: Update, context: ContextTypes.DEFAULT_
             pg_buttons.append(
                 InlineKeyboardButton(f"🔗 لینک {raw_name[:18]}", callback_data=f"pgsub:link:{sub.get('sub_id')}")
             )
-            continue
-        if is_infinite:
-            # "Infinite" config: show the type and on/off status, not the volume
-            # cap or the remaining traffic.
-            sub_enabled = sub.get("panel_enabled")
-            total_b = int(sub.get("panel_total_bytes") or 0)
-            remain_b = int(sub.get("panel_remaining_bytes") or 0)
-            depleted = (sub_enabled is not None and int(sub_enabled) == 0) or (total_b > 0 and remain_b <= 0)
-            status = "غیرفعال (پایان حجم)" if depleted else "فعال"
-            lines.append(
-                f"{idx}. <b>{name}</b> | ♾️ بی‌نهایت\n"
-                f"   🆔 <code>{sub_id}</code>\n"
-                f"   ♾️ بسته‌ی بی‌نهایت | وضعیت: {status}"
-            )
-            if depleted:
-                lines.append("   ♾️ این کانفیگ به پایان حجم خود رسیده و غیرفعال شده است.")
             continue
 
         if is_test:
@@ -1748,6 +1771,16 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await edit_text(query, "⚠️ این اشتراک پیدا نشد. لطفاً دوباره از لیست انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
     name = str(sub.get("client_email") or sub_id)
+    if int(sub.get("is_infinite") or 0) == 1:
+        # An infinite package has a fixed price and its own cap — it is re-bought,
+        # not topped up per GB. (Guards a stale callback: the list already hides them.)
+        await edit_text(
+            query,
+            "♾️ <b>این سرویس بسته‌ی بی‌نهایت است.</b>\n\n"
+            "تمدید حجمی برای آن انجام نمی‌شود؛ می‌توانید از منو یک بسته‌ی بی‌نهایت جدید تهیه کنید.",
+            back_keyboard(),
+        )
+        return ConversationHandler.END
     is_pg = is_pg_subscription(sub)
     if is_pg and not await pg_configured(db):
         await edit_text(
