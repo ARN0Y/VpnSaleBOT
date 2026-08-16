@@ -629,6 +629,24 @@ class AsyncDatabase:
             "backup_send_to_telegram": "1",
             "backup_telegram_chat_id": "",
             "backup_defaults_v2_applied": "0",
+            # ── PasarGuard panel backup ──
+            # Produces an archive the official `pasarguard restore` accepts, so a
+            # backup can actually be rolled back. "auto" runs the panel's own CLI
+            # (reusing its cron archive when fresh) and falls back to a native
+            # pg_dump built in the same layout.
+            "backup_include_pg": "0",
+            "pg_backup_mode": "auto",
+            "pg_backup_compose_file": "/opt/pasarguard/docker-compose.yml",
+            "pg_backup_dir": "/opt/pasarguard/backup",
+            "pg_backup_cli": "/usr/local/bin/pasarguard",
+            "pg_backup_max_age_minutes": "360",
+            "pg_backup_timeout_seconds": "900",
+            "backup_last_pg_status": "off",
+            "backup_last_pg_mode": "",
+            "backup_last_pg_db_bytes": "0",
+            # Dedicated bot for backup delivery. Empty falls back to the
+            # storefront bot's BOT_TOKEN.
+            "backup_bot_token": "",
             "admin_user_ids": "",
             "default_agent_credit_limit_toman": "0",
             "default_agent_price_per_gb": "0",

@@ -207,6 +207,48 @@
           <span>بکاپ کامل اطلاعات x-ui</span>
           <input type="checkbox" name="backup_include_xui" {% if backup.include_xui == '1' %}checked{% endif %}>
         </label>
+        <label class="toggle-row">
+          <span>بکاپ پنل PasarGuard (قابل بازگردانی)</span>
+          <input type="checkbox" name="backup_include_pg" {% if backup.include_pg == '1' %}checked{% endif %}>
+        </label>
+        <div class="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs leading-6 text-emerald-100">
+          آرشیو PasarGuard جدا از بکاپ ربات و با فرمت رسمی خود پنل ارسال می‌شود؛ برای بازگردانی کافی است روی سرور پنل اجرا کنید:
+          <code class="mt-1 block text-emerald-200">pasarguard restore &lt;فایل&gt;</code>
+          {% if backup.last_pg_status == 'ok' %}
+            <span class="mt-2 block text-emerald-300">آخرین بکاپ پنل: موفق ({{ backup.last_pg_mode }}) — حجم دیتابیس: {{ backup.last_pg_db_mb }} مگابایت</span>
+          {% elif backup.last_pg_status == 'failed' %}
+            <span class="mt-2 block text-rose-300">آخرین بکاپ پنل ناموفق بود — به پیام خطا در وضعیت بکاپ نگاه کنید.</span>
+          {% endif %}
+        </div>
+        <label class="block">
+          <span class="field-label">روش تهیه بکاپ پنل</span>
+          <select name="pg_backup_mode" class="input-base mt-2">
+            <option value="auto" {% if backup.pg_mode == 'auto' %}selected{% endif %}>خودکار (پیشنهادی)</option>
+            <option value="cli" {% if backup.pg_mode == 'cli' %}selected{% endif %}>فقط از طریق دستور pasarguard</option>
+            <option value="native" {% if backup.pg_mode == 'native' %}selected{% endif %}>فقط pg_dump مستقیم</option>
+          </select>
+          <span class="mt-2 block text-xs text-slate-500">حالت خودکار اول از دستور رسمی پنل استفاده می‌کند و در صورت نبودن آن، خودش pg_dump می‌گیرد.</span>
+        </label>
+        <label class="block">
+          <span class="field-label">حداکثر عمر آرشیو قابل استفاده مجدد (دقیقه)</span>
+          <input name="pg_backup_max_age_minutes" value="{{ backup.pg_max_age_minutes }}" type="number" min="0" class="input-base mt-2">
+          <span class="mt-2 block text-xs text-slate-500">اگر خود پنل به‌تازگی بکاپ گرفته باشد، دوباره دیتابیس دامپ نمی‌شود. ۰ یعنی همیشه بکاپ تازه گرفته شود.</span>
+        </label>
+        <label class="block">
+          <span class="field-label">مسیر docker-compose پنل</span>
+          <input name="pg_backup_compose_file" value="{{ backup.pg_compose_file }}" class="input-base mt-2" dir="ltr" placeholder="/opt/pasarguard/docker-compose.yml">
+        </label>
+        <label class="block">
+          <span class="field-label">توکن ربات بکاپ</span>
+          <input name="backup_bot_token" value="" type="password" class="input-base mt-2" dir="ltr"
+                 placeholder="{% if backup.bot_token_set %}تنظیم شده — خالی بگذارید تا تغییر نکند{% else %}خالی = همان ربات فروشگاه{% endif %}">
+          <span class="mt-2 block text-xs text-slate-500">می‌توانید یک ربات جداگانه فقط برای ارسال بکاپ‌ها بسازید تا بکاپ‌ها به ربات فروشگاه وابسته نباشند.</span>
+        </label>
+        <label class="block">
+          <span class="field-label">آیدی چت/کانال مقصد بکاپ</span>
+          <input name="backup_telegram_chat_id" value="{{ backup.telegram_chat_id }}" class="input-base mt-2" dir="ltr" placeholder="-100...">
+          <span class="mt-2 block text-xs text-slate-500">ربات باید در آن کانال ادمین باشد. تا وقتی این خالی باشد بکاپ‌ها فقط روی همین سرور می‌مانند.</span>
+        </label>
         <label class="block">
           <span class="field-label">مهلت بکاپ x-ui (ثانیه)</span>
           <input name="backup_xui_timeout_seconds" value="{{ backup.xui_timeout_seconds }}" type="number" min="30" max="600" class="input-base mt-2">

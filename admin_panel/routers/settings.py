@@ -121,7 +121,8 @@ def settings_values_from_form(form, current: dict[str, str]) -> dict[str, str]:
     return values
 
 
-def backup_values_from_form(form) -> dict[str, str]:
+def backup_values_from_form(form, current: dict[str, str] | None = None) -> dict[str, str]:
+    current = current or {}
     unit = str(form.get("backup_interval_unit", "minutes") or "minutes").strip().lower()
     if unit not in BACKUP_UNITS:
         unit = "minutes"
@@ -129,16 +130,37 @@ def backup_values_from_form(form) -> dict[str, str]:
     xui_timeout_seconds = normalize_xui_backup_timeout(
         form.get("backup_xui_timeout_seconds", str(DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS))
     )
+    pg_mode = str(form.get("pg_backup_mode", current.get("pg_backup_mode", "auto")) or "auto").strip().lower()
+    if pg_mode not in {"auto", "cli", "native"}:
+        pg_mode = "auto"
+    # An empty token means "keep the current one" — the field is rendered blank
+    # (it is a secret), so saving the card must not wipe a configured token.
+    token = str(form.get("backup_bot_token", "") or "").strip()
+    if not token:
+        token = str(current.get("backup_bot_token", "") or "")
     return {
         "backup_enabled": "1" if form.get("backup_enabled") == "on" else "0",
         "backup_include_bot": "1" if form.get("backup_include_bot") == "on" else "0",
         "backup_include_xui": "1" if form.get("backup_include_xui") == "on" else "0",
+        "backup_include_pg": "1" if form.get("backup_include_pg") == "on" else "0",
         "backup_interval_value": str(interval_value),
         "backup_interval_unit": unit,
         "backup_interval_days": str(interval_value),
         "backup_xui_timeout_seconds": str(xui_timeout_seconds),
         "backup_send_to_telegram": "1",
         "backup_telegram_chat_id": str(form.get("backup_telegram_chat_id", "") or "").strip(),
+        "backup_bot_token": token,
+        "pg_backup_mode": pg_mode,
+        "pg_backup_compose_file": str(
+            form.get("pg_backup_compose_file", current.get("pg_backup_compose_file", "")) or ""
+        ).strip(),
+        "pg_backup_dir": str(form.get("pg_backup_dir", current.get("pg_backup_dir", "")) or "").strip(),
+        "pg_backup_max_age_minutes": str(
+            max(0, as_int(form.get("pg_backup_max_age_minutes", current.get("pg_backup_max_age_minutes", "360")), 360))
+        ),
+        "pg_backup_timeout_seconds": str(
+            min(3600, max(60, as_int(form.get("pg_backup_timeout_seconds", current.get("pg_backup_timeout_seconds", "900")), 900)))
+        ),
     }
 
 
@@ -222,7 +244,16 @@ async def settings_index(request: Request):
         "xui_timeout_seconds": all_settings.get("backup_xui_timeout_seconds", str(DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS)),
         "include_bot": all_settings.get("backup_include_bot", "1"),
         "include_xui": all_settings.get("backup_include_xui", "1"),
+        "include_pg": all_settings.get("backup_include_pg", "0"),
         "telegram_chat_id": all_settings.get("backup_telegram_chat_id", ""),
+        # Never render the token itself; only whether one is configured.
+        "bot_token_set": bool(str(all_settings.get("backup_bot_token", "") or "").strip()),
+        "pg_mode": all_settings.get("pg_backup_mode", "auto"),
+        "pg_compose_file": all_settings.get("pg_backup_compose_file", "/opt/pasarguard/docker-compose.yml"),
+        "pg_max_age_minutes": all_settings.get("pg_backup_max_age_minutes", "360"),
+        "last_pg_status": all_settings.get("backup_last_pg_status", "off"),
+        "last_pg_mode": all_settings.get("backup_last_pg_mode", ""),
+        "last_pg_db_mb": round(as_int(all_settings.get("backup_last_pg_db_bytes", "0"), 0) / (1024 * 1024), 1),
         "last_run_ts": all_settings.get("backup_last_run_ts", "0"),
         "last_status": all_settings.get("backup_last_status", "never"),
         "last_file": all_settings.get("backup_last_file", ""),
@@ -269,7 +300,7 @@ async def settings_update(request: Request):
     if sales_changed:
         values["sales_status_updated_at"] = str(now_ts())
         values["sales_status_updated_by"] = current_admin_username(request) or "admin"
-    values.update(backup_values_from_form(form))
+    values.update(backup_values_from_form(form, current_settings))
 
     current_panel = await database.get_panel_settings()
     await database.admin_update_settings(values)

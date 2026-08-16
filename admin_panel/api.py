@@ -163,6 +163,10 @@ async def settings(request: Request):
     items["panel2_password"] = ""
     # PasarGuard admin password is stored in settings KV; never expose it.
     items["pg_password"] = ""
+    # The backup bot token controls the archive channel — never send it to the
+    # browser. Report only whether one is configured so the UI can say so.
+    items["backup_bot_token_set"] = "1" if str(items.get("backup_bot_token") or "").strip() else "0"
+    items["backup_bot_token"] = ""
     return {"items": items}
 
 
@@ -513,8 +517,8 @@ async def update_settings(request: Request):
     values = settings_values_from_form(body, current)
     # Only touch backup settings if the caller actually sent backup_* fields,
     # otherwise backup_values_from_form would reset them to its hardcoded defaults.
-    if any(str(k).startswith("backup_") for k in body):
-        values.update(backup_values_from_form(body))
+    if any(str(k).startswith(("backup_", "pg_backup_")) for k in body):
+        values.update(backup_values_from_form(body, current))
     current_panel = await database.get_panel_settings()
     await database.admin_update_settings(values)
     panel_values = None
