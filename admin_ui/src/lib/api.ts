@@ -188,4 +188,15 @@ export const api = {
   sendBroadcast: (audience: string, message: string) => post<Ok>("/broadcast", { audience, message }),
   dismissEvent: (id: string) => post<Ok>(`/events/${encodeURIComponent(id)}/dismiss`),
   updateSettings: (values: Record<string, string>) => post<Ok>("/settings", values),
+  runBackup: () =>
+    post<{
+      ok: boolean;
+      error?: string;
+      mode?: string;
+      file?: string;
+      status?: string;
+      delivered?: boolean;
+      errors?: string[];
+      pg?: { included: boolean; mode: string; db_mb: number; restorable: boolean };
+    }>("/backup/run", {}),
 };

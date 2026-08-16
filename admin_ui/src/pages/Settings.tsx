@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LockOpen, Lock, Save, Plus, Trash2, Server, Wifi, WifiOff, Settings2 } from "lucide-react";
+import { LockOpen, Lock, Save, Plus, Trash2, Server, Wifi, WifiOff, Settings2, DatabaseBackup } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -311,12 +311,199 @@ function PasarGuardCard({ items }: { items: Record<string, string> }) {
   );
 }
 
+function BackupCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const [f, setF] = React.useState(() => ({
+    enabled: (items.backup_enabled ?? "1") === "1",
+    bot: (items.backup_include_bot ?? "1") === "1",
+    xui: (items.backup_include_xui ?? "0") === "1",
+    pg: (items.backup_include_pg ?? "0") === "1",
+    interval_value: items.backup_interval_value || "60",
+    interval_unit: items.backup_interval_unit || "minutes",
+    chat_id: items.backup_telegram_chat_id ?? "",
+    token: "",
+    pg_mode: items.pg_backup_mode || "auto",
+    pg_compose: items.pg_backup_compose_file || "/opt/pasarguard/docker-compose.yml",
+    pg_max_age: items.pg_backup_max_age_minutes || "360",
+  }));
+  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+  const tokenSet = (items.backup_bot_token_set ?? "0") === "1";
+
+  const save = useMutation({
+    mutationFn: () => {
+      const payload: Record<string, string> = {
+        backup_enabled: f.enabled ? "on" : "off",
+        backup_include_bot: f.bot ? "on" : "off",
+        backup_include_xui: f.xui ? "on" : "off",
+        backup_include_pg: f.pg ? "on" : "off",
+        backup_interval_value: String(Math.max(1, Number(f.interval_value) || 1)),
+        backup_interval_unit: f.interval_unit,
+        backup_telegram_chat_id: f.chat_id.trim(),
+        backup_xui_timeout_seconds: items.backup_xui_timeout_seconds ?? "180",
+        pg_backup_mode: f.pg_mode,
+        pg_backup_compose_file: f.pg_compose.trim(),
+        pg_backup_max_age_minutes: String(Math.max(0, Number(f.pg_max_age) || 0)),
+      };
+      // Blank token means "keep the current one" — never send an empty string,
+      // the server would otherwise have to guess.
+      if (f.token.trim()) payload.backup_bot_token = f.token.trim();
+      return api.updateSettings(payload);
+    },
+    onSuccess: () => { setF((s) => ({ ...s, token: "" })); qc.invalidateQueries({ queryKey: ["settings"] }); },
+  });
+  const run = useMutation({ mutationFn: () => api.runBackup(), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
+
+  const STATUS: Record<string, { label: string; variant: "success" | "warning" | "danger" | "muted" }> = {
+    ok: { label: "آخرین بکاپ ارسال شد", variant: "success" },
+    partial: { label: "ارسال شد ولی با هشدار", variant: "warning" },
+    local: { label: "فقط روی سرور ماند (ارسال نشد)", variant: "warning" },
+    failed: { label: "آخرین بکاپ ناموفق", variant: "danger" },
+    running: { label: "در حال اجرا", variant: "muted" },
+    never: { label: "هنوز بکاپی گرفته نشده", variant: "muted" },
+  };
+  const st = STATUS[items.backup_last_status || "never"] ?? STATUS.never;
+  const pgStatus = items.backup_last_pg_status || "off";
+  const pgMb = Math.round(Number(items.backup_last_pg_db_bytes || 0) / (1024 * 1024) * 10) / 10;
+  const r = run.data;
+
+  const Check = ({ k, label, hint }: { k: keyof typeof f; label: string; hint?: string }) => (
+    <label className="flex items-start gap-2 rounded-xl border border-border bg-white/[0.02] p-3 text-sm">
+      <input type="checkbox" checked={Boolean(f[k])} onChange={(e) => set(k, e.target.checked)} className="mt-0.5 h-4 w-4 accent-[hsl(var(--brand))]" />
+      <span><span className="font-bold text-white">{label}</span>{hint && <span className="block text-[11px] text-muted-foreground">{hint}</span>}</span>
+    </label>
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2"><DatabaseBackup className="h-5 w-5 text-muted-foreground" /> بکاپ‌گیری خودکار</CardTitle>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              بکاپ ساخته و به کانال تلگرام ارسال می‌شود. اگر آیدی چت خالی باشد، فایل فقط روی همین سرور می‌ماند — یعنی اگر سرور از دست برود بکاپی در کار نیست.
+            </p>
+          </div>
+          <Badge variant={st.variant}>{st.label}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-white">بکاپ خودکار</span>
+            <Badge variant={f.enabled ? "success" : "danger"}>{f.enabled ? "فعال" : "غیرفعال"}</Badge>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" disabled={f.enabled} onClick={() => set("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
+            <Button size="sm" variant="destructive" disabled={!f.enabled} onClick={() => set("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-bold text-muted-foreground">چه چیزهایی بکاپ گرفته شود</p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Check k="bot" label="دیتابیس کامل ربات" hint="کاربران، کیف پول، سفارش‌ها، نماینده‌ها، تنظیمات" />
+            <Check k="pg" label="پنل PasarGuard" hint="قابل بازگردانی با pasarguard restore" />
+            <Check k="xui" label="پنل x-ui" hint="فقط اگر هنوز از 3x-ui استفاده می‌کنید" />
+          </div>
+        </div>
+
+        {f.pg && (
+          <div className="space-y-3 rounded-xl border border-brand/25 bg-brand/[0.04] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-bold text-white">تنظیمات بکاپ PasarGuard</span>
+              {pgStatus === "ok" ? (
+                <Badge variant="success">آخرین بکاپ پنل موفق{pgMb > 0 ? ` — ${pgMb} MB` : ""}</Badge>
+              ) : pgStatus === "failed" ? (
+                <Badge variant="danger">آخرین بکاپ پنل ناموفق</Badge>
+              ) : null}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="روش تهیه بکاپ" hint="خودکار: اول دستور رسمی پنل، در نبود آن pg_dump مستقیم.">
+                <select value={f.pg_mode} onChange={(e) => set("pg_mode", e.target.value)}
+                  className="h-10 w-full rounded-xl border border-input bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <option value="auto">خودکار (پیشنهادی)</option>
+                  <option value="cli">فقط دستور رسمی pasarguard</option>
+                  <option value="native">فقط pg_dump مستقیم</option>
+                </select>
+              </Field>
+              <Field label="عمر مجاز آرشیو آماده (دقیقه)" hint="اگر پنل تازه بکاپ گرفته باشد دوباره دامپ نمی‌گیریم. ۰ = همیشه تازه.">
+                <Input value={f.pg_max_age} inputMode="numeric" onChange={(e) => set("pg_max_age", e.target.value)} />
+              </Field>
+              <div className="sm:col-span-2">
+                <Field label="مسیر docker-compose پنل" hint="فقط اگر پنل را جای دیگری نصب کرده‌اید تغییر دهید.">
+                  <Input value={f.pg_compose} dir="ltr" onChange={(e) => set("pg_compose", e.target.value)} />
+                </Field>
+              </div>
+            </div>
+            <div className="rounded-lg border border-emerald-400/25 bg-emerald-400/5 p-3 text-xs leading-6 text-emerald-100">
+              آرشیو پنل جدا از بکاپ ربات ارسال می‌شود و دستور بازگردانی داخل کپشن همان پیام است:
+              <code className="mt-1 block text-emerald-200" dir="ltr">pasarguard restore &lt;file&gt;</code>
+            </div>
+          </div>
+        )}
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="فاصله‌ی بکاپ"><Input value={f.interval_value} inputMode="numeric" onChange={(e) => set("interval_value", e.target.value)} /></Field>
+          <Field label="واحد">
+            <select value={f.interval_unit} onChange={(e) => set("interval_unit", e.target.value)}
+              className="h-10 w-full rounded-xl border border-input bg-card px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <option value="minutes">دقیقه</option>
+              <option value="hours">ساعت</option>
+              <option value="days">روز</option>
+              <option value="weeks">هفته</option>
+            </select>
+          </Field>
+          <Field label="آیدی چت/کانال مقصد" hint="ربات باید در کانال ادمین باشد."><Input value={f.chat_id} dir="ltr" placeholder="-100..." onChange={(e) => set("chat_id", e.target.value)} /></Field>
+        </div>
+
+        <Field label="توکن ربات بکاپ" hint={tokenSet ? "تنظیم شده — خالی بگذارید تا تغییر نکند." : "خالی = همان ربات فروشگاه. می‌توانید ربات جدا بسازید."}>
+          <Input type="password" value={f.token} dir="ltr" placeholder={tokenSet ? "بدون تغییر" : "خالی = ربات فروشگاه"} onChange={(e) => set("token", e.target.value)} />
+        </Field>
+
+        {items.backup_last_error && (items.backup_last_status || "") !== "ok" && (
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 p-3 text-xs leading-6 text-amber-200">
+            آخرین پیام: <span className="font-mono">{items.backup_last_error.slice(0, 300)}</span>
+          </div>
+        )}
+
+        {r && (
+          <div className={`rounded-xl border p-3 text-xs leading-6 ${r.ok ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-rose-400/30 bg-rose-400/10 text-rose-100"}`}>
+            {r.ok ? (
+              <>
+                ✅ بکاپ ساخته شد ({r.mode}) — {r.delivered ? "به تلگرام ارسال شد" : "ارسال نشد، روی سرور ماند"}
+                {r.pg?.included && (
+                  <span className="block">
+                    🛡 پنل PasarGuard: {r.pg.restorable ? "قابل بازگردانی ✓" : "قابل بازگردانی نیست ✗"} — دیتابیس {r.pg.db_mb} مگابایت ({r.pg.mode})
+                  </span>
+                )}
+                {r.errors?.length ? <span className="block">⚠️ {r.errors.join(" | ").slice(0, 200)}</span> : null}
+              </>
+            ) : (
+              <>❌ {r.error}</>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button variant="outline" size="sm" disabled={run.isPending} onClick={() => run.mutate()}>
+            <DatabaseBackup className="h-4 w-4" /> {run.isPending ? "در حال گرفتن بکاپ…" : "بکاپ فوری"}
+          </Button>
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات بکاپ"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function Settings() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["settings"], queryFn: () => api.settings() });
   const items = data?.items ?? {};
   const master = items.sales_status ?? "open";
 
+  const [tab, setTab] = React.useState("general");
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [cards, setCards] = React.useState<{ number: string; name: string }[]>([]);
   const [p2, setP2] = React.useState({
@@ -389,15 +576,17 @@ export function Settings() {
 
   const mode = items.ui_mode ?? "modern";
   const TABS = [
+
     { v: "general", label: "عمومی" },
     { v: "sales", label: "فروش" },
     { v: "payment", label: "پرداخت" },
     { v: "texts", label: "متن‌ها و دکمه‌ها" },
     { v: "panels", label: "پنل‌ها" },
+    { v: "backup", label: "بکاپ" },
   ];
 
   return (
-    <Tabs defaultValue="general" className="space-y-6">
+    <Tabs value={tab} onValueChange={setTab} className="space-y-6">
       <div className="sticky top-16 z-20 -mx-1 overflow-x-auto pb-1">
         <TabsList className="w-full justify-start">
           {TABS.map((t) => (
@@ -639,11 +828,20 @@ export function Settings() {
         <PasarGuardCard items={items} />
       </TabsContent>
 
-      <div className="sticky bottom-4 flex justify-end">
-        <Button size="lg" disabled={save.isPending} onClick={() => save.mutate()}>
-          <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات فروشگاه و پنل"}
-        </Button>
-      </div>
+      {/* ───────────── Backup ───────────── */}
+      <TabsContent value="backup" className="space-y-6">
+        <BackupCard items={items} />
+      </TabsContent>
+
+      {/* The backup tab has its own save button; this bar saves the shop/panel
+          fields, so showing it there would just be confusing. */}
+      {tab !== "backup" && (
+        <div className="sticky bottom-4 flex justify-end">
+          <Button size="lg" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات فروشگاه و پنل"}
+          </Button>
+        </div>
+      )}
     </Tabs>
   );
 }

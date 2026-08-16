@@ -11,9 +11,11 @@ working in parallel until the SPA fully replaces it (strangler migration).
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import string
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -36,6 +38,7 @@ from .routers.settings import (
 )
 
 router = APIRouter(prefix="/admin/api/v1")
+LOG = logging.getLogger(__name__)
 
 
 async def _json_body(request: Request) -> dict:
@@ -535,6 +538,39 @@ async def update_settings(request: Request):
         )
     sync_env(request, settings=values, panel=panel_values)
     return {"ok": True}
+
+
+@router.post("/backup/run")
+async def api_run_backup(request: Request):
+    """Take a backup right now and report what it produced.
+
+    Runs inline rather than fire-and-forget so the panel can show the real
+    outcome — including whether the PasarGuard archive came out restorable,
+    which is the only part that matters when you actually need it.
+    """
+    from .backup import run_backup_now
+
+    try:
+        result = await run_backup_now(request.app, source="manual")
+    except Exception as exc:
+        LOG.exception("manual backup failed")
+        return {"ok": False, "error": str(exc)[:500]}
+    pg = result.pg_export
+    database = db(request)
+    return {
+        "ok": True,
+        "mode": result.mode,
+        "file": Path(result.archive_path).name,
+        "delivered": str(await database.get_setting("backup_last_status", "")) in {"ok", "partial"},
+        "status": str(await database.get_setting("backup_last_status", "")),
+        "errors": list(result.errors),
+        "pg": {
+            "included": bool(pg),
+            "mode": pg.mode if pg else "",
+            "db_mb": round((pg.db_bytes if pg else 0) / (1024 * 1024), 1),
+            "restorable": bool(pg.restorable) if pg else False,
+        },
+    }
 
 
 @router.post("/sales")
