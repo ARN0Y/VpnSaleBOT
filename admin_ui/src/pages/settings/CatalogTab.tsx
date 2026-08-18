@@ -49,8 +49,10 @@ function priceFor(plan: Plan, gb: number | null, agent: boolean): number {
     total = base + rate * eff;
   }
   const r = n(p.round_to);
-  if (r > 1 && total > 0) total = Math.round(total / r) * r;
-  return Math.max(0, Math.round(total));
+  // Must match catalog.py:price_for exactly — integer half-up. Math.round on a
+  // float disagreed with Python on .5 boundaries, so the preview lied.
+  if (r > 1 && total > 0) total = Math.floor((Math.floor(total) + Math.floor(r / 2)) / r) * r;
+  return Math.max(0, Math.floor(total));
 }
 
 function gbChoices(plan: Plan, limit = 12): number[] {
@@ -76,7 +78,7 @@ function newPlan(categoryId: string, sort: number): Plan {
     id: rid("plan"), category_id: categoryId, title: "", enabled: true, sort,
     target: { kind: "pasarguard", group: "" },
     volume: { mode: "fixed", gb: 0, days: 30, min_gb: 0, max_gb: 0, step_gb: 0 },
-    display: { volume_label: "", note: "", badge: "" },
+    display: { volume_label: "", hide_volume: false, note: "", badge: "" },
     pricing: emptyPricing(),
   };
 }
@@ -159,9 +161,10 @@ function PlanEditor({
   const previewGb = variable ? (gbChoices(plan)[0] ?? 0) : n(plan.volume.gb);
   const userPrice = priceFor(plan, variable ? previewGb : null, false);
   const agentPrice = priceFor(plan, variable ? previewGb : null, true);
+  const hideVolume = Boolean(plan.display.hide_volume);
   const shownVolume = plan.display.volume_label.trim()
-    || (previewGb > 0 ? `${previewGb} گیگ` : "نامحدود");
-  const masked = Boolean(plan.display.volume_label.trim()) && previewGb > 0;
+    || (hideVolume || previewGb <= 0 ? "نامحدود" : `${previewGb} گیگ`);
+  const masked = hideVolume && previewGb > 0;
 
   return (
     <div className={`rounded-2xl border p-4 transition ${problems.length ? "border-amber-400/40 bg-amber-400/[0.03]" : "border-border bg-white/[0.02]"}`}>
@@ -299,7 +302,7 @@ function PlanEditor({
               <Eye className="h-4 w-4 text-brand" /> آنچه کاربر می‌بیند
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
-              <Field label="برچسب حجم" hint='خالی = همان حجم واقعی. برای «مصرف منصفانه» بنویسید: نامحدود'>
+              <Field label="برچسب حجم" hint="فقط متنِ نمایشی. خالی = همان حجم واقعی.">
                 <Input value={plan.display.volume_label} onChange={(e) => setDisplay({ volume_label: e.target.value })} placeholder="خالی = حجم واقعی" />
               </Field>
               <Field label="نشان (اختیاری)" hint="یک ایموجی کنار نام پلن، مثل ⭐">
@@ -309,10 +312,25 @@ function PlanEditor({
                 <Input value={plan.display.note} onChange={(e) => setDisplay({ note: e.target.value })} />
               </Field>
             </div>
+            <label className="flex items-start gap-2 rounded-lg border border-border bg-white/[0.02] p-3 text-sm">
+              <input
+                type="checkbox"
+                checked={hideVolume}
+                onChange={(e) => setDisplay({ hide_volume: e.target.checked })}
+                className="mt-0.5 h-4 w-4 accent-[hsl(var(--brand))]"
+              />
+              <span>
+                <span className="font-bold text-white">حجم واقعی از کاربر مخفی بماند (سرویس «نامحدود»)</span>
+                <span className="block text-[11px] text-muted-foreground">
+                  با این تیک، سرویس در ربات نامحدود معرفی می‌شود و حجم باقی‌مانده در «اشتراک‌های من» نمایش داده نمی‌شود؛
+                  ولی روی پنل همان سقفِ بالا اعمال می‌شود.
+                </span>
+              </span>
+            </label>
             {masked && (
               <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/5 p-2.5 text-[11px] leading-6 text-amber-200">
                 <Info className="mt-1 h-3.5 w-3.5 shrink-0" />
-                کاربر «{plan.display.volume_label}» می‌بیند، ولی روی پنل {previewGb} گیگ اعمال می‌شود. این عدد در ربات هیچ‌جا نشان داده نمی‌شود.
+                کاربر «{shownVolume}» می‌بیند، ولی روی پنل {previewGb} گیگ اعمال می‌شود. این عدد در ربات هیچ‌جا نشان داده نمی‌شود.
               </div>
             )}
           </section>

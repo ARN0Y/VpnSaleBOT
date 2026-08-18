@@ -479,7 +479,8 @@ async def show_category_plans(
     data = await get_catalog(context)
     cat = catalog.find_category(data, category_id)
     plans = catalog.plans_in_category(data, category_id)
-    if not cat or not plans:
+    # A disabled category must not be reachable through a stale button either.
+    if not cat or not cat.get("enabled") or not plans:
         await new_flow_card(update, context, "🛒 در این دسته پلنی موجود نیست.", back_keyboard())
         return ConversationHandler.END
 
@@ -541,7 +542,7 @@ async def pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     data = await get_catalog(context)
     plan = catalog.find_plan(data, plan_id)
-    if not plan or not plan.get("enabled"):
+    if not catalog.plan_is_sellable(data, plan):
         clear_flow_state(context)
         await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
@@ -591,7 +592,7 @@ async def pkg_volume_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     data = await get_catalog(context)
     plan = catalog.find_plan(data, plan_id)
-    if not plan or not plan.get("enabled"):
+    if not catalog.plan_is_sellable(data, plan):
         clear_flow_state(context)
         await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست.", back_keyboard())
         return ConversationHandler.END
@@ -677,8 +678,9 @@ async def build_package_invoice(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not plan_id:
         return await _fail("⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.")
-    plan = catalog.find_plan(await catalog.load_catalog(db), plan_id)
-    if not plan or not plan.get("enabled"):
+    catalog_data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(catalog_data, plan_id)
+    if not catalog.plan_is_sellable(catalog_data, plan):
         return await _fail("⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.")
 
     agent = await db.get_agent(update.effective_user.id)
@@ -771,8 +773,9 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
         return ConversationHandler.END
 
-    plan = catalog.find_plan(await catalog.load_catalog(db), plan_id)
-    if not plan or not plan.get("enabled"):
+    catalog_data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(catalog_data, plan_id)
+    if not catalog.plan_is_sellable(catalog_data, plan):
         clear_flow_state(context)
         await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
         return ConversationHandler.END

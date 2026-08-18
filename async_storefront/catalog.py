@@ -182,7 +182,11 @@ def price_for(plan: dict, *, gb: int | None = None, is_agent: bool = False) -> i
 
     round_to = _int(pricing.get("round_to"), 0, minimum=0)
     if round_to > 1 and total > 0:
-        total = int(round(total / round_to)) * round_to
+        # Half-UP, not Python's round() — round() is banker's rounding, so a
+        # total landing exactly on .5 of a step rounded to even and disagreed
+        # with the panel's preview (JS Math.round). Money must not depend on
+        # which language computed it.
+        total = ((int(total) + round_to // 2) // round_to) * round_to
     return max(0, int(total))
 
 
@@ -210,6 +214,14 @@ def parse_plan(raw: Any) -> dict | None:
     if vmode not in VOLUME_MODES:
         vmode = VOLUME_FIXED
     display = raw.get("display") if isinstance(raw.get("display"), dict) else {}
+    # Hiding the real quota used to be inferred from "volume_label is not empty",
+    # so a purely cosmetic label silently turned a volume plan into an unlimited
+    # one (changing order_type, is_infinite and the 3x-ui delivery method). It is
+    # explicit now; plans written before this key existed keep their old meaning.
+    if "hide_volume" in display:
+        hide_volume = _bool(display.get("hide_volume"), False)
+    else:
+        hide_volume = bool(_str(display.get("volume_label")))
     return {
         "id": _str(raw.get("id")) or new_id("plan"),
         "category_id": _str(raw.get("category_id")),
@@ -227,9 +239,10 @@ def parse_plan(raw: Any) -> dict | None:
             "step_gb": _int(volume.get("step_gb"), 0, minimum=0),
         },
         "display": {
-            # Empty = describe the real quota. Set it to mask the cap, which is
-            # how "نامحدود" plans with a fair-usage limit are advertised.
+            # volume_label is cosmetic wording; hide_volume is what actually
+            # withholds the real quota from the buyer.
             "volume_label": _str(display.get("volume_label")),
+            "hide_volume": hide_volume,
             "note": _str(display.get("note")),
             "badge": _str(display.get("badge")),
         },
@@ -253,6 +266,26 @@ def parse_category(raw: Any) -> dict | None:
     }
 
 
+def _dedupe_ids(items: list[dict], prefix: str) -> list[dict]:
+    """Give every entry a unique id.
+
+    find_plan() resolves by id and returns the first match, so two plans sharing
+    an id would both be listed while only the cheaper one could ever be bought.
+    Re-id the later duplicates instead of dropping them: the operator keeps the
+    plan they created, and the menu can no longer point two buttons at one plan.
+    """
+    seen: set[str] = set()
+    for item in items:
+        current = str(item.get("id") or "")
+        if not current or current in seen:
+            current = new_id(prefix)
+            while current in seen:
+                current = new_id(prefix)
+            item["id"] = current
+        seen.add(current)
+    return items
+
+
 def parse_catalog(raw: Any) -> dict:
     """Parse the stored catalog. Always returns a usable structure."""
     try:
@@ -261,8 +294,8 @@ def parse_catalog(raw: Any) -> dict:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    categories = [c for c in (parse_category(x) for x in data.get("categories") or []) if c]
-    plans = [p for p in (parse_plan(x) for x in data.get("plans") or []) if p]
+    categories = _dedupe_ids([c for c in (parse_category(x) for x in data.get("categories") or []) if c], "cat")
+    plans = _dedupe_ids([p for p in (parse_plan(x) for x in data.get("plans") or []) if p], "plan")
     known = {c["id"] for c in categories}
     # A plan pointing at a deleted category would vanish from the menu; park it
     # in the first category instead of losing the sale silently.
@@ -314,6 +347,25 @@ def find_category(catalog: dict, category_id: str) -> dict | None:
     return None
 
 
+def category_is_open(catalog: dict, category_id: str) -> bool:
+    """True when the category exists and is enabled."""
+    cat = find_category(catalog, category_id)
+    return bool(cat and cat.get("enabled"))
+
+
+def plan_is_sellable(catalog: dict, plan: dict | None) -> bool:
+    """Whether this plan may be sold right now.
+
+    Disabling a CATEGORY has to stop its plans from selling too. Menus are built
+    from visible_categories(), but a buyer holding an older message can still tap
+    a stale button, so every step of the purchase path checks this instead of
+    only plan.enabled.
+    """
+    if not plan or not plan.get("enabled"):
+        return False
+    return category_is_open(catalog, str(plan.get("category_id") or ""))
+
+
 # ───────────────────────── buyer-facing labels ─────────────────────────
 
 def volume_label(plan: dict, gb: int | None = None) -> str:
@@ -322,9 +374,12 @@ def volume_label(plan: dict, gb: int | None = None) -> str:
     This is the only place that decides it, so the bot cannot accidentally leak
     a fair-usage cap that the admin chose to hide.
     """
-    override = _str((plan.get("display") or {}).get("volume_label"))
+    display = plan.get("display") or {}
+    override = _str(display.get("volume_label"))
     if override:
         return override
+    if _bool(display.get("hide_volume"), False):
+        return "نامحدود"
     volume = plan.get("volume") or {}
     effective = _int(gb if gb is not None else volume.get("gb"), 0, minimum=0)
     if effective <= 0:
@@ -391,6 +446,21 @@ def validate_plan(plan: dict) -> list[str]:
         problems.append("هیچ پله‌ی قیمتی تعریف نشده است.")
     if vmode == VOLUME_FIXED and mode != PRICING_FIXED and _int(volume.get("gb"), 0) <= 0:
         problems.append("برای قیمت‌گذاری بر اساس حجم، حجم پلن نمی‌تواند صفر باشد.")
+
+    # A computed price of zero is not caught by the checks above: a tiered plan
+    # whose lowest bracket starts above its smallest offered volume, or a linear
+    # plan with everything at zero, would advertise «از ۰ ت» and then fail deep
+    # in provisioning with "قیمت این بسته نامعتبر است".
+    zero_at: list[str] = []
+    if vmode == VOLUME_VARIABLE:
+        for choice in gb_choices(plan):
+            if price_for(plan, gb=choice, is_agent=False) <= 0 or price_for(plan, gb=choice, is_agent=True) <= 0:
+                zero_at.append(str(choice))
+    elif price_for(plan, is_agent=False) <= 0 or price_for(plan, is_agent=True) <= 0:
+        zero_at.append("")
+    if zero_at:
+        detail = f" (در حجم‌های {'، '.join(zero_at[:5])} گیگ)" if zero_at[0] else ""
+        problems.append(f"قیمت این پلن صفر می‌شود{detail}؛ نرخ یا پله‌ها را کامل کنید.")
     return problems
 
 
@@ -466,6 +536,7 @@ def migrate_legacy_packages(
                     # The old "unlimited" kind is exactly this: show نامحدود,
                     # provision the cap in gb.
                     "volume_label": "نامحدود" if kind == "unlimited" else "",
+                    "hide_volume": kind == "unlimited",
                     "note": "",
                     "badge": "",
                 },
@@ -488,7 +559,9 @@ def legacy_equivalent(plan: dict, gb: int | None = None) -> dict:
     """
     volume = plan.get("volume") or {}
     real_gb = provisioned_gb(plan, gb)
-    masked = bool(_str((plan.get("display") or {}).get("volume_label")))
+    # "unlimited" means the buyer must not be shown the quota — an explicit
+    # choice now, so a cosmetic label cannot flip a volume plan.
+    masked = _bool((plan.get("display") or {}).get("hide_volume"), False)
     return {
         "kind": "unlimited" if masked or real_gb <= 0 else "volume",
         "title": plan.get("title") or "",

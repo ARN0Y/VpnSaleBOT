@@ -119,7 +119,7 @@ export type Plan = {
   sort: number;
   target: PlanTarget;
   volume: PlanVolume;
-  display: { volume_label: string; note: string; badge: string };
+  display: { volume_label: string; hide_volume: boolean; note: string; badge: string };
   pricing: PlanPricing;
 };
 
