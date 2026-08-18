@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 
 from .config import Settings
+from . import catalog
 from .db import AsyncDatabase
 from .panel import PanelClient
 from .pasarguard import PasarGuardClient
@@ -388,15 +389,15 @@ async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
     return client
 
 
-# ───────────────────────── Per-panel packages (plans) ─────────────────────────
+# ───────────────────────── Sales catalog (categories → plans) ─────────────────────────
+# Legacy per-panel package lists. Kept only so the one-time catalog migration can
+# read them; nothing in the buy flow consults them any more.
 PANEL_PKG_SETTING = {"1": "panel_packages", "2": "panel2_packages", "pg": "pg_packages"}
 
 
-async def get_panel_packages(db: AsyncDatabase, panel_key: str) -> list[dict]:
-    key = PANEL_PKG_SETTING.get(panel_key)
-    if not key:
-        return []
-    return parse_packages(await db.get_setting(key, ""))
+async def get_catalog(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    return await catalog.load_catalog(db)
 
 
 async def _provisioning_for_panel(context: ContextTypes.DEFAULT_TYPE, panel_key: str):
@@ -405,9 +406,29 @@ async def _provisioning_for_panel(context: ContextTypes.DEFAULT_TYPE, panel_key:
     return context.application.bot_data["provisioning"]
 
 
+async def _provisioning_for_plan(context: ContextTypes.DEFAULT_TYPE, plan: dict):
+    """Resolve the provisioning service for a plan's own target."""
+    target = plan.get("target") or {}
+    if target.get("kind") == catalog.TARGET_XUI:
+        return await _provisioning_for_panel(context, str(target.get("panel") or "1"))
+    return context.application.bot_data["provisioning"]
+
+
+def _plan_volume_line(plan: dict, gb: int | None = None) -> str:
+    label = catalog.volume_label(plan, gb)
+    icon = "♾️" if label == "نامحدود" else "📦"
+    return f"{icon} حجم: <b>{html.escape(label)}</b>"
+
+
+def _plan_duration_line(plan: dict) -> str:
+    return f"⏳ مدت اعتبار: <b>{html.escape(catalog.duration_label(plan))}</b>"
+
+
 def _package_volume_label(pkg: dict) -> str:
+    """Volume line for a legacy-shaped package dict (post-purchase messages and
+    the PasarGuard renewal flow still pass these around)."""
     if str(pkg.get("kind")) == "unlimited":
-        return "♾️ نامحدود (مصرف منصفانه)"
+        return "♾️ حجم: <b>نامحدود</b>"
     return f"📦 حجم: <b>{int(pkg.get('gb') or 0)}</b> گیگ"
 
 
@@ -416,118 +437,272 @@ def _package_duration_label(pkg: dict) -> str:
     return f"⏳ مدت اعتبار: <b>{days}</b> روز" if days > 0 else "⏳ بدون محدودیت زمانی"
 
 
-async def show_packages(update: Update, context: ContextTypes.DEFAULT_TYPE, panel_key: str, server_name: str) -> None:
-    db: AsyncDatabase = context.application.bot_data["db"]
-    agent = await db.get_agent(update.effective_user.id)
-    packages = await get_panel_packages(db, panel_key)
-    rows: list[list[InlineKeyboardButton]] = []
-    for idx, pkg in enumerate(packages):
-        price = package_price(pkg, agent)
-        rows.append([InlineKeyboardButton(f"{pkg['title']} — {price:,} ت", callback_data=f"pkg:sel:{panel_key}:{idx}")])
+def _plan_button_label(plan: dict, price: int) -> str:
+    badge = str((plan.get("display") or {}).get("badge") or "").strip()
+    prefix = f"{badge} " if badge else ""
+    return f"{prefix}{plan['title']} — {price:,} ت"
+
+
+async def show_catalog_root(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str) -> int:
+    """Entry point of the buy flow: pick a category.
+
+    With a single category there is nothing to choose, so we skip straight to its
+    plans rather than making the buyer tap through a one-item menu.
+    """
+    data = await get_catalog(context)
+    categories = catalog.visible_categories(data)
+    if not categories:
+        await new_flow_card(update, context, "🛒 در حال حاضر پلنی برای فروش تعریف نشده است.", back_keyboard())
+        return ConversationHandler.END
+    if len(categories) == 1:
+        return await show_category_plans(update, context, categories[0]["id"], title)
+
+    rows = []
+    for cat in categories:
+        emoji = str(cat.get("emoji") or "").strip()
+        label = f"{emoji} {cat['title']}".strip()
+        count = len(catalog.plans_in_category(data, cat["id"]))
+        rows.append([InlineKeyboardButton(f"{label}  ({count})", callback_data=f"cat:{cat['id']}")])
     rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
     text = (
-        f"🛒 <b>{html.escape(server_name)}</b>\n"
+        f"🛒 <b>{html.escape(title)}</b>\n"
         "<code>─────────────────────</code>\n"
-        "یکی از بسته‌های زیر را انتخاب کنید 👇"
+        "ابتدا دسته‌ی مورد نظر را انتخاب کنید 👇"
     )
     await new_flow_card(update, context, text, InlineKeyboardMarkup(rows))
+    return PKG_SELECT
+
+
+async def show_category_plans(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: str, title: str = ""
+) -> int:
+    data = await get_catalog(context)
+    cat = catalog.find_category(data, category_id)
+    plans = catalog.plans_in_category(data, category_id)
+    if not cat or not plans:
+        await new_flow_card(update, context, "🛒 در این دسته پلنی موجود نیست.", back_keyboard())
+        return ConversationHandler.END
+
+    db: AsyncDatabase = context.application.bot_data["db"]
+    agent = await db.get_agent(update.effective_user.id)
+    rows = []
+    for plan in plans:
+        # For a variable plan the button shows the entry price, since the buyer
+        # picks the volume on the next step.
+        gb = None
+        if str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE:
+            choices = catalog.gb_choices(plan)
+            gb = choices[0] if choices else 0
+        price = catalog.price_for(plan, gb=gb, is_agent=bool(agent))
+        prefix = "از " if gb is not None else ""
+        rows.append([InlineKeyboardButton(
+            f"{prefix}{_plan_button_label(plan, price)}", callback_data=f"pkg:sel:{plan['id']}"
+        )])
+    multi = len(catalog.visible_categories(data)) > 1
+    if multi:
+        rows.append([InlineKeyboardButton("↩️ دسته‌های دیگر", callback_data="cat:back")])
+    rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
+
+    emoji = str(cat.get("emoji") or "").strip()
+    heading = f"{emoji} {cat['title']}".strip() or title
+    desc = str(cat.get("description") or "").strip()
+    text = (
+        f"🛒 <b>{html.escape(heading)}</b>\n"
+        "<code>─────────────────────</code>\n"
+        + (f"{html.escape(desc)}\n\n" if desc else "")
+        + "یکی از پلن‌های زیر را انتخاب کنید 👇"
+    )
+    context.user_data["catalog_category"] = category_id
+    if update.callback_query:
+        await edit_flow_query(update, context, text, InlineKeyboardMarkup(rows))
+    else:
+        await new_flow_card(update, context, text, InlineKeyboardMarkup(rows))
+    return PKG_SELECT
+
+
+async def catalog_category_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    category_id = (query.data or "").split(":", 1)[1]
+    if category_id == "back":
+        db: AsyncDatabase = context.application.bot_data["db"]
+        labels = await resolve_nav_labels(db)
+        return await show_catalog_root(update, context, labels["buy"])
+    return await show_category_plans(update, context, category_id)
 
 
 async def pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """A plan was picked: ask for the volume first when the plan is variable."""
     query = update.callback_query
     await _answer_query(query)
-    db: AsyncDatabase = context.application.bot_data["db"]
     try:
-        _, _, panel_key, idx_s = query.data.split(":", 3)
-        idx = int(idx_s)
+        _, _, plan_id = (query.data or "").split(":", 2)
     except Exception:
         return ConversationHandler.END
-    packages = await get_panel_packages(db, panel_key)
-    if idx < 0 or idx >= len(packages):
+    data = await get_catalog(context)
+    plan = catalog.find_plan(data, plan_id)
+    if not plan or not plan.get("enabled"):
         clear_flow_state(context)
-        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.", back_keyboard())
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
-    pkg = packages[idx]
+
+    if str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE:
+        return await show_plan_volumes(update, context, plan)
+    return await _begin_plan_naming(update, context, plan, gb=None)
+
+
+async def show_plan_volumes(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict) -> int:
+    """Volume picker for a variable plan — each button carries its own price."""
+    db: AsyncDatabase = context.application.bot_data["db"]
     agent = await db.get_agent(update.effective_user.id)
-    price = package_price(pkg, agent)
+    choices = catalog.gb_choices(plan)
+    if not choices:
+        clear_flow_state(context)
+        await edit_text(update.callback_query, "⚠️ این پلن پیکربندی کاملی ندارد. با پشتیبانی تماس بگیرید.", back_keyboard())
+        return ConversationHandler.END
+    rows, row = [], []
+    for gb in choices:
+        price = catalog.price_for(plan, gb=gb, is_agent=bool(agent))
+        row.append(InlineKeyboardButton(f"{gb} گیگ — {price:,} ت", callback_data=f"pkg:gb:{plan['id']}:{gb}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    back_cat = str(plan.get("category_id") or "")
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data=f"cat:{back_cat}" if back_cat else "menu:main")])
+    text = (
+        f"📦 <b>{html.escape(str(plan['title']))}</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"{_plan_duration_line(plan)}\n\n"
+        "چه مقدار حجم می‌خواهید؟ 👇"
+    )
+    await edit_flow_query(update, context, text, InlineKeyboardMarkup(rows))
+    return PKG_SELECT
+
+
+async def pkg_volume_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    try:
+        _, _, plan_id, gb_s = (query.data or "").split(":", 3)
+        gb = int(gb_s)
+    except Exception:
+        return ConversationHandler.END
+    data = await get_catalog(context)
+    plan = catalog.find_plan(data, plan_id)
+    if not plan or not plan.get("enabled"):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست.", back_keyboard())
+        return ConversationHandler.END
+    # Never trust the callback: only volumes this plan actually offers.
+    if gb not in catalog.gb_choices(plan):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این حجم برای این پلن معتبر نیست.", back_keyboard())
+        return ConversationHandler.END
+    return await _begin_plan_naming(update, context, plan, gb=gb)
+
+
+async def _begin_plan_naming(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict, *, gb: int | None
+) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    agent = await db.get_agent(update.effective_user.id)
+    price = catalog.price_for(plan, gb=gb, is_agent=bool(agent))
     context.user_data["pkg"] = {
-        "panel": panel_key,
-        "idx": idx,
+        "plan_id": plan["id"],
+        "gb": gb,
         "idem": f"pkg-{update.effective_user.id}-{secrets.token_hex(8)}",
         "client_name": "",
         "awaiting_name": False,
     }
+    note = str((plan.get("display") or {}).get("note") or "").strip()
     text = (
-        "🛒 <b>نام کانفیگ بسته</b>\n"
+        "🛒 <b>نام کانفیگ</b>\n"
         "<code>─────────────────────</code>\n"
-        f"🎁 بسته: <b>{html.escape(str(pkg['title']))}</b>\n"
-        f"{_package_volume_label(pkg)}\n"
-        f"{_package_duration_label(pkg)}\n"
-        "<code>─────────────────────</code>\n"
+        f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
+        f"{_plan_volume_line(plan, gb)}\n"
+        f"{_plan_duration_line(plan)}\n"
+        + (f"ℹ️ {html.escape(note)}\n" if note else "")
+        + "<code>─────────────────────</code>\n"
         f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
         "می‌توانید نام کانفیگ را خودتان مشخص کنید یا اجازه بدهید ربات نام رندوم بسازد."
     )
-    await edit_flow_query(update, context, text, package_name_keyboard(panel_key, idx))
+    await edit_flow_query(update, context, text, package_name_keyboard(plan["id"], gb))
     return PKG_NAME_MODE
 
 
-def _set_pkg_context_from_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int] | None:
-    query = update.callback_query
+def _parse_plan_callback(raw: str, parts: int) -> tuple[str, int | None] | None:
+    """Pull (plan_id, gb) out of a pkg: callback. gb is None for fixed plans."""
     try:
-        _, _, _, panel_key, idx_s = (query.data or "").split(":", 4)
-        idx = int(idx_s)
+        fields = (raw or "").split(":", parts)
+        plan_id, token = fields[parts - 1], fields[parts]
     except Exception:
         return None
+    if not plan_id:
+        return None
+    if token == "-":
+        return plan_id, None
+    try:
+        return plan_id, int(token)
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_pkg_context_from_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int | None] | None:
+    parsed = _parse_plan_callback(update.callback_query.data, 4)
+    if parsed is None:
+        return None
+    # (callers show an explicit "expired button" message on None)
+    plan_id, gb = parsed
     data = context.user_data.setdefault("pkg", {})
-    data.update(panel=panel_key, idx=idx)
+    data.update(plan_id=plan_id, gb=gb)
     data.setdefault("idem", f"pkg-{update.effective_user.id}-{secrets.token_hex(8)}")
-    return panel_key, idx
+    return plan_id, gb
 
 
 async def build_package_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db: AsyncDatabase = context.application.bot_data["db"]
     data = context.user_data.get("pkg") or {}
-    try:
-        panel_key = str(data.get("panel") or "")
-        idx = int(data.get("idx"))
-    except Exception:
+    plan_id = str(data.get("plan_id") or "")
+    gb = data.get("gb")
+
+    async def _fail(message: str) -> int:
         clear_flow_state(context)
         if update.callback_query:
-            await edit_text(update.callback_query, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+            await edit_text(update.callback_query, message, back_keyboard())
         else:
-            await send_flow_prompt(update, context, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+            await send_flow_prompt(update, context, message, back_keyboard())
         return ConversationHandler.END
 
-    packages = await get_panel_packages(db, panel_key)
-    if idx < 0 or idx >= len(packages):
-        clear_flow_state(context)
-        text = "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید."
-        if update.callback_query:
-            await edit_text(update.callback_query, text, back_keyboard())
-        else:
-            await send_flow_prompt(update, context, text, back_keyboard())
-        return ConversationHandler.END
+    if not plan_id:
+        return await _fail("⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.")
+    plan = catalog.find_plan(await catalog.load_catalog(db), plan_id)
+    if not plan or not plan.get("enabled"):
+        return await _fail("⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.")
 
-    pkg = packages[idx]
     agent = await db.get_agent(update.effective_user.id)
-    price = package_price(pkg, agent)
+    price = catalog.price_for(plan, gb=gb, is_agent=bool(agent))
     client_name = str(data.get("client_name") or "").strip()
     data["awaiting_name"] = False
+    note = str((plan.get("display") or {}).get("note") or "").strip()
     text = (
-        "🧾 <b>تایید خرید بسته</b>\n"
+        "🧾 <b>تایید خرید</b>\n"
         "<code>─────────────────────</code>\n"
-        f"🎁 بسته: <b>{html.escape(str(pkg['title']))}</b>\n"
-        f"{_package_volume_label(pkg)}\n"
-        f"{_package_duration_label(pkg)}\n"
+        f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
+        f"{_plan_volume_line(plan, gb)}\n"
+        f"{_plan_duration_line(plan)}\n"
         f"🪪 نام کانفیگ: <b>{html.escape(client_name) if client_name else '🎲 رندوم'}</b>\n"
-        "<code>─────────────────────</code>\n"
+        + (f"ℹ️ {html.escape(note)}\n" if note else "")
+        + "<code>─────────────────────</code>\n"
         f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
         "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
     )
+    keyboard = package_confirm_keyboard(plan_id, gb)
     if update.callback_query:
-        await edit_flow_query(update, context, text, package_confirm_keyboard(panel_key, idx))
+        await edit_flow_query(update, context, text, keyboard)
     else:
-        await send_flow_prompt(update, context, text, package_confirm_keyboard(panel_key, idx))
+        await send_flow_prompt(update, context, text, keyboard)
     return PKG_CONFIRM
 
 
@@ -584,25 +759,50 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     query = update.callback_query
     await query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
-    try:
-        _, _, panel_key, idx_s = query.data.split(":", 3)
-        idx = int(idx_s)
-    except Exception:
+    # "pkg:ok:<plan_id>:<gb>" — three splits, so plan_id is field 2.
+    parsed = _parse_plan_callback(query.data, 3)
+    if parsed is None:
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این دکمه منقضی شده است. لطفاً دوباره از منو شروع کنید.", back_keyboard())
         return ConversationHandler.END
+    plan_id, gb = parsed
     if not await audience_sales_is_open(db, update.effective_user.id):
         clear_flow_state(context)
         await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
         return ConversationHandler.END
+
+    plan = catalog.find_plan(await catalog.load_catalog(db), plan_id)
+    if not plan or not plan.get("enabled"):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+    # Re-validate the volume against the plan itself: the price is recomputed
+    # from it below, so a tampered callback must not buy 500 GB at the 5 GB price.
+    if str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE:
+        if gb is None or gb not in catalog.gb_choices(plan):
+            clear_flow_state(context)
+            await edit_text(query, "⚠️ این حجم برای این پلن معتبر نیست.", back_keyboard())
+            return ConversationHandler.END
+    else:
+        gb = None
+    problems = catalog.validate_plan(plan)
+    if problems:
+        clear_flow_state(context)
+        LOG.warning("plan %s is not sellable: %s", plan_id, problems)
+        await edit_text(query, "⚠️ این پلن پیکربندی کاملی ندارد. لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
+        return ConversationHandler.END
+
+    target = plan.get("target") or {}
+    panel_key = "pg" if target.get("kind") == catalog.TARGET_PASARGUARD else str(target.get("panel") or "1")
     if panel_key == "1" and not await panel1_enabled(db):
         clear_flow_state(context)
         await edit_text(query, "🌐 فروش از این سرور موقتاً غیرفعال است.", back_keyboard())
         return ConversationHandler.END
-    packages = await get_panel_packages(db, panel_key)
-    if idx < 0 or idx >= len(packages):
-        clear_flow_state(context)
-        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
-        return ConversationHandler.END
-    pkg = packages[idx]
+
+    # The provisioning layer still speaks the package dict; the catalog is the
+    # source of truth for what it contains — including the REAL quota behind a
+    # masked "نامحدود" label and the price for this exact audience and volume.
+    pkg = catalog.legacy_equivalent(plan, gb)
     qr: QRService = context.application.bot_data["qr"]
     data = context.user_data.get("pkg") or {}
     idem = str(data.get("idem") or query.id)
@@ -615,10 +815,13 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 clear_flow_state(context)
                 await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
                 return ConversationHandler.END
-            group = (await db.get_setting("pg_group", "Tsco-Bot") or "Tsco-Bot").strip()
-            group_ids = await pg_client.resolve_group_ids([group])
+            # The group comes from the PLAN, not a global setting — that is what
+            # lets two plans sell the same panel through different groups.
+            group = str(target.get("group") or "").strip()
+            group_ids = await pg_client.resolve_group_ids([group]) if group else []
             if not group_ids:
                 clear_flow_state(context)
+                LOG.warning("plan %s targets unknown PasarGuard group %r", plan_id, group)
                 await edit_text(query, "گروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
                 return ConversationHandler.END
             provisioning = context.application.bot_data["provisioning"]
@@ -774,19 +977,25 @@ def config_name_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def package_name_keyboard(panel_key: str, idx: int) -> InlineKeyboardMarkup:
+def _gb_token(gb: int | None) -> str:
+    """Volume marker inside callback data; "-" means the plan sets its own."""
+    return "-" if gb is None else str(int(gb))
+
+
+def package_name_keyboard(plan_id: str, gb: int | None) -> InlineKeyboardMarkup:
+    token = _gb_token(gb)
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🎲 نام رندوم", callback_data=f"pkg:name:random:{panel_key}:{idx}")],
-            [InlineKeyboardButton("✍️ نام دلخواه", callback_data=f"pkg:name:custom:{panel_key}:{idx}")],
+            [InlineKeyboardButton("🎲 نام رندوم", callback_data=f"pkg:name:random:{plan_id}:{token}")],
+            [InlineKeyboardButton("✍️ نام دلخواه", callback_data=f"pkg:name:custom:{plan_id}:{token}")],
             [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
         ]
     )
 
 
-def package_confirm_keyboard(panel_key: str, idx: int) -> InlineKeyboardMarkup:
+def package_confirm_keyboard(plan_id: str, gb: int | None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{panel_key}:{idx}"), InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]
+        [[InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{plan_id}:{_gb_token(gb)}"), InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]
     )
 
 
@@ -887,32 +1096,36 @@ def agent_admin_pricing_keyboard() -> InlineKeyboardMarkup:
 
 
 async def agent_pricing_text(db: AsyncDatabase) -> str:
-    """Summary of what THIS agent will pay per package (the package 'agent price',
-    falling back to the user price when it isn't set). Same for all agents; edited
-    per package in the Panels tab."""
-    lines = ["💼 <b>قیمت‌گذاری نماینده</b>", "نماینده هر بسته را با «قیمت نماینده»یِ همان بسته می‌خرد:", ""]
-    any_pkg = False
-    panels = [
-        ("1", "پنل اصلی"),
-        ("2", await panel2_label(db)),
-        ("pg", (await db.get_setting("pg_label", "سرور اختصاصی") or "سرور اختصاصی").strip()),
-    ]
-    for key, label in panels:
-        pkgs = await get_panel_packages(db, key)
-        if not pkgs:
+    """Summary of what THIS agent will pay per plan (the plan's agent price,
+    falling back to the user price when it isn't set). Same for all agents;
+    edited per plan in the «پلن‌های فروش» tab."""
+    data = await catalog.load_catalog(db)
+    lines = ["💼 <b>قیمت‌گذاری نماینده</b>", "نماینده هر پلن را با «قیمت نماینده»یِ همان پلن می‌خرد:", ""]
+    any_plan = False
+    for cat in catalog.visible_categories(data):
+        plans = catalog.plans_in_category(data, cat["id"])
+        if not plans:
             continue
-        any_pkg = True
-        lines.append(f"🔹 <b>{html.escape(str(label))}</b>")
-        for p in pkgs:
-            ap = int(p.get("agent_price") or 0)
-            price = ap if ap > 0 else int(p.get("price") or 0)
-            tag = "" if ap > 0 else " <i>(= قیمت کاربر)</i>"
-            lines.append(f"   • {html.escape(str(p['title']))}: <b>{price:,}</b> ت{tag}")
+        any_plan = True
+        emoji = str(cat.get("emoji") or "").strip()
+        heading = f"{emoji} {cat['title']}".strip()
+        lines.append(f"🔹 <b>{html.escape(heading)}</b>")
+        for plan in plans:
+            variable = str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE
+            gb = None
+            if variable:
+                choices = catalog.gb_choices(plan)
+                gb = choices[0] if choices else 0
+            agent_price = catalog.price_for(plan, gb=gb, is_agent=True)
+            user_price = catalog.price_for(plan, gb=gb, is_agent=False)
+            tag = "" if agent_price != user_price else " <i>(= قیمت کاربر)</i>"
+            prefix = "از " if variable else ""
+            lines.append(f"   • {html.escape(str(plan['title']))}: <b>{prefix}{agent_price:,}</b> ت{tag}")
         lines.append("")
-    if not any_pkg:
-        lines.append("⚠️ بسته‌ای تعریف نشده؛ «قیمت گیگیِ سفارشی» را انتخاب کنید.")
+    if not any_plan:
+        lines.append("⚠️ پلنی تعریف نشده؛ «قیمت گیگیِ سفارشی» را انتخاب کنید.")
     else:
-        lines.append("برای تغییرِ قیمتِ نماینده‌یِ هر بسته، تب «پنل‌ها» را ویرایش کنید.")
+        lines.append("برای تغییرِ قیمتِ نماینده‌یِ هر پلن، تب «پلن‌های فروش» را ویرایش کنید.")
     return "\n".join(lines)
 
 
@@ -1323,83 +1536,29 @@ async def notify_admins(
 
 
 async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Main buy button — opens the sales catalog (categories, then plans).
+
+    Which panel a plan runs on is now a property of the plan, so this no longer
+    branches on the primary backend: the catalog already knows.
+    """
     await ensure_user(update, context)
     db: AsyncDatabase = context.application.bot_data["db"]
-    # When PasarGuard is the primary backend, the main buy button sells its
-    # packages instead of the 3x-ui panel (navid pricing = packages, no per-GB).
-    if await pg_is_primary(db):
-        if not await audience_sales_is_open(db, update.effective_user.id):
-            await show_sales_closed(update, context)
-            return ConversationHandler.END
-        if not await get_panel_packages(db, "pg"):
-            await new_flow_card(update, context, "🌐 بسته‌ای برای فروش روی این سرور تعریف نشده است.", back_keyboard())
-            return ConversationHandler.END
-        await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
-        clear_flow_state(context)
-        labels = await resolve_nav_labels(db)
-        await show_packages(update, context, "pg", labels["buy"])
-        return PKG_SELECT
-    if not await panel1_enabled(db):
-        await new_flow_card(
-            update,
-            context,
-            "🌐 <b>فروش از سرور اصلی موقتاً غیرفعال است.</b>\n\n"
-            "لطفاً از گزینه‌های دیگرِ خرید در منو استفاده کنید یا با پشتیبانی در ارتباط باشید.",
-            back_keyboard(),
-        )
-        return ConversationHandler.END
     if not await audience_sales_is_open(db, update.effective_user.id):
         await show_sales_closed(update, context)
         return ConversationHandler.END
-    # Package mode: if this panel has packages defined, sell those instead of
-    # the per-GB flow.
-    if await get_panel_packages(db, "1"):
-        await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
-        clear_flow_state(context)
-        labels = await resolve_nav_labels(db)
-        await show_packages(update, context, "1", labels["buy"])
-        return PKG_SELECT
-    min_gb = await minimum_purchase_gb(db)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
-    context.user_data["checkout"] = {}
-    await new_flow_card(
-        update,
-        context,
-        gb_choice_prompt("🛒 <b>خرید سرویس جدید</b>  •  مرحله ۱ از ۴", min_gb),
-        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb),
-    )
-    return BUY_GB
+    labels = await resolve_nav_labels(db)
+    return await show_catalog_root(update, context, labels["buy"])
 
 
 async def buy2_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start the buy flow for the dedicated second panel (same steps, own price)."""
-    await ensure_user(update, context)
-    db: AsyncDatabase = context.application.bot_data["db"]
-    if not await panel2_available(db):
-        await new_flow_card(update, context, "🌐 این سرویس در حال حاضر در دسترس نیست.", back_keyboard())
-        return ConversationHandler.END
-    if not await audience_sales_is_open(db, update.effective_user.id):
-        await show_sales_closed(update, context)
-        return ConversationHandler.END
-    label = await panel2_label(db)
-    # Package mode for the second panel.
-    if await get_panel_packages(db, "2"):
-        await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
-        clear_flow_state(context)
-        await show_packages(update, context, "2", label)
-        return PKG_SELECT
-    min_gb = await minimum_purchase_gb(db)
-    await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
-    clear_flow_state(context)
-    context.user_data["checkout"] = {"panel2": True}
-    await new_flow_card(
-        update,
-        context,
-        gb_choice_prompt(f"🌐 <b>خرید از {html.escape(label)}</b>  •  مرحله ۱ از ۴", min_gb),
-        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=True),
-    )
-    return BUY_GB
+    """Legacy second-panel button.
+
+    Plans carry their own target now, so a separate per-panel entry point is
+    redundant; keep the button working by sending it to the same catalog.
+    """
+    return await buy_start(update, context)
 
 
 def _checkout_is_panel2(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2176,6 +2335,27 @@ async def renew_clear_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await render_renewal_list(update, context, 0)
 
 
+async def _pg_renewal_packages(db: AsyncDatabase) -> list[dict]:
+    """PasarGuard plans offered for renewal, in the legacy package shape.
+
+    Renewal replaces a service's plan in place, so only fixed-volume plans are
+    offered — a variable plan has no single price to renew at. Reading from the
+    catalog means a renewal quotes the same price the buy flow does.
+    """
+    data = await catalog.load_catalog(db)
+    out: list[dict] = []
+    for plan in data.get("plans") or []:
+        if not plan.get("enabled"):
+            continue
+        target = plan.get("target") or {}
+        if target.get("kind") != catalog.TARGET_PASARGUARD:
+            continue
+        if str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE:
+            continue
+        out.append(catalog.legacy_equivalent(plan))
+    return out
+
+
 async def _pg_current_plan_index(sub: dict, packages: list[dict]) -> int | None:
     """Index of the package matching the sub's current plan (kind + volume), or None."""
     kind = "unlimited" if int(sub.get("is_infinite") or 0) == 1 else "volume"
@@ -2207,7 +2387,7 @@ async def renew_show_plans(update: Update, context: ContextTypes.DEFAULT_TYPE, *
     query = update.callback_query
     db: AsyncDatabase = context.application.bot_data["db"]
     agent = await db.get_agent(update.effective_user.id)
-    packages = await get_panel_packages(db, "pg")
+    packages = await _pg_renewal_packages(db)
     if not packages:
         await edit_text(
             query,
@@ -2290,7 +2470,7 @@ async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not sub_id:
         await edit_text(query, "⚠️ اطلاعات تمدید ناقص است. لطفاً دوباره شروع کنید.", back_keyboard())
         return ConversationHandler.END
-    packages = await get_panel_packages(db, "pg")
+    packages = await _pg_renewal_packages(db)
     if idx < 0 or idx >= len(packages):
         await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
@@ -3518,13 +3698,15 @@ def build_main_conversation() -> ConversationHandler:
         ],
         PKG_SELECT: [
             MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:(1|2|pg):\d+$"),
+            CallbackQueryHandler(catalog_category_select, pattern=r"^cat:[A-Za-z0-9_\-]+$"),
+            CallbackQueryHandler(pkg_volume_select, pattern=r"^pkg:gb:[A-Za-z0-9_\-]+:\d+$"),
+            CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:[A-Za-z0-9_\-]+$"),
             CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
         ],
         PKG_NAME_MODE: [
             MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(pkg_name_random, pattern=r"^pkg:name:random:(1|2|pg):\d+$"),
-            CallbackQueryHandler(pkg_name_custom_start, pattern=r"^pkg:name:custom:(1|2|pg):\d+$"),
+            CallbackQueryHandler(pkg_name_random, pattern=r"^pkg:name:random:[A-Za-z0-9_\-]+:(?:-|\d+)$"),
+            CallbackQueryHandler(pkg_name_custom_start, pattern=r"^pkg:name:custom:[A-Za-z0-9_\-]+:(?:-|\d+)$"),
             CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
         ],
         PKG_NAME_INPUT: [
@@ -3534,7 +3716,7 @@ def build_main_conversation() -> ConversationHandler:
         ],
         PKG_CONFIRM: [
             MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:(1|2|pg):\d+$"),
+            CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:[A-Za-z0-9_\-]+:(?:-|\d+)$"),
             CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
         ],
         RENEW_SELECT: [
@@ -3668,9 +3850,11 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
     app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
     app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
-    app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:(1|2|pg):\d+$"))
-    app.add_handler(CallbackQueryHandler(pkg_name_random, pattern=r"^pkg:name:random:(1|2|pg):\d+$"))
-    app.add_handler(CallbackQueryHandler(pkg_name_custom_start, pattern=r"^pkg:name:custom:(1|2|pg):\d+$"))
-    app.add_handler(CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:(1|2|pg):\d+$"))
+    app.add_handler(CallbackQueryHandler(catalog_category_select, pattern=r"^cat:[A-Za-z0-9_\-]+$"))
+    app.add_handler(CallbackQueryHandler(pkg_volume_select, pattern=r"^pkg:gb:[A-Za-z0-9_\-]+:\d+$"))
+    app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:[A-Za-z0-9_\-]+$"))
+    app.add_handler(CallbackQueryHandler(pkg_name_random, pattern=r"^pkg:name:random:[A-Za-z0-9_\-]+:(?:-|\d+)$"))
+    app.add_handler(CallbackQueryHandler(pkg_name_custom_start, pattern=r"^pkg:name:custom:[A-Za-z0-9_\-]+:(?:-|\d+)$"))
+    app.add_handler(CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:[A-Za-z0-9_\-]+:(?:-|\d+)$"))
     app.add_handler(CallbackQueryHandler(support_info, pattern=r"^menu:support$"))
     app.add_handler(CallbackQueryHandler(wallet_info, pattern=r"^menu:wallet$"))
