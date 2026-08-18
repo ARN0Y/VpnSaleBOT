@@ -694,6 +694,11 @@ class AsyncDatabase:
             "pg_verify_tls": "1",
             "pg_default_days": "30",
             "pg_packages": "",
+            # Sales catalog (categories + plans). Built once from the legacy
+            # per-panel package lists on first read, then owned by the panel.
+            # KV-only: the .db schema must stay untouched.
+            "catalog": "",
+            "catalog_migrated_from_packages": "0",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
