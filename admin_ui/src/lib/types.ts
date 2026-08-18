@@ -70,3 +70,75 @@ export interface UserDetailBundle {
   period: string;
   topup_period: string;
 }
+
+// ─────────────────────────── sales catalog ───────────────────────────
+// A plan is what you sell; a panel is only where it runs. Two decouplings
+// matter: `display.volume_label` overrides what the buyer is told about volume
+// (so a fair-usage cap can be advertised as "نامحدود"), and `pricing` is a rule
+// rather than a number.
+
+export type PlanTarget =
+  | { kind: "pasarguard"; group: string }
+  | { kind: "xui"; panel: string };
+
+export type PricingMode = "fixed" | "linear" | "tiered";
+export type VolumeMode = "fixed" | "variable";
+
+export type PriceTier = {
+  min_gb: number;
+  price_per_gb: number;
+  agent_price_per_gb: number;
+};
+
+export type PlanPricing = {
+  mode: PricingMode;
+  price: number;
+  agent_price: number;
+  base: number;
+  agent_base: number;
+  per_gb: number;
+  agent_per_gb: number;
+  tiers: PriceTier[];
+  round_to: number;
+};
+
+export type PlanVolume = {
+  mode: VolumeMode;
+  gb: number;
+  days: number;
+  min_gb: number;
+  max_gb: number;
+  step_gb: number;
+};
+
+export type Plan = {
+  id: string;
+  category_id: string;
+  title: string;
+  enabled: boolean;
+  sort: number;
+  target: PlanTarget;
+  volume: PlanVolume;
+  display: { volume_label: string; note: string; badge: string };
+  pricing: PlanPricing;
+};
+
+export type Category = {
+  id: string;
+  title: string;
+  emoji: string;
+  description: string;
+  enabled: boolean;
+  sort: number;
+};
+
+export type CatalogData = { version: number; categories: Category[]; plans: Plan[] };
+
+export type CatalogBundle = {
+  catalog: CatalogData;
+  groups: { id: number; name: string }[];
+  groups_error: string;
+  panels: { key: string; label: string }[];
+  problems: Record<string, string[]>;
+  migrated_from_packages: boolean;
+};

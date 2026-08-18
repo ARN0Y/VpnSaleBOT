@@ -11,6 +11,7 @@ working in parallel until the SPA fully replaces it (strangler migration).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import string
@@ -20,6 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from async_storefront import catalog
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.provisioning import PG_INBOUND_SENTINEL
@@ -840,6 +842,81 @@ async def _pg_client(database):
         base_url=base_url, username=username, password=password,
         verify_tls=cur["pg_verify_tls"] != "0",
     )
+
+
+@router.get("/catalog")
+async def get_catalog(request: Request):
+    """The sales catalog plus everything the editor needs to be usable.
+
+    Ships the live PasarGuard groups and the configured 3x-ui panels so a plan's
+    target is picked from a list of what actually exists, instead of being typed
+    from memory — a mistyped group is the difference between a sale and a failed
+    purchase.
+    """
+    database = db(request)
+    data = await catalog.load_catalog(database)
+
+    groups: list[dict] = []
+    groups_error = ""
+    try:
+        client = await _pg_client(database)
+    except Exception as exc:
+        client = None
+        groups_error = str(exc)[:200]
+    if client is not None:
+        try:
+            for group in await client.list_groups():
+                groups.append({"id": group.get("id"), "name": str(group.get("name") or "")})
+        except Exception as exc:
+            groups_error = str(exc)[:200]
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    panels = [{"key": "1", "label": "پنل اصلی 3x-ui"}]
+    if str(await database.get_setting("panel2_enabled", "0")) == "1":
+        panels.append({
+            "key": "2",
+            "label": str(await database.get_setting("panel2_label", "") or "پنل دوم"),
+        })
+
+    # Report per-plan problems here so the editor can flag a plan the bot would
+    # refuse to sell, rather than the admin finding out from a failed purchase.
+    problems = {p["id"]: catalog.validate_plan(p) for p in data.get("plans") or []}
+    return {
+        "catalog": data,
+        "groups": groups,
+        "groups_error": groups_error,
+        "panels": panels,
+        "problems": {k: v for k, v in problems.items() if v},
+        "migrated_from_packages": str(await database.get_setting("catalog_migrated_from_packages", "0")) == "1",
+    }
+
+
+@router.post("/catalog")
+async def save_catalog_endpoint(request: Request):
+    """Replace the catalog. The payload is normalised and validated server-side,
+    so a malformed plan can never reach the buy flow."""
+    body = await _json_body(request)
+    incoming = body.get("catalog") if isinstance(body.get("catalog"), dict) else body
+    if not isinstance(incoming, dict):
+        return JSONResponse({"ok": False, "error": "invalid catalog payload"}, status_code=400)
+
+    categories = incoming.get("categories")
+    plans = incoming.get("plans")
+    if not isinstance(categories, list) or not isinstance(plans, list):
+        return JSONResponse({"ok": False, "error": "catalog must contain categories and plans"}, status_code=400)
+    if len(categories) > 40 or len(plans) > 200:
+        return JSONResponse({"ok": False, "error": "too many categories or plans"}, status_code=400)
+
+    database = db(request)
+    saved = await catalog.save_catalog(database, {"categories": categories, "plans": plans})
+    problems = {p["id"]: catalog.validate_plan(p) for p in saved.get("plans") or []}
+    return {
+        "ok": True,
+        "catalog": saved,
+        "problems": {k: v for k, v in problems.items() if v},
+    }
 
 
 def _gen_admin_password() -> str:

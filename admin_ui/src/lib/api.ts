@@ -188,6 +188,9 @@ export const api = {
   sendBroadcast: (audience: string, message: string) => post<Ok>("/broadcast", { audience, message }),
   dismissEvent: (id: string) => post<Ok>(`/events/${encodeURIComponent(id)}/dismiss`),
   updateSettings: (values: Record<string, string>) => post<Ok>("/settings", values),
+  catalog: () => request<import("./types").CatalogBundle>("/catalog"),
+  saveCatalog: (catalog: { categories: import("./types").Category[]; plans: import("./types").Plan[] }) =>
+    post<{ ok: boolean; catalog: import("./types").CatalogData; problems: Record<string, string[]> }>("/catalog", { catalog }),
   runBackup: () =>
     post<{
       ok: boolean;

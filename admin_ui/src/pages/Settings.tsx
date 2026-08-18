@@ -10,6 +10,7 @@ import { Field } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CatalogTab } from "./settings/CatalogTab";
 
 type Audience = "all" | "user" | "agent";
 type Tri = "" | "true" | "false";
@@ -60,115 +61,12 @@ function SalesRow({ title, audience, status, onToggle, busy }: {
   );
 }
 
-type Pkg = { kind: "volume" | "unlimited"; title: string; gb: string; days: string; price: string; agent_price: string };
-
 function durationHint(days: string | number): string {
   const n = Number(days) || 0;
   if (n <= 0) return "بدون انقضا";
   const months = n / 30;
   if (months >= 1) return Number.isInteger(months) ? `≈ ${months} ماه` : `≈ ${months.toFixed(1)} ماه`;
   return `${n} روز`;
-}
-
-function PackageEditor({ panel, initial }: { panel: "1" | "2" | "pg"; initial: string }) {
-  const qc = useQueryClient();
-  const [pkgs, setPkgs] = React.useState<Pkg[]>(() => {
-    try {
-      const arr = JSON.parse(initial || "[]");
-      return Array.isArray(arr)
-        ? arr.map((p) => ({
-            kind: p.kind === "unlimited" ? "unlimited" : "volume",
-            title: String(p.title ?? ""),
-            gb: String(p.gb ?? ""),
-            days: String(p.days ?? ""),
-            price: String(p.price ?? ""),
-            agent_price: String(p.agent_price ?? ""),
-          }))
-        : [];
-    } catch {
-      return [];
-    }
-  });
-  const save = useMutation({
-    mutationFn: () =>
-      api.setPanelPackages(
-        panel,
-        pkgs
-          .filter((p) => p.title.trim() && Number(p.price) > 0)
-          .map((p) => ({
-            kind: p.kind,
-            title: p.title.trim(),
-            gb: Number(p.gb) || 0,
-            days: Number(p.days) || 0,
-            price: Number(p.price) || 0,
-            agent_price: Number(p.agent_price) || 0,
-          })),
-      ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
-  });
-  const upd = (i: number, patch: Partial<Pkg>) => setPkgs((xs) => xs.map((x, j) => (j === i ? { ...x, ...patch } : x)));
-  return (
-    <div className="space-y-3 rounded-xl border border-border bg-white/[0.02] p-4">
-      <div className="text-sm font-bold text-white">بسته‌های این سرور</div>
-      <p className="text-xs text-muted-foreground">
-        وقتی حداقل یک بسته بسازید، ربات به‌جای خرید گیگی، همین بسته‌ها را نشان می‌دهد. در بسته‌ی «نامحدود»، «سقف مصرف منصفانه» مخفی است و کاربر فقط «نامحدود» می‌بیند. در بسته‌ی حجمی، نماینده با نرخ گیگی خودش حساب می‌شود.
-      </p>
-      {pkgs.length === 0 && <p className="text-xs text-muted-foreground">هنوز بسته‌ای ساخته نشده — خرید گیگی فعال است.</p>}
-      {pkgs.map((p, i) => (
-        <div key={i} className="space-y-2 rounded-lg border border-border bg-white/[0.02] p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex gap-1">
-              <button
-                onClick={() => upd(i, { kind: "volume" })}
-                className={`rounded-md px-2.5 py-1 text-xs font-bold transition ${p.kind === "volume" ? "bg-brand/20 text-white" : "text-muted-foreground hover:text-white"}`}
-              >
-                حجمی
-              </button>
-              <button
-                onClick={() => upd(i, { kind: "unlimited" })}
-                className={`rounded-md px-2.5 py-1 text-xs font-bold transition ${p.kind === "unlimited" ? "bg-brand/20 text-white" : "text-muted-foreground hover:text-white"}`}
-              >
-                نامحدود
-              </button>
-            </div>
-            <Button variant="destructive" size="icon" onClick={() => setPkgs((xs) => xs.filter((_, j) => j !== i))}>
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Field label="عنوان بسته (همان که کاربر می‌بیند)">
-              <Input value={p.title} placeholder="مثلاً ۵۰ گیگ ماهانه" onChange={(e) => upd(i, { title: e.target.value })} />
-            </Field>
-            <Field label={p.kind === "unlimited" ? "سقف مصرف منصفانه (گیگ) — مخفی، ۰=بی‌نهایت واقعی" : "حجم (گیگ)"}>
-              <Input value={p.gb} inputMode="numeric" onChange={(e) => upd(i, { gb: e.target.value })} />
-            </Field>
-            <Field label="مدت اعتبار (روز) — ۰ = بدون انقضا" hint={durationHint(p.days)}>
-              <Input value={p.days} inputMode="numeric" onChange={(e) => upd(i, { days: e.target.value })} />
-            </Field>
-            <Field label="قیمت برای کاربر (تومان)">
-              <Input value={p.price} inputMode="numeric" onChange={(e) => upd(i, { price: e.target.value })} />
-            </Field>
-            <Field label="قیمت برای نماینده (تومان)" hint="خالی یا ۰ = همان قیمت کاربر">
-              <Input value={p.agent_price} inputMode="numeric" onChange={(e) => upd(i, { agent_price: e.target.value })} />
-            </Field>
-          </div>
-        </div>
-      ))}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={pkgs.length >= 30}
-          onClick={() => setPkgs((xs) => [...xs, { kind: "volume", title: "", gb: "", days: "30", price: "", agent_price: "" }])}
-        >
-          <Plus className="h-4 w-4" /> افزودن بسته
-        </Button>
-        <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره بسته‌ها"}
-        </Button>
-      </div>
-    </div>
-  );
 }
 
 function PrimaryPanelCard({ items }: { items: Record<string, string> }) {
@@ -305,7 +203,6 @@ function PasarGuardCard({ items }: { items: Record<string, string> }) {
           </Button>
         </div>
 
-        <PackageEditor panel="pg" initial={items.pg_packages ?? ""} />
       </CardContent>
     </Card>
   );
@@ -581,6 +478,7 @@ export function Settings() {
     { v: "sales", label: "فروش" },
     { v: "payment", label: "پرداخت" },
     { v: "texts", label: "متن‌ها و دکمه‌ها" },
+    { v: "catalog", label: "پلن‌های فروش" },
     { v: "panels", label: "پنل‌ها" },
     { v: "backup", label: "بکاپ" },
   ];
@@ -761,7 +659,6 @@ export function Settings() {
             <div className="flex justify-end">
               <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره پنل اصلی"}</Button>
             </div>
-            <PackageEditor panel="1" initial={items.panel_packages ?? ""} />
           </CardContent>
         </Card>
 
@@ -821,11 +718,15 @@ export function Settings() {
                 <Save className="h-4 w-4" /> {savePanel2.isPending ? "در حال ذخیره…" : savePanel2.isSuccess ? "ذخیره شد ✓" : "ذخیره پنل دوم"}
               </Button>
             </div>
-            <PackageEditor panel="2" initial={items.panel2_packages ?? ""} />
           </CardContent>
         </Card>
 
         <PasarGuardCard items={items} />
+      </TabsContent>
+
+      {/* ───────────── Sales catalog ───────────── */}
+      <TabsContent value="catalog" className="space-y-6">
+        <CatalogTab />
       </TabsContent>
 
       {/* ───────────── Backup ───────────── */}
@@ -835,7 +736,7 @@ export function Settings() {
 
       {/* The backup tab has its own save button; this bar saves the shop/panel
           fields, so showing it there would just be confusing. */}
-      {tab !== "backup" && (
+      {tab !== "backup" && tab !== "catalog" && (
         <div className="sticky bottom-4 flex justify-end">
           <Button size="lg" disabled={save.isPending} onClick={() => save.mutate()}>
             <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : save.isSuccess ? "ذخیره شد ✓" : "ذخیره تنظیمات فروشگاه و پنل"}
