@@ -781,6 +781,36 @@ export function Settings() {
           سرویس موجود اضافه می‌کند) و مبلغ پیشنهادی شارژ کیف پول.
         </Note>
 
+        {(() => {
+          // Four different settings can supply the renewal rate and they have a
+          // strict precedence; showing only "قیمت هر گیگ" here would be wrong on
+          // any deployment where PasarGuard is primary — which is the usual one.
+          const pgPrimary = (items.primary_backend ?? "xui") === "pasarguard";
+          const pgRate = Number(items.pg_price_per_gb || 0);
+          const firstTier = (() => {
+            try {
+              const t = JSON.parse(items.price_tiers || "[]");
+              return Array.isArray(t) && t.length ? Number(t[0]?.price_per_gb || 0) : 0;
+            } catch { return 0; }
+          })();
+          const flat = Number(items.price_per_gb || 0);
+          const effective = pgPrimary && pgRate > 0 ? pgRate : firstTier > 0 ? firstTier : flat;
+          const source =
+            pgPrimary && pgRate > 0
+              ? "«قیمت هر گیگ» کارت PasarGuard در تب پنل‌ها"
+              : firstTier > 0
+                ? "اولین پله‌ی تعرفه پلکانی پایین"
+                : "همین «تعرفه گیگی»";
+          return (
+            <Note tone={pgPrimary && pgRate > 0 ? "warn" : "info"}>
+              نرخ مؤثر فعلی برای یک کاربر عادی: <b className="text-white">{effective.toLocaleString("en-US")}</b> تومان بر گیگ،
+              از <b className="text-white">{source}</b>.
+              {pgPrimary && pgRate > 0 && " تا وقتی PasarGuard پنل اصلی است و آن عدد صفر نباشد، مقدار زیر روی تمدیدها اثری ندارد."}
+              {" "}نماینده‌ای که نرخ اختصاصی دارد همیشه با نرخ خودش حساب می‌شود.
+            </Note>
+          );
+        })()}
+
         <Section icon={Tags} title="تعرفه گیگی" desc="نرخ پایه‌ای که تمدیدها با آن حساب می‌شوند. نماینده‌ای که نرخ اختصاصی دارد با نرخ خودش حساب می‌شود.">
           <div className="grid gap-4 sm:grid-cols-3">
             {RENEW_FIELDS.map((f) => (

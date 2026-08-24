@@ -2673,11 +2673,62 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 
+async def catalog_tariffs_text(db: AsyncDatabase, user_id: int) -> str | None:
+    """The price list as the shop actually sells it, or None if there is no catalog.
+
+    Once plans exist, quoting a per-gigabyte rate here describes something the
+    buy button no longer does. The per-GB rate still prices renewals, so it is
+    shown as exactly that instead of as "the tariff".
+    """
+    data = await catalog.load_catalog(db)
+    categories = catalog.visible_categories(data)
+    if not categories:
+        return None
+
+    agent = await db.get_agent(user_id)
+    own_rate = int(agent["price_per_gb"] or 0) if agent else 0
+    lines = ["❄️ <b>تعرفه سرویس‌ها</b>", ""]
+    for cat in categories:
+        plans = catalog.plans_in_category(data, cat["id"])
+        if not plans:
+            continue
+        heading = f"{str(cat.get('emoji') or '').strip()} {cat['title']}".strip()
+        lines.append(f"🔹 <b>{html.escape(heading)}</b>")
+        for plan in plans:
+            variable = str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE
+            gb = None
+            if variable:
+                choices = catalog.gb_choices(plan)
+                gb = choices[0] if choices else 0
+            price = catalog.price_for(plan, gb=gb, is_agent=bool(agent), agent_unit_price=own_rate)
+            prefix = "از " if variable else ""
+            volume = catalog.volume_label(plan, gb)
+            lines.append(
+                f"   • <b>{html.escape(str(plan['title']))}</b> — {prefix}{price:,} تومان"
+            )
+            lines.append(
+                f"      {html.escape(volume)} · {html.escape(catalog.duration_label(plan))}"
+            )
+        lines.append("")
+
+    renew_unit = await effective_unit_price(db, user_id, agent)
+    if renew_unit > 0:
+        lines.append("🔁 <b>تمدید سرویس</b>")
+        lines.append(f"   هر گیگ اضافه: <b>{renew_unit:,}</b> تومان")
+    return "\n".join(lines).rstrip()
+
+
 async def tariffs_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await ensure_user(update, context)
     if update.callback_query:
         await update.callback_query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
+    # When plans exist they ARE the tariff; a per-GB rate would describe
+    # something the buy button no longer does.
+    catalog_text = await catalog_tariffs_text(db, update.effective_user.id)
+    if catalog_text:
+        await new_flow_card(update, context, catalog_text, back_keyboard())
+        return
     agent = await db.get_agent(update.effective_user.id)
     agent_price = int(agent["price_per_gb"] or 0) if agent else 0
     pg_unit = await pg_unit_price_override(db)
