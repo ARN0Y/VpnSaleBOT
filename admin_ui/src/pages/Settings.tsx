@@ -36,15 +36,6 @@ type Items = Record<string, string>;
 /** Shop-wide fields, grouped so the page reads like a form and not a data dump. */
 const SHOP_GROUPS: { title: string; hint?: string; fields: { key: string; label: string; hint?: string }[] }[] = [
   {
-    title: "قیمت و حجم",
-    hint: "تعرفه‌ی پایه‌ی کاربران عادی. نماینده‌هایی که قیمت اختصاصی دارند از قیمت خودشان استفاده می‌کنند.",
-    fields: [
-      { key: "price_per_gb", label: "قیمت هر گیگ (تومان)", hint: "اگر «تعرفه پلکانی» تعریف شده باشد، این عدد فقط حالت پایه است." },
-      { key: "minimum_purchase_gb", label: "حداقل خرید (گیگ)", hint: "دکمه‌های حجم در ربات ضریب‌های ۱، ۲، ۳ و ۴ همین عددند." },
-      { key: "purchase_duration_days", label: "مدت اعتبار خرید (روز)", hint: "هر خرید و تمدید این مدت اعتبار زمانی می‌گیرد. ۰ = بدون محدودیت زمانی." },
-    ],
-  },
-  {
     title: "ارتباط و مدیریت",
     fields: [
       { key: "support_id", label: "آیدی پشتیبانی", hint: "با @ ، مثل @ElsaVPN_Support" },
@@ -60,7 +51,20 @@ const SHOP_GROUPS: { title: string; hint?: string; fields: { key: string; label:
     ],
   },
 ];
-const SHOP_FIELD_KEYS = SHOP_GROUPS.flatMap((g) => g.fields.map((f) => f.key));
+/** The per-GB tariff. Since plans arrived it no longer prices NEW purchases —
+ *  it prices renewals (which add volume to an existing service) and the wallet
+ *  top-up suggestion. Kept in its own tab so it cannot be mistaken for the
+ *  shop's price list. */
+const RENEW_FIELDS: { key: string; label: string; hint?: string }[] = [
+  { key: "price_per_gb", label: "قیمت هر گیگ (تومان)", hint: "اگر «تعرفه پلکانی» پایین تعریف شود، آن جدول جای این عدد را می‌گیرد." },
+  { key: "minimum_purchase_gb", label: "حداقل حجم تمدید (گیگ)", hint: "دکمه‌های حجمِ تمدید ضریب‌های ۱، ۲، ۳ و ۴ همین عددند." },
+  { key: "purchase_duration_days", label: "مدت اعتبار پیش‌فرض (روز)", hint: "برای پلن‌ها، مدت اعتبار از خود پلن خوانده می‌شود." },
+];
+
+const SHOP_FIELD_KEYS = [
+  ...SHOP_GROUPS.flatMap((g) => g.fields.map((f) => f.key)),
+  ...RENEW_FIELDS.map((f) => f.key),
+];
 
 const PANEL_FIELDS: { key: string; label: string; type?: string; hint?: string }[] = [
   { key: "panel_base_url", label: "آدرس پنل 3x-ui", hint: "مثل https://panel.example.com:2053" },
@@ -644,7 +648,7 @@ function BackupCard({ items }: { items: Items }) {
 
 const TABS = [
   { key: "shop", label: "فروشگاه", icon: Store },
-  { key: "pricing", label: "تعرفه و بسته", icon: Tags },
+  { key: "pricing", label: "تعرفه تمدید", icon: Tags },
   { key: "payment", label: "پرداخت", icon: CreditCard },
   { key: "catalog", label: "پلن‌های فروش", icon: Layers },
   { key: "panels", label: "پنل‌ها", icon: Server },
@@ -667,7 +671,6 @@ export function Settings() {
 
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [cards, setCards] = React.useState<{ number: string; name: string }[]>([]);
-  const [inf, setInf] = React.useState({ enabled: false, cap_gb: "100", duration_days: "30", price: "0" });
   const [tiers, setTiers] = React.useState<{ min_gb: string; price_per_gb: string }[]>([]);
   const inited = React.useRef(false);
   React.useEffect(() => {
@@ -681,12 +684,6 @@ export function Settings() {
       } catch {
         setCards([]);
       }
-      setInf({
-        enabled: (items.infinite_enabled ?? "0") === "1",
-        cap_gb: items.infinite_cap_gb ?? "100",
-        duration_days: items.infinite_duration_days ?? "30",
-        price: items.infinite_price ?? "0",
-      });
       try {
         const pt = JSON.parse(items.price_tiers || "[]");
         setTiers(Array.isArray(pt) ? pt.map((t) => ({ min_gb: String(t.min_gb ?? ""), price_per_gb: String(t.price_per_gb ?? "") })) : []);
@@ -704,16 +701,6 @@ export function Settings() {
 
   const saveCards = useMutation({ mutationFn: () => api.setPaymentCards(cards.filter((c) => c.number.trim())), ...ok("کارت‌های پرداخت ذخیره شد") });
   const save = useMutation({ mutationFn: () => api.updateSettings(form), ...ok("تنظیمات ذخیره شد") });
-  const saveInf = useMutation({
-    mutationFn: () =>
-      api.setInfinite({
-        enabled: inf.enabled,
-        cap_gb: Number(inf.cap_gb) || 0,
-        duration_days: Number(inf.duration_days) || 0,
-        price: Number(inf.price) || 0,
-      }),
-    ...ok("بسته‌ی بی‌نهایت ذخیره شد"),
-  });
   const saveTiers = useMutation({
     mutationFn: () =>
       api.setPriceTiers(
@@ -786,14 +773,35 @@ export function Settings() {
         <TestConfigCard items={items} />
       </TabsContent>
 
-      {/* ───────────── تعرفه و بسته ───────────── */}
+      {/* ───────────── تعرفه تمدید ───────────── */}
       <TabsContent value="pricing" className="space-y-5">
+        <Note>
+          قیمت <b className="text-white">خریدهای جدید</b> از تب «پلن‌های فروش» می‌آید، نه از اینجا.
+          این تعرفه‌ی گیگی فقط دو جا استفاده می‌شود: <b className="text-white">تمدید سرویس</b> (که حجم به
+          سرویس موجود اضافه می‌کند) و مبلغ پیشنهادی شارژ کیف پول.
+        </Note>
+
+        <Section icon={Tags} title="تعرفه گیگی" desc="نرخ پایه‌ای که تمدیدها با آن حساب می‌شوند. نماینده‌ای که نرخ اختصاصی دارد با نرخ خودش حساب می‌شود.">
+          <div className="grid gap-4 sm:grid-cols-3">
+            {RENEW_FIELDS.map((f) => (
+              <Field key={f.key} label={f.label} hint={f.hint}>
+                <Input value={form[f.key] ?? ""} inputMode="numeric" onChange={(e) => set(f.key, e.target.value)} />
+              </Field>
+            ))}
+          </div>
+          <div className="flex justify-end">
+            <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+              <SaveButton m={save} label="ذخیره تعرفه" />
+            </Button>
+          </div>
+        </Section>
+
         <Section
           icon={Tags}
-          title="تعرفه پلکانی (بر اساس حجم)"
-          desc="قیمت هر گیگ را بر اساس بازه‌ی حجم خرید تعیین کنید؛ هر بازه تا شروعِ بازه‌ی بعدی ادامه می‌یابد. خالی گذاشتن این بخش یعنی استفاده از «قیمت هر گیگ» ثابت."
+          title="تعرفه پلکانی (اختیاری)"
+          desc="نرخ هر گیگ بر اساس حجم تمدید. هر بازه تا شروع بازه‌ی بعدی ادامه دارد. خالی گذاشتن یعنی همان «تعرفه گیگی» بالا."
         >
-          {tiers.length === 0 && <Note>هیچ بازه‌ای تعریف نشده — قیمت ثابتِ تبِ فروشگاه اعمال می‌شود.</Note>}
+          {tiers.length === 0 && <Note>هیچ بازه‌ای تعریف نشده — نرخ ثابت بالا اعمال می‌شود.</Note>}
           {tiers.map((t, i) => (
             <div key={i} className="flex flex-col gap-2 rounded-xl border border-border bg-white/[0.02] p-3 sm:flex-row sm:items-end">
               <div className="flex-1">
@@ -811,42 +819,12 @@ export function Settings() {
               </Button>
             </div>
           ))}
-          {(items.primary_backend ?? "xui") === "pasarguard" && Number(items.pg_price_per_gb || 0) > 0 && (
-            <Note tone="warn">
-              الان پنل اصلی فروش «PasarGuard» است و برای آن قیمت گیگیِ اختصاصی ({Number(items.pg_price_per_gb).toLocaleString("en-US")} تومان) تنظیم شده،
-              بنابراین این جدول پلکانی برای کاربران عادی اعمال نمی‌شود.
-            </Note>
-          )}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Button variant="outline" size="sm" disabled={tiers.length >= 12} onClick={() => setTiers((xs) => [...xs, { min_gb: "", price_per_gb: "" }])}>
               <Plus className="h-4 w-4" /> افزودن بازه
             </Button>
             <Button size="sm" disabled={saveTiers.isPending} onClick={() => saveTiers.mutate()}>
               <SaveButton m={saveTiers} label="ذخیره تعرفه پلکانی" />
-            </Button>
-          </div>
-        </Section>
-
-        <Section
-          icon={Tags}
-          title="بسته‌ی بی‌نهایت"
-          desc="بسته‌ای با حجم بالا و قیمت سفارشی که در ربات به‌عنوان «ترافیک نامحدود» معرفی می‌شود. وقتی مصرف به سقف برسد کانفیگ خودکار غیرفعال می‌شود. کاربر مثل خریدهای معمولی لینک اشتراک می‌گیرد."
-        >
-          <ToggleRow title="وضعیت بسته" on={inf.enabled} onChange={(v) => setInf((s) => ({ ...s, enabled: v }))} />
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="سقف حجم (گیگ)" hint="بعد از این حجم، کانفیگ غیرفعال می‌شود. کاربر این عدد را در ربات نمی‌بیند.">
-              <Input value={inf.cap_gb} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, cap_gb: e.target.value }))} />
-            </Field>
-            <Field label="مدت اعتبار (روز)">
-              <Input value={inf.duration_days} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, duration_days: e.target.value }))} />
-            </Field>
-            <Field label="قیمت (تومان)">
-              <Input value={inf.price} inputMode="numeric" onChange={(e) => setInf((s) => ({ ...s, price: e.target.value }))} />
-            </Field>
-          </div>
-          <div className="flex justify-end">
-            <Button size="sm" disabled={saveInf.isPending} onClick={() => saveInf.mutate()}>
-              <SaveButton m={saveInf} label="ذخیره بسته‌ی بی‌نهایت" />
             </Button>
           </div>
         </Section>

@@ -1,6 +1,0 @@
-import{z as i,a6 as p,a1 as t,t as m}from"./index-BNYCw8r4.js";import{C as h}from"./check-DSNkycpy.js";import{C as u}from"./copy-DzSQEUen.js";/**
- * @license lucide-react v0.469.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const f=i("RefreshCw",[["path",{d:"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",key:"v9h5vc"}],["path",{d:"M21 3v5h-5",key:"1q7to0"}],["path",{d:"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16",key:"3uifl3"}],["path",{d:"M8 16H3v5",key:"1cv678"}]]);function C({value:o,className:s,title:c="کپی"}){const[n,a]=p.useState(!1),d=async r=>{r.preventDefault(),r.stopPropagation();try{await navigator.clipboard.writeText(o)}catch{const e=document.createElement("textarea");e.value=o,document.body.appendChild(e),e.select();try{document.execCommand("copy")}catch{}document.body.removeChild(e)}a(!0),setTimeout(()=>a(!1),1400)};return t.jsx("button",{type:"button",onClick:d,title:c,className:m("inline-flex h-7 w-7 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:border-white/25 hover:text-white",s),children:n?t.jsx(h,{className:"h-3.5 w-3.5 text-emerald-300"}):t.jsx(u,{className:"h-3.5 w-3.5"})})}export{C,f as R};

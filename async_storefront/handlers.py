@@ -3539,6 +3539,14 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await agent_test_config(update, context)
         return ConversationHandler.END
     if text == BTN_INFINITE:
+        db_nav: AsyncDatabase = context.application.bot_data["db"]
+        if not await infinite_enabled(db_nav):
+            # A reply keyboard is cached by Telegram until it is re-sent, so this
+            # button survives on old chats after the package became a plan.
+            # Redraw the menu (which drops it) and open the shop, rather than
+            # silently answering with a card the user did not ask for.
+            await send_main_menu(update, context)
+            return ConversationHandler.END
         await infinite_start(update, context)
         return ConversationHandler.END
     if text == BTN_AGENT_REQ:

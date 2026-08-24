@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Trash2, Save, Layers, Tag, AlertTriangle, GripVertical, Eye, EyeOff,
+  Plus, Trash2, Save, Layers, Tag, AlertTriangle, Eye, EyeOff,
   Server, ShieldCheck, ChevronDown, ChevronUp, Copy, Info,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -53,6 +53,16 @@ function priceFor(plan: Plan, gb: number | null, agent: boolean): number {
   // float disagreed with Python on .5 boundaries, so the preview lied.
   if (r > 1 && total > 0) total = Math.floor((Math.floor(total) + Math.floor(r / 2)) / r) * r;
   return Math.max(0, Math.floor(total));
+}
+
+/** Does this plan price agents from the plan itself, or from each agent's own
+ *  contracted per-GB rate? For a per-GB plan with no agent rate filled in, elsa
+ *  charges agents their own rate, so quoting a single number here would be wrong
+ *  for every agent that has one. */
+function agentPriceIsPerAgent(plan: Plan): boolean {
+  if (plan.pricing.mode === "fixed") return false;
+  if (plan.pricing.mode === "linear") return n(plan.pricing.agent_per_gb) <= 0;
+  return (plan.pricing.tiers || []).every((t) => n(t.agent_price_per_gb) <= 0);
 }
 
 function gbChoices(plan: Plan, limit = 12): number[] {
@@ -140,7 +150,7 @@ function NumberField({ label, hint, value, onChange, suffix }: {
 // ─────────────────────────── plan card ───────────────────────────
 
 function PlanEditor({
-  plan, groups, panels, athena, athenaLabel, problems, onChange, onRemove, onMove, categories,
+  plan, groups, panels, athena, athenaLabel, problems, onChange, onRemove, onDuplicate, onMove, categories,
 }: {
   plan: Plan;
   groups: { id: number; name: string }[];
@@ -150,6 +160,7 @@ function PlanEditor({
   problems: string[];
   onChange: (p: Plan) => void;
   onRemove: () => void;
+  onDuplicate: () => void;
   onMove: (dir: -1 | 1) => void;
   categories: Category[];
 }) {
@@ -167,14 +178,24 @@ function PlanEditor({
   const shownVolume = plan.display.volume_label.trim()
     || (hideVolume || previewGb <= 0 ? "نامحدود" : `${previewGb} گیگ`);
   const masked = hideVolume && previewGb > 0;
+  const perAgentRate = agentPriceIsPerAgent(plan);
 
   return (
-    <div className={`rounded-2xl border p-4 transition ${problems.length ? "border-amber-400/40 bg-amber-400/[0.03]" : "border-border bg-white/[0.02]"}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <button type="button" onClick={() => setOpen((v) => !v)} className="flex min-w-0 flex-1 items-center gap-2 text-right">
-          <GripVertical className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
+    <div className={`rounded-2xl border transition ${problems.length ? "border-amber-400/40 bg-amber-400/[0.03]" : "border-border bg-white/[0.02]"}`}>
+      {/* Header is a grid, not a wrapping flex row: the action buttons keep a
+          fixed column so they cannot be pushed onto their own line by a long
+          title, which is what made the row look broken. */}
+      <div className="grid grid-cols-[1fr_auto] items-start gap-3 p-4">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 items-start gap-2 text-right"
+        >
+          <span className="mt-0.5 shrink-0 text-muted-foreground">
+            {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </span>
+          <span className="min-w-0">
+            <span className="flex flex-wrap items-center gap-2">
               {plan.display.badge && <span className="text-sm">{plan.display.badge}</span>}
               <b className="text-white">{plan.title || "پلن بدون نام"}</b>
               {!plan.enabled && <Badge variant="muted">غیرفعال</Badge>}
@@ -183,44 +204,70 @@ function PlanEditor({
                   <AlertTriangle className="h-3 w-3" /> نیازمند اصلاح
                 </Badge>
               )}
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-              <span>{shownVolume}{masked && <span className="text-amber-300/80"> (واقعی: {previewGb} گیگ)</span>}</span>
-              <span>·</span>
-              <span>{n(plan.volume.days) > 0 ? `${plan.volume.days} روز` : "بدون انقضا"}</span>
-              <span>·</span>
-              <span className="text-white">{variable ? "از " : ""}{money(userPrice)} ت</span>
-              <span className="text-brand">نماینده {money(agentPrice)} ت</span>
-              <span>·</span>
-              <span className="inline-flex items-center gap-1">
-                {plan.target.kind === "pasarguard"
-                  ? <><ShieldCheck className="h-3 w-3" /> {plan.target.group || "بدون گروه"}</>
-                  : plan.target.kind === "athena"
-                    ? <><ShieldCheck className="h-3 w-3" /> {athenaLabel || "L2TP"}{(plan.target as { outbound: string }).outbound ? ` · ${(plan.target as { outbound: string }).outbound}` : ""}</>
-                    : <><Server className="h-3 w-3" /> {panels.find((p) => p.key === (plan.target as { panel: string }).panel)?.label || "3x-ui"}</>}
+            </span>
+            <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-5 text-muted-foreground">
+              <span className="rounded-md bg-white/[0.04] px-1.5 py-0.5">
+                {shownVolume}
+                {masked && <span className="text-amber-300/90"> · واقعی {previewGb} گیگ</span>}
               </span>
-            </div>
-          </div>
-          {open ? <ChevronUp className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
+              <span className="rounded-md bg-white/[0.04] px-1.5 py-0.5">
+                {n(plan.volume.days) > 0 ? `${plan.volume.days} روز` : "بدون انقضا"}
+              </span>
+              <span className="rounded-md bg-white/[0.04] px-1.5 py-0.5 text-white">
+                {variable ? "از " : ""}{money(userPrice)} ت
+              </span>
+              <span className="rounded-md bg-brand/10 px-1.5 py-0.5 text-brand">
+                {perAgentRate ? "نماینده: نرخ اختصاصی خودش" : `نماینده ${money(agentPrice)} ت`}
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.04] px-1.5 py-0.5">
+                {plan.target.kind === "pasarguard" ? (
+                  <><ShieldCheck className="h-3 w-3" /> {plan.target.group || "بدون گروه"}</>
+                ) : plan.target.kind === "athena" ? (
+                  <>
+                    <ShieldCheck className="h-3 w-3" /> {athenaLabel || "L2TP"}
+                    {(plan.target as { outbound: string }).outbound ? ` · ${(plan.target as { outbound: string }).outbound}` : ""}
+                  </>
+                ) : (
+                  <><Server className="h-3 w-3" /> {panels.find((p) => p.key === (plan.target as { panel: string }).panel)?.label || "3x-ui"}</>
+                )}
+              </span>
+            </span>
+          </span>
         </button>
-        <div className="flex items-center gap-1">
-          <Button size="icon" variant="ghost" title="بالا" onClick={() => onMove(-1)}><ChevronUp className="h-4 w-4" /></Button>
-          <Button size="icon" variant="ghost" title="پایین" onClick={() => onMove(1)}><ChevronDown className="h-4 w-4" /></Button>
-          <Button size="icon" variant="ghost" title={plan.enabled ? "غیرفعال کن" : "فعال کن"} onClick={() => set({ enabled: !plan.enabled })}>
+
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Button size="icon" variant="ghost" title="جابه‌جایی به بالا" onClick={() => onMove(-1)}>
+            <ChevronUp className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="ghost" title="جابه‌جایی به پایین" onClick={() => onMove(1)}>
+            <ChevronDown className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="ghost" title="کپی این پلن" onClick={onDuplicate}>
+            <Copy className="h-4 w-4" />
+          </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            title={plan.enabled ? "غیرفعال کردن" : "فعال کردن"}
+            onClick={() => set({ enabled: !plan.enabled })}
+          >
             {plan.enabled ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
           </Button>
-          <Button size="icon" variant="destructive" title="حذف" onClick={onRemove}><Trash2 className="h-4 w-4" /></Button>
+          <Button size="icon" variant="ghost" title="حذف پلن" onClick={onRemove}
+            className="text-rose-300 hover:bg-rose-500/10 hover:text-rose-200">
+            <Trash2 className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 
       {problems.length > 0 && (
-        <div className="mt-3 rounded-xl border border-amber-400/30 bg-amber-400/5 p-3 text-xs leading-6 text-amber-200">
+        <div className="mx-4 mb-4 rounded-xl border border-amber-400/30 bg-amber-400/5 p-3 text-xs leading-6 text-amber-200">
           {problems.map((p, i) => <div key={i}>• {p}</div>)}
         </div>
       )}
 
       {open && (
-        <div className="mt-4 space-y-5 border-t border-border pt-4">
+        <div className="space-y-5 border-t border-border px-4 pb-4 pt-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="نام پلن" hint="همان چیزی که کاربر روی دکمه می‌بیند.">
               <Input value={plan.title} onChange={(e) => set({ title: e.target.value })} placeholder="مثلاً: ۵۰ گیگ ماهیانه" />
@@ -451,7 +498,7 @@ function PlanEditor({
                       <tr key={g} className="border-t border-emerald-400/10">
                         <td className="p-1.5">{g} گیگ</td>
                         <td className="p-1.5">{money(priceFor(plan, g, false))} ت</td>
-                        <td className="p-1.5">{money(priceFor(plan, g, true))} ت</td>
+                        <td className="p-1.5">{perAgentRate ? "نرخ خودش" : `${money(priceFor(plan, g, true))} ت`}</td>
                       </tr>
                     ))}
                     {gbChoices(plan).length === 0 && <tr><td colSpan={3} className="p-2 text-emerald-200/70">بازه‌ی حجم را تعریف کنید.</td></tr>}
@@ -461,7 +508,7 @@ function PlanEditor({
             ) : (
               <div className="flex flex-wrap gap-6 text-sm text-emerald-50">
                 <span>کاربر: <b>{money(userPrice)}</b> تومان</span>
-                <span>نماینده: <b>{money(agentPrice)}</b> تومان</span>
+                <span>نماینده: <b>{perAgentRate ? "نرخ اختصاصی هر نماینده" : `${money(agentPrice)} تومان`}</b></span>
                 <span className="text-emerald-200/80">نمایش به کاربر: <b>{shownVolume}</b></span>
               </div>
             )}
@@ -623,7 +670,7 @@ export function CatalogTab() {
             <CardContent className="space-y-3">
               {catPlans.length === 0 && <p className="text-xs text-muted-foreground">هنوز پلنی در این دسته نیست.</p>}
               {catPlans.map((plan) => (
-                <div key={plan.id} className="group relative">
+                <div key={plan.id}>
                   <PlanEditor
                     plan={plan}
                     groups={groups}
@@ -634,13 +681,9 @@ export function CatalogTab() {
                     problems={problems[plan.id] || []}
                     onChange={updatePlan}
                     onRemove={() => removePlan(plan.id)}
+                    onDuplicate={() => duplicatePlan(plan)}
                     onMove={(d) => movePlan(plan.id, d)}
                   />
-                  <Button
-                    size="icon" variant="ghost" title="کپی این پلن"
-                    className="absolute -top-2 left-24 opacity-0 transition group-hover:opacity-100"
-                    onClick={() => duplicatePlan(plan)}
-                  ><Copy className="h-4 w-4" /></Button>
                 </div>
               ))}
               <Button variant="outline" size="sm" onClick={() => addPlan(cat.id)}><Plus className="h-4 w-4" /> افزودن پلن به این دسته</Button>
