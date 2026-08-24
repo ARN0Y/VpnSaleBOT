@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 
 from .config import Settings
+from . import catalog
 from .db import AsyncDatabase
 from .athena import AthenaClient, connection_lines
 from .pasarguard import PasarGuardClient, _iso_to_epoch as _pg_iso_to_epoch
@@ -42,6 +43,10 @@ except Exception:
 LOG = logging.getLogger(__name__)
 
 BUY_GB, BUY_CUSTOM_GB, BUY_QTY, BUY_NAME_MODE, BUY_NAME_INPUT, BUY_CONFIRM = range(6)
+# Catalog buy flow. Its own range so it can never collide with the older
+# per-GB states while both exist.
+CAT_SELECT, CAT_QTY, CAT_NAME_MODE, CAT_NAME_INPUT, CAT_CONFIRM = range(80, 85)
+CATALOG_MAX_QTY = 20
 TOPUP_AMOUNT, TOPUP_CUSTOM_AMOUNT, TOPUP_AMOUNT_CONFIRM, TOPUP_C2C_PHOTO, TOPUP_CRYPTO_TXID = range(10, 15)
 AGENT_TEXT, AGENT_CONFIRM = range(30, 32)
 RENEW_SELECT, RENEW_SEARCH, RENEW_GB, RENEW_CUSTOM_GB, RENEW_CONFIRM = range(40, 45)
@@ -860,15 +865,593 @@ async def notify_admins(
     return sent
 
 
+# ─────────────────────── Sales catalog flow (categories → plans) ───────────────────────
+# The buy button sells CATALOG PLANS. A plan carries its own target, so which
+# panel and which group a purchase lands on is a property of the plan, not of
+# the button that opened it — that is what lets one shop sell PasarGuard,
+# 3x-ui and Athena side by side.
+#
+# The volume step only appears for a variable plan, and the quantity step is
+# kept from elsa's older flow: agents routinely buy several at once, and
+# dropping it would quietly remove something people use.
+
+CAT_STATE_KEY = "cat_buy"
+
+
+def _cat_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.user_data.setdefault(CAT_STATE_KEY, {})
+
+
+async def _cat_expired(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """A button whose flow state is gone (bot restarted, or a very old message)."""
+    clear_flow_state(context)
+    context.user_data.pop(CAT_STATE_KEY, None)
+    message = "⚠️ این دکمه منقضی شده است. لطفاً دوباره از منو شروع کنید."
+    if update.callback_query:
+        await edit_text(update.callback_query, message, back_keyboard())
+    else:
+        await send_flow_prompt(update, context, message, back_keyboard())
+    return ConversationHandler.END
+
+
+async def _agent_unit_price(db: AsyncDatabase, user_id: int) -> tuple[bool, int]:
+    """(is_agent, their own per-GB rate). Elsa contracts rates per agent."""
+    agent = await db.get_agent(user_id)
+    if not agent:
+        return False, 0
+    return True, int(agent["price_per_gb"] or 0)
+
+
+async def _plan_price(db: AsyncDatabase, user_id: int, plan: dict, gb: int | None) -> int:
+    is_agent, own_rate = await _agent_unit_price(db, user_id)
+    return catalog.price_for(plan, gb=gb, is_agent=is_agent, agent_unit_price=own_rate)
+
+
+def _entry_gb(plan: dict) -> int | None:
+    """The volume a plan is quoted at before the buyer picks one."""
+    if str((plan.get("volume") or {}).get("mode")) != catalog.VOLUME_VARIABLE:
+        return None
+    choices = catalog.gb_choices(plan)
+    return choices[0] if choices else 0
+
+
+def _plan_lines(plan: dict, gb: int | None) -> str:
+    volume = catalog.volume_label(plan, gb)
+    icon = "♾️" if volume == "نامحدود" else "📦"
+    note = str((plan.get("display") or {}).get("note") or "").strip()
+    lines = [
+        f"{icon} حجم: <b>{html.escape(volume)}</b>",
+        f"⏳ مدت اعتبار: <b>{html.escape(catalog.duration_label(plan))}</b>",
+    ]
+    if note:
+        lines.append(f"ℹ️ {html.escape(note)}")
+    return "\n".join(lines)
+
+
+async def show_catalog_root(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    data = await catalog.load_catalog(db)
+    categories = catalog.visible_categories(data)
+    if not categories:
+        await new_flow_card(update, context, "🛒 در حال حاضر پلنی برای فروش تعریف نشده است.", back_keyboard())
+        return ConversationHandler.END
+    if len(categories) == 1:
+        return await show_category_plans(update, context, categories[0]["id"])
+
+    rows = []
+    for cat in categories:
+        label = f"{str(cat.get('emoji') or '').strip()} {cat['title']}".strip()
+        count = len(catalog.plans_in_category(data, cat["id"]))
+        rows.append([InlineKeyboardButton(f"{label}  ({count})", callback_data=f"cat:{cat['id']}")])
+    rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
+    await new_flow_card(
+        update, context,
+        "🛒 <b>خرید سرویس</b>\n"
+        "<code>─────────────────────</code>\n"
+        "ابتدا دسته‌ی مورد نظر را انتخاب کنید 👇",
+        InlineKeyboardMarkup(rows),
+    )
+    return CAT_SELECT
+
+
+async def show_category_plans(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: str) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    data = await catalog.load_catalog(db)
+    cat = catalog.find_category(data, category_id)
+    plans = catalog.plans_in_category(data, category_id)
+    # A disabled category must not be reachable through a stale button either.
+    if not cat or not cat.get("enabled") or not plans:
+        await new_flow_card(update, context, "🛒 در این دسته پلنی موجود نیست.", back_keyboard())
+        return ConversationHandler.END
+
+    rows = []
+    for plan in plans:
+        gb = _entry_gb(plan)
+        price = await _plan_price(db, update.effective_user.id, plan, gb)
+        badge = str((plan.get("display") or {}).get("badge") or "").strip()
+        prefix = "از " if gb is not None else ""
+        label = f"{badge + ' ' if badge else ''}{plan['title']} — {prefix}{price:,} ت"
+        rows.append([InlineKeyboardButton(label, callback_data=f"cpk:sel:{plan['id']}")])
+    if len(catalog.visible_categories(data)) > 1:
+        rows.append([InlineKeyboardButton("↩️ دسته‌های دیگر", callback_data="cat:back")])
+    rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
+
+    heading = f"{str(cat.get('emoji') or '').strip()} {cat['title']}".strip()
+    desc = str(cat.get("description") or "").strip()
+    text = (
+        f"🛒 <b>{html.escape(heading)}</b>\n"
+        "<code>─────────────────────</code>\n"
+        + (f"{html.escape(desc)}\n\n" if desc else "")
+        + "یکی از پلن‌های زیر را انتخاب کنید 👇"
+    )
+    _cat_state(context)["category_id"] = category_id
+    if update.callback_query:
+        await edit_flow_query(update, context, text, InlineKeyboardMarkup(rows))
+    else:
+        await new_flow_card(update, context, text, InlineKeyboardMarkup(rows))
+    return CAT_SELECT
+
+
+async def catalog_category_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    category_id = (query.data or "").split(":", 1)[1]
+    if category_id == "back":
+        return await show_catalog_root(update, context)
+    return await show_category_plans(update, context, category_id)
+
+
+async def catalog_plan_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    plan_id = (query.data or "").split(":", 2)[-1]
+    data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(data, plan_id)
+    if not catalog.plan_is_sellable(data, plan):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+
+    state = _cat_state(context)
+    state.update(plan_id=plan_id, gb=None, qty=1, client_name="", awaiting_name=False)
+    state.setdefault("idem", f"cat-{update.effective_user.id}-{secrets.token_hex(8)}")
+    if str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE:
+        return await show_plan_volumes(update, context, plan)
+    return await show_plan_qty(update, context, plan)
+
+
+async def show_plan_volumes(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    choices = catalog.gb_choices(plan)
+    if not choices:
+        clear_flow_state(context)
+        await edit_text(update.callback_query, "⚠️ این پلن پیکربندی کاملی ندارد. با پشتیبانی تماس بگیرید.", back_keyboard())
+        return ConversationHandler.END
+    rows, row = [], []
+    for gb in choices:
+        price = await _plan_price(db, update.effective_user.id, plan, gb)
+        row.append(InlineKeyboardButton(f"{gb} گیگ — {price:,} ت", callback_data=f"cpk:gb:{plan['id']}:{gb}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    back = str(plan.get("category_id") or "")
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data=f"cat:{back}" if back else "menu:main")])
+    await edit_flow_query(
+        update, context,
+        f"📦 <b>{html.escape(str(plan['title']))}</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"⏳ مدت اعتبار: <b>{html.escape(catalog.duration_label(plan))}</b>\n\n"
+        "چه مقدار حجم می‌خواهید؟ 👇",
+        InlineKeyboardMarkup(rows),
+    )
+    return CAT_SELECT
+
+
+async def catalog_volume_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    try:
+        _, _, plan_id, gb_s = (query.data or "").split(":", 3)
+        gb = int(gb_s)
+    except Exception:
+        return await _cat_expired(update, context)
+    data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(data, plan_id)
+    if not catalog.plan_is_sellable(data, plan):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست.", back_keyboard())
+        return ConversationHandler.END
+    # Never trust the callback: only volumes this plan actually offers.
+    if gb not in catalog.gb_choices(plan):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این حجم برای این پلن معتبر نیست.", back_keyboard())
+        return ConversationHandler.END
+    state = _cat_state(context)
+    state.update(plan_id=plan_id, gb=gb)
+    state.setdefault("idem", f"cat-{update.effective_user.id}-{secrets.token_hex(8)}")
+    return await show_plan_qty(update, context, plan)
+
+
+async def show_plan_qty(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict) -> int:
+    """Quantity step — kept from elsa's older flow; agents buy in batches."""
+    state = _cat_state(context)
+    gb = state.get("gb")
+    rows = [[
+        InlineKeyboardButton(f"{n} عدد", callback_data=f"cpk:q:{n}") for n in (1, 2, 3)
+    ], [
+        InlineKeyboardButton(f"{n} عدد", callback_data=f"cpk:q:{n}") for n in (5, 10)
+    ], [InlineKeyboardButton("✍️ تعداد دلخواه", callback_data="cpk:q:custom")],
+       [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]
+    text = (
+        f"🔢 <b>تعداد</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
+        f"{_plan_lines(plan, gb)}\n"
+        "<code>─────────────────────</code>\n"
+        "چند عدد از این سرویس می‌خواهید؟"
+    )
+    if update.callback_query:
+        await edit_flow_query(update, context, text, InlineKeyboardMarkup(rows))
+    else:
+        await send_flow_prompt(update, context, text, InlineKeyboardMarkup(rows))
+    return CAT_QTY
+
+
+async def catalog_qty_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    raw = (query.data or "").split(":", 2)[-1]
+    if raw == "custom":
+        await edit_flow_query(
+            update, context,
+            "✍️ <b>تعداد دلخواه</b>\n\nعدد تعداد سرویس را ارسال کنید.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
+        )
+        return CAT_QTY
+    try:
+        qty = int(raw)
+    except (TypeError, ValueError):
+        return await _cat_expired(update, context)
+    return await _set_qty_and_ask_name(update, context, qty)
+
+
+async def catalog_qty_typed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.effective_message.text or "").strip()
+    if not text.isdigit() or not (1 <= int(text) <= CATALOG_MAX_QTY):
+        await send_flow_prompt(
+            update, context,
+            f"⚠️ <b>تعداد معتبر نیست.</b>\n\n🔢 عددی بین ۱ و {CATALOG_MAX_QTY} بفرستید.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
+        )
+        return CAT_QTY
+    return await _set_qty_and_ask_name(update, context, int(text))
+
+
+async def _set_qty_and_ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE, qty: int) -> int:
+    state = _cat_state(context)
+    if not state.get("plan_id"):
+        return await _cat_expired(update, context)
+    state["qty"] = max(1, min(CATALOG_MAX_QTY, int(qty)))
+    state["awaiting_name"] = False
+    rows = [
+        [InlineKeyboardButton("🎲 نام رندوم", callback_data="cpk:name:random")],
+        [InlineKeyboardButton("✍️ نام دلخواه", callback_data="cpk:name:custom")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
+    ]
+    text = (
+        f"✅ تعداد <b>{state['qty']}</b> سرویس ثبت شد.\n\n"
+        "🪪 <b>نام کانفیگ</b>\n"
+        "می‌توانید نام را خودتان مشخص کنید یا اجازه بدهید ربات نام رندوم بسازد."
+    )
+    if update.callback_query:
+        await edit_flow_query(update, context, text, InlineKeyboardMarkup(rows))
+    else:
+        await send_flow_prompt(update, context, text, InlineKeyboardMarkup(rows))
+    return CAT_NAME_MODE
+
+
+async def catalog_name_random(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    state = _cat_state(context)
+    if not state.get("plan_id"):
+        return await _cat_expired(update, context)
+    state["client_name"] = ""
+    state["awaiting_name"] = False
+    return await build_catalog_invoice(update, context)
+
+
+async def catalog_name_custom(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    state = _cat_state(context)
+    if not state.get("plan_id"):
+        return await _cat_expired(update, context)
+    state["awaiting_name"] = True
+    await edit_flow_query(
+        update, context,
+        "✍️ <b>نام دلخواه کانفیگ</b>\n\n"
+        "یک نام کوتاه انگلیسی/عددی بفرستید.\nمثال: <code>ali-office</code>",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
+    )
+    return CAT_NAME_INPUT
+
+
+async def catalog_name_typed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = (update.effective_message.text or "").strip()
+    if not NAME_RE.match(name):
+        await send_flow_prompt(
+            update, context,
+            "⚠️ نام معتبر نیست.\n\nاز ۲ تا ۳۲ کاراکتر انگلیسی/عددی و علامت‌های <code>- _ .</code> استفاده کنید.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
+        )
+        return CAT_NAME_INPUT
+    state = _cat_state(context)
+    state["client_name"] = name
+    state["awaiting_name"] = False
+    return await build_catalog_invoice(update, context)
+
+
+async def build_catalog_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    state = _cat_state(context)
+    plan_id = str(state.get("plan_id") or "")
+    if not plan_id:
+        return await _cat_expired(update, context)
+    data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(data, plan_id)
+    if not catalog.plan_is_sellable(data, plan):
+        clear_flow_state(context)
+        message = "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره از منو انتخاب کنید."
+        if update.callback_query:
+            await edit_text(update.callback_query, message, back_keyboard())
+        else:
+            await send_flow_prompt(update, context, message, back_keyboard())
+        return ConversationHandler.END
+
+    gb = state.get("gb")
+    qty = max(1, int(state.get("qty") or 1))
+    unit = await _plan_price(db, update.effective_user.id, plan, gb)
+    total = unit * qty
+    name = str(state.get("client_name") or "").strip()
+    text = (
+        "🧾 <b>تایید خرید</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
+        f"{_plan_lines(plan, gb)}\n"
+        f"🔢 تعداد: <b>{qty}</b>\n"
+        f"🪪 نام کانفیگ: <b>{html.escape(name) if name else '🎲 رندوم'}</b>\n"
+        "<code>─────────────────────</code>\n"
+        + (f"💰 قیمت هر سرویس: <b>{unit:,}</b> تومان\n" if qty > 1 else "")
+        + f"💰 مبلغ قابل پرداخت: <b>{total:,}</b> تومان\n\n"
+        "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ تایید و خرید", callback_data="cpk:ok"),
+        InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel"),
+    ]])
+    if update.callback_query:
+        await edit_flow_query(update, context, text, keyboard)
+    else:
+        await send_flow_prompt(update, context, text, keyboard)
+    return CAT_CONFIRM
+
+
+async def catalog_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    qr: QRService = context.application.bot_data["qr"]
+    state = _cat_state(context)
+    plan_id = str(state.get("plan_id") or "")
+    if not plan_id:
+        return await _cat_expired(update, context)
+
+    if not await audience_sales_is_open(db, update.effective_user.id):
+        clear_flow_state(context)
+        await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
+        return ConversationHandler.END
+
+    data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(data, plan_id)
+    if not catalog.plan_is_sellable(data, plan):
+        clear_flow_state(context)
+        await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
+        return ConversationHandler.END
+    problems = catalog.validate_plan(plan)
+    if problems:
+        clear_flow_state(context)
+        LOG.warning("plan %s is not sellable: %s", plan_id, problems)
+        await edit_text(query, "⚠️ این پلن پیکربندی کاملی ندارد. لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
+        return ConversationHandler.END
+
+    gb = state.get("gb")
+    variable = str((plan.get("volume") or {}).get("mode")) == catalog.VOLUME_VARIABLE
+    if variable:
+        if gb is None or int(gb) not in catalog.gb_choices(plan):
+            clear_flow_state(context)
+            await edit_text(query, "⚠️ این حجم برای این پلن معتبر نیست.", back_keyboard())
+            return ConversationHandler.END
+    else:
+        gb = None
+    qty = max(1, min(CATALOG_MAX_QTY, int(state.get("qty") or 1)))
+    unit = await _plan_price(db, update.effective_user.id, plan, gb)
+    real_gb = catalog.provisioned_gb(plan, gb)
+
+    target = plan.get("target") or {}
+    kind = str(target.get("kind") or catalog.TARGET_PASARGUARD)
+    pg_client = athena_client = panel_client = None
+    group_ids: list[int] = []
+    if kind == catalog.TARGET_PASARGUARD:
+        pg_client = await get_pg_client(context)
+        if pg_client is None:
+            clear_flow_state(context)
+            await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
+            return ConversationHandler.END
+        group = str(target.get("group") or "").strip()
+        group_ids = await pg_client.resolve_group_ids([group]) if group else []
+        if not group_ids:
+            clear_flow_state(context)
+            LOG.warning("plan %s targets unknown PasarGuard group %r", plan_id, group)
+            await edit_text(query, "گروه سرور پیدا نشد؛ لطفاً با پشتیبانی تماس بگیرید.", back_keyboard())
+            return ConversationHandler.END
+    elif kind == catalog.TARGET_ATHENA:
+        athena_client = await get_athena_client(context)
+        if athena_client is None:
+            clear_flow_state(context)
+            await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
+            return ConversationHandler.END
+    else:
+        panel_client = context.application.bot_data.get("panel")
+        if panel_client is None:
+            clear_flow_state(context)
+            await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
+            return ConversationHandler.END
+
+    await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
+    try:
+        deliveries = await provisioning.process_catalog_purchase(
+            user_id=update.effective_user.id,
+            plan=plan,
+            gb=real_gb,
+            qty=qty,
+            unit_total=unit,
+            client_name=str(state.get("client_name") or ""),
+            pg_client=pg_client,
+            group_ids=group_ids,
+            athena_client=athena_client,
+            panel=panel_client,
+            idempotency_key=str(state.get("idem") or query.id),
+        )
+    except ValueError as exc:
+        clear_flow_state(context)
+        await edit_text(
+            query,
+            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")],
+                [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")],
+            ]),
+        )
+        return ConversationHandler.END
+    except Exception as exc:
+        if "duplicate purchase request" in str(exc):
+            await _answer_query(query, "این خرید در حال پردازش است…")
+            return ConversationHandler.END
+        LOG.exception("catalog purchase failed user_id=%s", update.effective_user.id)
+        clear_flow_state(context)
+        await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
+        return ConversationHandler.END
+
+    await edit_text(query, "✅ <b>سرویس شما ساخته شد.</b>\n\nمشخصات اتصال در پیام بعدی ارسال می‌شود.")
+    await deliver_catalog_services(update, context, plan=plan, gb=gb, deliveries=deliveries, qr=qr)
+    clear_flow_state(context)
+    context.user_data.pop(CAT_STATE_KEY, None)
+    return ConversationHandler.END
+
+
+async def deliver_catalog_services(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    plan: dict,
+    gb: int | None,
+    deliveries: list[dict],
+    qr: QRService,
+) -> None:
+    """Hand over what each backend actually gives a customer.
+
+    PasarGuard and 3x-ui give a subscription link; Athena gives a username, a
+    password and per-protocol endpoints. Sending the wrong shape is the whole
+    reason this is one function rather than a format string at the call site.
+    """
+    title = html.escape(str(plan.get("title") or ""))
+    volume = html.escape(catalog.volume_label(plan, gb))
+    duration = html.escape(catalog.duration_label(plan))
+    last = len(deliveries) - 1
+    for index, item in enumerate(deliveries):
+        markup = back_keyboard() if index == last else None
+        if item.get("backend") == catalog.TARGET_ATHENA:
+            lines = connection_lines(item)
+            caption = (
+                f"✅ <b>{title}</b>\n"
+                "<i>سرویس شما فعال شد 🌟</i>\n"
+                "<code>─────────────────────</code>\n"
+                f"📦 حجم: <b>{volume}</b>\n"
+                f"⏳ مدت اعتبار: <b>{duration}</b>\n"
+                "<code>─────────────────────</code>\n"
+                f"👤 نام کاربری: <code>{html.escape(str(item.get('username') or ''))}</code>\n"
+                f"🔑 رمز عبور: <code>{html.escape(str(item.get('password') or ''))}</code>\n"
+            )
+            if lines:
+                caption += "\n🌐 <b>آدرس سرور:</b>\n" + "\n".join(
+                    f"• <code>{html.escape(line)}</code>" for line in lines
+                )
+            sub_link = str(item.get("sub_link") or "")
+            if sub_link:
+                caption += f"\n\n🔗 <b>لینک اشتراک:</b>\n<code>{html.escape(sub_link)}</code>"
+            caption += "\n\n📲 در اپلیکیشن L2TP/SSTP همین مشخصات را وارد کنید."
+            if sub_link:
+                png = await qr.png(sub_link)
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id, photo=BytesIO(png),
+                    caption=caption, parse_mode=ParseMode.HTML, reply_markup=markup,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id, text=caption,
+                    parse_mode=ParseMode.HTML, reply_markup=markup,
+                )
+            continue
+
+        sub_link = str(item.get("sub_link") or "")
+        caption = (
+            f"✅ <b>{title}</b>\n"
+            "<i>سرویس شما فعال شد 🌟</i>\n"
+            "<code>─────────────────────</code>\n"
+            f"📦 حجم: <b>{volume}</b>\n"
+            f"⏳ مدت اعتبار: <b>{duration}</b>\n"
+            "<code>─────────────────────</code>\n"
+            f"🔗 <b>لینک اشتراک شما:</b>\n<code>{html.escape(sub_link)}</code>\n\n"
+            "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+        )
+        if sub_link:
+            png = await qr.png(sub_link)
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id, photo=BytesIO(png),
+                caption=caption, parse_mode=ParseMode.HTML, reply_markup=markup,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=caption,
+                parse_mode=ParseMode.HTML, reply_markup=markup,
+            )
+
+
 async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Main buy button — opens the sales catalog.
+
+    Which panel a purchase lands on is a property of the plan, so this no longer
+    decides anything about backends: the catalog already knows. When no plan has
+    been defined yet it falls back to the old per-GB flow so a shop that has not
+    been migrated still sells.
+    """
     await ensure_user(update, context)
     db: AsyncDatabase = context.application.bot_data["db"]
     if not await audience_sales_is_open(db, update.effective_user.id):
         await show_sales_closed(update, context)
         return ConversationHandler.END
-    min_gb = await minimum_purchase_gb(db)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
     clear_flow_state(context)
+    context.user_data.pop(CAT_STATE_KEY, None)
+
+    data = await catalog.load_catalog(db)
+    if catalog.visible_categories(data):
+        return await show_catalog_root(update, context)
+
+    min_gb = await minimum_purchase_gb(db)
     context.user_data["checkout"] = {}
     await new_flow_card(
         update,
@@ -3075,6 +3658,35 @@ def build_main_conversation() -> ConversationHandler:
         MessageHandler(_nav_filter, handle_nav_btn),
     ]
     states = {
+        CAT_SELECT: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(catalog_category_select, pattern=r"^cat:[A-Za-z0-9_\-]+$"),
+            CallbackQueryHandler(catalog_volume_select, pattern=r"^cpk:gb:[A-Za-z0-9_\-]+:\d+$"),
+            CallbackQueryHandler(catalog_plan_select, pattern=r"^cpk:sel:[A-Za-z0-9_\-]+$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
+        CAT_QTY: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(catalog_qty_selected, pattern=r"^cpk:q:(\d+|custom)$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, catalog_qty_typed),
+        ],
+        CAT_NAME_MODE: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(catalog_name_random, pattern=r"^cpk:name:random$"),
+            CallbackQueryHandler(catalog_name_custom, pattern=r"^cpk:name:custom$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
+        CAT_NAME_INPUT: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, catalog_name_typed),
+        ],
+        CAT_CONFIRM: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(catalog_confirm, pattern=r"^cpk:ok$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
         BUY_GB: [
             MessageHandler(_nav_filter, handle_nav_btn),
             CallbackQueryHandler(buy_gb_selected, pattern=r"^buy:gb:\d+$"),
