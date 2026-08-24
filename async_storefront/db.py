@@ -688,6 +688,14 @@ class AsyncDatabase:
             # Validity of a PasarGuard purchase in days. Empty = follow the shop's
             # own «purchase_duration_days» (the 30-day window volume buys get).
             "pg_default_days": "",
+            # ── Athena panel (custom L2TP/SSTP/WireGuard backend) ──
+            # A third target a plan can point at. Credentials live here, never in
+            # git; the API key is write-only from the admin panel's point of view.
+            "athena_enabled": "0",
+            "athena_label": "سرور اختصاصی L2TP",
+            "athena_base_url": "",
+            "athena_api_key": "",
+            "athena_verify_tls": "1",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",

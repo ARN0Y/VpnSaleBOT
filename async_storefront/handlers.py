@@ -27,6 +27,7 @@ from telegram.ext import (
 
 from .config import Settings
 from .db import AsyncDatabase
+from .athena import AthenaClient, connection_lines
 from .pasarguard import PasarGuardClient, _iso_to_epoch as _pg_iso_to_epoch
 from .provisioning import PG_INBOUND_SENTINEL, ProvisioningService
 from .qr import QRService
@@ -237,6 +238,42 @@ async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
         return None
     app.bot_data["pg_client"] = client
     app.bot_data["pg_client_key"] = key
+    return client
+
+
+async def athena_configured(db: AsyncDatabase) -> bool:
+    enabled = str(await db.get_setting("athena_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    if not enabled:
+        return False
+    return bool((await db.get_setting("athena_base_url", "")).strip()) and bool(
+        (await db.get_setting("athena_api_key", "")).strip()
+    )
+
+
+async def get_athena_client(context: ContextTypes.DEFAULT_TYPE):
+    """Build (and cache) an AthenaClient from settings; rebuild it when the
+    address, key or TLS setting changes so admin edits apply without a restart."""
+    app = context.application
+    db: AsyncDatabase = app.bot_data["db"]
+    if not await athena_configured(db):
+        return None
+    base = (await db.get_setting("athena_base_url", "")).strip()
+    api_key = (await db.get_setting("athena_api_key", "")).strip()
+    verify = str(await db.get_setting("athena_verify_tls", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+    key = f"{base}|{api_key[:16]}|{int(verify)}"
+    client = app.bot_data.get("athena_client")
+    if client is not None and app.bot_data.get("athena_client_key") == key:
+        return client
+    if client is not None:
+        with contextlib.suppress(Exception):
+            await client.close()
+    try:
+        client = AthenaClient(base_url=base, api_key=api_key, verify_tls=verify)
+    except Exception:
+        LOG.exception("failed to build Athena client")
+        return None
+    app.bot_data["athena_client"] = client
+    app.bot_data["athena_client_key"] = key
     return client
 
 

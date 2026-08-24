@@ -10,6 +10,11 @@ from typing import Any
 # both use it without an import cycle.
 PG_INBOUND_SENTINEL = -100
 
+# Athena (the custom L2TP/SSTP panel) accounts are tagged with their own
+# sentinel so a subscription row says which backend created it without any
+# schema change, exactly like PasarGuard's.
+ATHENA_INBOUND_SENTINEL = -200
+
 
 class AgentAccess(str ,Enum):
     OPEN = "open"

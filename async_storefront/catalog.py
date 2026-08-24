@@ -47,6 +47,8 @@ CATALOG_VERSION = 1
 
 TARGET_PASARGUARD = "pasarguard"
 TARGET_XUI = "xui"
+TARGET_ATHENA = "athena"
+TARGET_KINDS = (TARGET_PASARGUARD, TARGET_XUI, TARGET_ATHENA)
 
 PRICING_FIXED = "fixed"          # one price for the plan
 PRICING_LINEAR = "linear"        # base + gb * per_gb
@@ -208,12 +210,22 @@ def price_for(
 # ───────────────────────────── plans ─────────────────────────────
 
 def parse_target(raw: Any) -> dict:
+    """Where a plan is provisioned. Every plan carries its own, so two plans can
+    sell from two different panels — or two groups of the same panel."""
     data = raw if isinstance(raw, dict) else {}
     kind = _str(data.get("kind"), TARGET_PASARGUARD).lower()
-    if kind not in (TARGET_PASARGUARD, TARGET_XUI):
+    if kind not in TARGET_KINDS:
         kind = TARGET_PASARGUARD
     if kind == TARGET_PASARGUARD:
         return {"kind": kind, "group": _str(data.get("group"))}
+    if kind == TARGET_ATHENA:
+        # node_id 0 means "the panel's default node"; outbound "" means the
+        # panel's own default egress. Both are optional on purpose.
+        return {
+            "kind": kind,
+            "node_id": _int(data.get("node_id"), 0, minimum=0),
+            "outbound": _str(data.get("outbound")),
+        }
     panel = _str(data.get("panel"), "1")
     return {"kind": kind, "panel": panel if panel in ("1", "2") else "1"}
 
