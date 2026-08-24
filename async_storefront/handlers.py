@@ -30,6 +30,7 @@ from . import catalog
 from .db import AsyncDatabase
 from .athena import AthenaClient, connection_lines
 from .pasarguard import PasarGuardClient, _iso_to_epoch as _pg_iso_to_epoch
+from .models import ATHENA_INBOUND_SENTINEL
 from .provisioning import PG_INBOUND_SENTINEL, ProvisioningService
 from .qr import QRService
 from .util import now_ms, now_ts
@@ -169,7 +170,23 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
 
 
 async def infinite_enabled(db: AsyncDatabase) -> bool:
-    return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    """Whether the standalone «بسته‌ی بی‌نهایت» button should be offered.
+
+    Once a catalog exists the package is sold as a PLAN inside the buy flow, and
+    the migration put it there. Keeping the old button as well would sell the
+    same thing twice from two different price sources: the button reads
+    ``infinite_price`` while the plan reads its own price, so re-pricing the plan
+    in the editor would leave the button charging the stale amount — and the
+    button provisions into the GLOBAL pg_group rather than the plan's group.
+    """
+    if str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() not in {"1", "true", "on", "yes"}:
+        return False
+    # Read the STORED catalog only. load_catalog() would migrate and persist as a
+    # side effect, and a keyboard being drawn must not write to the database.
+    raw = await db.get_setting(catalog.CATALOG_SETTING, "")
+    if not str(raw or "").strip():
+        return True
+    return not catalog.visible_categories(catalog.parse_catalog(raw))
 
 
 # ───────────────────────── PasarGuard backend ─────────────────────────
@@ -288,6 +305,21 @@ async def pg_group_ids(db: AsyncDatabase, pg_client) -> list[int]:
     if not group:
         return []
     return await pg_client.resolve_group_ids([group])
+
+
+def is_athena_subscription(sub: dict) -> bool:
+    """A service that lives on the Athena panel, not on 3x-ui or PasarGuard."""
+    return int(sub.get("inbound_id") or 0) == ATHENA_INBOUND_SENTINEL
+
+
+def is_external_subscription(sub: dict) -> bool:
+    """Anything the 3x-ui client must not be asked about.
+
+    Both PasarGuard and Athena store their accounts with a sentinel inbound_id;
+    handing either of them to the 3x-ui panel produces a lookup that can only
+    fail, so every 3x-ui-only path filters on this rather than on "not PG".
+    """
+    return is_pg_subscription(sub) or is_athena_subscription(sub)
 
 
 def is_pg_subscription(sub: dict) -> bool:
@@ -1780,6 +1812,10 @@ async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.callback_query:
         await update.callback_query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
+    if not await infinite_enabled(db):
+        # Either switched off, or superseded by the catalog plan — in both cases
+        # this old button must not sell anything.
+        return await buy_start(update, context)
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
     pkg = await provisioning.infinite_package()
     if not pkg["enabled"]:
@@ -1809,6 +1845,9 @@ async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     db: AsyncDatabase = context.application.bot_data["db"]
+    if not await infinite_enabled(db):
+        await edit_text(query, "این بسته از منوی «خرید سرویس» قابل تهیه است.", back_keyboard())
+        return
     if not await audience_sales_is_open(db, update.effective_user.id):
         await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
         return
@@ -2030,7 +2069,7 @@ async def _sync_subscriptions_snapshot(panel, db: AsyncDatabase, subs: list[dict
         s for s in subs
         if now_s - int(s.get("panel_synced_at") or 0) > 60
         and str(s.get("sub_id") or "").strip()
-        and not is_pg_subscription(s)
+        and not is_external_subscription(s)
     ]
     if not stale:
         return
@@ -2410,6 +2449,16 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             query,
             "♾️ <b>این سرویس بسته‌ی بی‌نهایت است.</b>\n\n"
             "تمدید حجمی برای آن انجام نمی‌شود؛ می‌توانید از منو یک بسته‌ی بی‌نهایت جدید تهیه کنید.",
+            back_keyboard(),
+        )
+        return ConversationHandler.END
+    if is_athena_subscription(sub):
+        # Renewal for Athena is not wired up yet; sending it down the 3x-ui path
+        # would try to renew an account that panel has never heard of.
+        await edit_text(
+            query,
+            "🌐 <b>این سرویس روی سرور L2TP است.</b>\n\n"
+            "تمدید آن فعلاً از ربات انجام نمی‌شود؛ لطفاً با پشتیبانی در ارتباط باشید.",
             back_keyboard(),
         )
         return ConversationHandler.END
