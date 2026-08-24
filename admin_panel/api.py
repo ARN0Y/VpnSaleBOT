@@ -11,6 +11,7 @@ working in parallel until the SPA fully replaces it (strangler migration).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import string
 import time
@@ -18,6 +19,8 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from async_storefront import catalog
+from async_storefront.athena import AthenaClient
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.provisioning import PG_INBOUND_SENTINEL
@@ -160,6 +163,10 @@ async def settings(request: Request):
         items["sub_link_base"] = str(panel_row["sub_link_base"] or "")
     items["panel_password"] = ""
     items["pg_password"] = ""  # PasarGuard admin password — never exposed
+    # The Athena API key can create and delete accounts on that panel, so it
+    # is write-only here: the UI only learns whether one is configured.
+    items["athena_api_key_set"] = "1" if str(items.get("athena_api_key") or "").strip() else "0"
+    items["athena_api_key"] = ""
     return {"items": items}
 
 
@@ -783,6 +790,173 @@ async def _pg_client(database) -> PasarGuardClient | None:
         base_url=base_url, username=username, password=password,
         verify_tls=cur["pg_verify_tls"] != "0",
     )
+
+
+async def _athena_client_from_settings(database):
+    """Build an Athena client from settings, or None when it is not configured."""
+    enabled = str(await database.get_setting("athena_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
+    base = str(await database.get_setting("athena_base_url", "") or "").strip()
+    key = str(await database.get_setting("athena_api_key", "") or "").strip()
+    if not (enabled and base and key):
+        return None
+    verify = str(await database.get_setting("athena_verify_tls", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
+    return AthenaClient(base_url=base, api_key=key, verify_tls=verify)
+
+
+@router.get("/catalog")
+async def get_catalog(request: Request):
+    """The sales catalog plus everything the editor needs to be usable.
+
+    Every panel a plan can target is resolved live — PasarGuard groups, the
+    configured 3x-ui panels, and Athena's nodes and outbounds — so a target is
+    picked from what actually exists instead of typed from memory. A mistyped
+    group or outbound is the difference between a sale and a failed purchase.
+    """
+    database = db(request)
+    data = await catalog.load_catalog(database)
+
+    groups: list[dict] = []
+    groups_error = ""
+    client = None
+    try:
+        client = await _pg_client(database)
+    except Exception as exc:
+        groups_error = str(exc)[:200]
+    if client is not None:
+        try:
+            for group in await client.list_groups():
+                groups.append({"id": group.get("id"), "name": str(group.get("name") or "")})
+        except Exception as exc:
+            groups_error = str(exc)[:200]
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    panels = [{"key": "1", "label": "پنل اصلی 3x-ui"}]
+
+    athena: dict = {
+        "enabled": str(await database.get_setting("athena_enabled", "0")) == "1",
+        "label": str(await database.get_setting("athena_label", "") or ""),
+        "error": "",
+        "nodes": [],
+        "outbounds": [],
+    }
+    ath_client = await _athena_client_from_settings(database)
+    if ath_client is not None:
+        try:
+            athena["nodes"] = [
+                {"id": n.get("id"), "name": str(n.get("name") or "")}
+                for n in await ath_client.list_nodes()
+            ]
+            athena["outbounds"] = [
+                {
+                    "name": str(o.get("name") or ""),
+                    "label": str(o.get("label") or o.get("name") or ""),
+                    "status": str(o.get("status") or ""),
+                }
+                for o in await ath_client.list_outbounds()
+            ]
+        except Exception as exc:
+            athena["error"] = str(exc)[:200]
+        finally:
+            with contextlib.suppress(Exception):
+                await ath_client.close()
+
+    # Report per-plan problems so the editor can flag a plan the bot would
+    # refuse to sell, rather than the admin finding out from a failed purchase.
+    problems = {p["id"]: catalog.validate_plan(p) for p in data.get("plans") or []}
+    return {
+        "catalog": data,
+        "groups": groups,
+        "groups_error": groups_error,
+        "panels": panels,
+        "athena": athena,
+        "problems": {k: v for k, v in problems.items() if v},
+        "migrated_from_packages": str(await database.get_setting("catalog_migrated_from_packages", "0")) == "1",
+    }
+
+
+@router.post("/catalog")
+async def save_catalog_endpoint(request: Request):
+    """Replace the catalog. Normalised and validated server-side, so a malformed
+    plan can never reach the buy flow."""
+    body = await _json_body(request)
+    incoming = body.get("catalog") if isinstance(body.get("catalog"), dict) else body
+    if not isinstance(incoming, dict):
+        return JSONResponse({"ok": False, "error": "invalid catalog payload"}, status_code=400)
+
+    categories = incoming.get("categories")
+    plans = incoming.get("plans")
+    if not isinstance(categories, list) or not isinstance(plans, list):
+        return JSONResponse({"ok": False, "error": "catalog must contain categories and plans"}, status_code=400)
+    if len(categories) > 40 or len(plans) > 200:
+        return JSONResponse({"ok": False, "error": "too many categories or plans"}, status_code=400)
+
+    database = db(request)
+    saved = await catalog.save_catalog(database, {"categories": categories, "plans": plans})
+    problems = {p["id"]: catalog.validate_plan(p) for p in saved.get("plans") or []}
+    return {"ok": True, "catalog": saved, "problems": {k: v for k, v in problems.items() if v}}
+
+
+@router.post("/athena")
+async def set_athena(request: Request):
+    """Connection settings for the Athena panel. An empty api_key means "keep
+    the current one" — the field is write-only, so saving the card must not
+    silently clear a working key."""
+    body = await _json_body(request)
+    database = db(request)
+    current = {row["key"]: row["value"] for row in await database.admin_list_settings()}
+    api_key = str(body.get("api_key") or "").strip() or str(current.get("athena_api_key") or "")
+    values = {
+        "athena_enabled": "1" if bool(body.get("enabled")) else "0",
+        "athena_label": str(body.get("label") or "").strip() or "سرور اختصاصی L2TP",
+        "athena_base_url": str(body.get("base_url") or "").strip().rstrip("/"),
+        "athena_api_key": api_key,
+        "athena_verify_tls": "0" if body.get("verify_tls") is False else "1",
+    }
+    await database.admin_update_settings(values)
+    return {"ok": True}
+
+
+@router.post("/athena/test")
+async def test_athena(request: Request):
+    """Probe the Athena panel with the given (or stored) credentials.
+
+    Reports what the key can actually do, because a key that authenticates but
+    lacks users:write looks fine right up until the first sale fails.
+    """
+    body = await _json_body(request)
+    database = db(request)
+    current = {row["key"]: row["value"] for row in await database.admin_list_settings()}
+    base = str(body.get("base_url") or current.get("athena_base_url") or "").strip()
+    api_key = str(body.get("api_key") or "").strip() or str(current.get("athena_api_key") or "")
+    verify = body.get("verify_tls")
+    verify_tls = (str(current.get("athena_verify_tls", "1")) != "0") if verify is None else bool(verify)
+    if not base or not api_key:
+        return {"ok": False, "error": "آدرس پنل و کلید API را وارد کنید."}
+
+    client = AthenaClient(base_url=base, api_key=api_key, verify_tls=verify_tls)
+    try:
+        info = await client.probe()
+        nodes = await client.list_nodes()
+        outbounds = await client.list_outbounds()
+        scopes = list(info.get("scopes") or [])
+        can_write = info.get("unrestricted") or not scopes or "users:write" in scopes
+        return {
+            "ok": True,
+            "admin": info.get("admin", ""),
+            "role": info.get("role", ""),
+            "scopes": scopes,
+            "can_create_users": bool(can_write),
+            "rate_limit_per_minute": info.get("rate_limit_per_minute", 0),
+            "nodes": [{"id": n.get("id"), "name": str(n.get("name") or "")} for n in nodes],
+            "outbounds": [str(o.get("name") or "") for o in outbounds],
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
 
 
 def _gen_admin_password() -> str:

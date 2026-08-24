@@ -121,6 +121,19 @@ export const api = {
     agent_default_limit: number;
   }) => post<Ok>("/test-config", p),
   setPrimaryBackend: (backend: "xui" | "pasarguard") => post<Ok>("/primary-backend", { backend }),
+  setAthena: (p: {
+    enabled: boolean;
+    label: string;
+    base_url: string;
+    api_key: string;
+    verify_tls: boolean;
+  }) => post<Ok>("/athena", p),
+  testAthena: (p: { base_url?: string; api_key?: string; verify_tls?: boolean }) =>
+    post<{
+      ok: boolean; error?: string; admin?: string; role?: string;
+      scopes?: string[]; can_create_users?: boolean; rate_limit_per_minute?: number;
+      nodes?: { id: number; name: string }[]; outbounds?: string[];
+    }>("/athena/test", p),
   setPasarGuard: (p: {
     enabled: boolean;
     label: string;
@@ -178,4 +191,7 @@ export const api = {
   sendBroadcast: (audience: string, message: string) => post<Ok>("/broadcast", { audience, message }),
   dismissEvent: (id: string) => post<Ok>(`/events/${encodeURIComponent(id)}/dismiss`),
   updateSettings: (values: Record<string, string>) => post<Ok>("/settings", values),
+  catalog: () => request<import("./types").CatalogBundle>("/catalog"),
+  saveCatalog: (catalog: { categories: import("./types").Category[]; plans: import("./types").Plan[] }) =>
+    post<{ ok: boolean; catalog: import("./types").CatalogData; problems: Record<string, string[]> }>("/catalog", { catalog }),
 };

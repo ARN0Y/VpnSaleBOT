@@ -14,6 +14,7 @@ import {
   Tags,
   CreditCard,
   MonitorCog,
+  Layers,
   FlaskConical,
   Info,
   type LucideIcon,
@@ -27,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/toast";
+import { CatalogTab } from "./settings/CatalogTab";
 
 type Audience = "all" | "user" | "agent";
 type Items = Record<string, string>;
@@ -330,6 +332,111 @@ function PasarGuardCard({ items }: { items: Items }) {
   );
 }
 
+function AthenaCard({ items }: { items: Items }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [f, setF] = React.useState(() => ({
+    enabled: (items.athena_enabled ?? "0") === "1",
+    label: items.athena_label || "سرور اختصاصی L2TP",
+    base_url: items.athena_base_url ?? "",
+    api_key: "",
+    verify_tls: (items.athena_verify_tls ?? "1") !== "0",
+  }));
+  const upd = (k: keyof typeof f, v: string | boolean) => setF((s) => ({ ...s, [k]: v }));
+  const keySet = (items.athena_api_key_set ?? "0") === "1";
+
+  type Report = {
+    ok: boolean; error?: string; admin?: string; role?: string; scopes?: string[];
+    can_create_users?: boolean; rate_limit_per_minute?: number;
+    nodes?: { id: number; name: string }[]; outbounds?: string[];
+  };
+  const [test, setTest] = React.useState<Report | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => api.setAthena(f),
+    onSuccess: () => {
+      setF((s) => ({ ...s, api_key: "" }));
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      toast({ title: "تنظیمات پنل L2TP ذخیره شد", variant: "success" });
+    },
+    onError: (e: Error) => toast({ title: "ذخیره ناموفق بود", description: e.message, variant: "error" }),
+  });
+  const doTest = useMutation({
+    mutationFn: () => api.testAthena({ base_url: f.base_url, api_key: f.api_key || undefined, verify_tls: f.verify_tls }),
+    onSuccess: (r) => setTest(r),
+    onError: (e: Error) => setTest({ ok: false, error: e.message }),
+  });
+
+  return (
+    <Section
+      icon={ShieldCheck}
+      accent
+      title="اتصال پنل L2TP/SSTP (Athena)"
+      desc="پنل اختصاصی خودتان. سرویس‌های این پنل به‌جای لینک اشتراک، نام کاربری و رمز عبور دارند و ربات همان را به مشتری می‌دهد. کلید API را از خود پنل بسازید: Settings ← API keys ← Create."
+    >
+      <ToggleRow title="وضعیت پنل L2TP" on={f.enabled} onChange={(v) => upd("enabled", v)} />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="آدرس پنل" hint="با پورت، مثل https://panel.example.com:8443">
+          <Input value={f.base_url} onChange={(e) => upd("base_url", e.target.value)} dir="ltr" placeholder="https://panel.example.com:8443" />
+        </Field>
+        <Field label="کلید API" hint={keySet ? "تنظیم شده — خالی بگذارید تا تغییر نکند." : "کلیدی که در پنل ساختید (ath_...)"}>
+          <Input type="password" value={f.api_key} onChange={(e) => upd("api_key", e.target.value)} dir="ltr" placeholder={keySet ? "بدون تغییر" : "ath_..."} />
+        </Field>
+        <Field label="نام نمایشی سرویس" hint="عنوانی که کنار پلن‌های این پنل دیده می‌شود.">
+          <Input value={f.label} onChange={(e) => upd("label", e.target.value)} />
+        </Field>
+        <div className="flex items-center gap-2 pt-6">
+          <input
+            id="ath_verify"
+            type="checkbox"
+            checked={f.verify_tls}
+            onChange={(e) => upd("verify_tls", e.target.checked)}
+            className="h-4 w-4 accent-[hsl(var(--brand))]"
+          />
+          <label htmlFor="ath_verify" className="text-sm text-muted-foreground">
+            بررسی گواهی TLS (اگر گواهی معتبر دارید روشن بماند)
+          </label>
+        </div>
+      </div>
+
+      {test && (
+        <div className={`rounded-xl border p-3 text-sm leading-6 ${test.ok ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100" : "border-rose-400/30 bg-rose-400/10 text-rose-100"}`}>
+          {test.ok ? (
+            <>
+              <div>✅ اتصال موفق — ادمین: <b>{test.admin}</b> ({test.role})</div>
+              <div>
+                🖥 سرورها: {(test.nodes || []).map((n) => n.name).join("، ") || "—"}
+                {" · "}🌍 خروجی‌ها: {(test.outbounds || []).join("، ") || "—"}
+              </div>
+              {!test.can_create_users && (
+                <div className="mt-1 text-amber-200">
+                  ⚠️ این کلید مجوز <code dir="ltr">users:write</code> ندارد؛ اتصال برقرار است ولی ربات نمی‌تواند سرویس بسازد.
+                </div>
+              )}
+            </>
+          ) : (
+            <>❌ اتصال ناموفق: {test.error}</>
+          )}
+        </div>
+      )}
+
+      <Note>
+        هر پلن جداگانه تعیین می‌کند روی کدام سرور و کدام خروجیِ این پنل ساخته شود — از تب «پلن‌های فروش».
+      </Note>
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button variant="outline" size="sm" disabled={doTest.isPending} onClick={() => doTest.mutate()}>
+          {doTest.isPending ? "در حال تست…" : "تست اتصال"}
+        </Button>
+        <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+          <SaveButton m={save} label="ذخیره پنل L2TP" />
+        </Button>
+      </div>
+    </Section>
+  );
+}
+
 // ─────────────────────────── free test config ───────────────────────────
 
 function TestConfigCard({ items }: { items: Items }) {
@@ -539,6 +646,7 @@ const TABS = [
   { key: "shop", label: "فروشگاه", icon: Store },
   { key: "pricing", label: "تعرفه و بسته", icon: Tags },
   { key: "payment", label: "پرداخت", icon: CreditCard },
+  { key: "catalog", label: "پلن‌های فروش", icon: Layers },
   { key: "panels", label: "پنل‌ها", icon: Server },
   { key: "backup", label: "بکاپ", icon: DatabaseBackup },
   { key: "appearance", label: "ظاهر پنل", icon: MonitorCog },
@@ -633,7 +741,7 @@ export function Settings() {
   const allClosed = salesUser === "closed" && salesAgent === "closed";
   // The shared text form is only edited on these two tabs, so the sticky save
   // bar is shown only there (it saves nothing on the others).
-  const showStickySave = tab === "shop" || tab === "panels";
+  const showStickySave = tab === "shop" || tab === "panels";  // the catalog tab saves itself
 
   return (
     <Tabs dir="rtl" value={tab} onValueChange={setTab} className="space-y-5 text-right">
@@ -793,6 +901,11 @@ export function Settings() {
         </Section>
       </TabsContent>
 
+      {/* ───────────── پلن‌های فروش ───────────── */}
+      <TabsContent value="catalog" className="space-y-5">
+        <CatalogTab />
+      </TabsContent>
+
       {/* ───────────── پنل‌ها ───────────── */}
       <TabsContent value="panels" className="space-y-5">
         <PrimaryBackendCard items={items} />
@@ -814,6 +927,8 @@ export function Settings() {
         </Section>
 
         <PasarGuardCard items={items} />
+
+        <AthenaCard items={items} />
       </TabsContent>
 
       {/* ───────────── بکاپ ───────────── */}
