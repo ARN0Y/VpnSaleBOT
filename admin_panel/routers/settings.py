@@ -125,7 +125,8 @@ def settings_values_from_form(form, current: dict[str, str]) -> dict[str, str]:
     return values
 
 
-def backup_values_from_form(form) -> dict[str, str]:
+def backup_values_from_form(form, current: dict[str, str] | None = None) -> dict[str, str]:
+    current = current or {}
     unit = str(form.get("backup_interval_unit", "minutes") or "minutes").strip().lower()
     if unit not in BACKUP_UNITS:
         unit = "minutes"
@@ -152,6 +153,24 @@ def backup_values_from_form(form) -> dict[str, str]:
     for key, default in _pg_db_defaults.items():
         if key in form:
             values[key] = str(form.get(key) or "").strip() or (default if key in {"pg_db_user", "pg_db_name"} else "")
+
+    # Restore-verified PasarGuard backup settings.
+    pg_mode = str(form.get("pg_backup_mode", current.get("pg_backup_mode", "auto")) or "auto").strip().lower()
+    if pg_mode not in {"auto", "cli", "native"}:
+        pg_mode = "auto"
+    values["pg_backup_mode"] = pg_mode
+    for key, default in (("pg_backup_compose_file", ""), ("pg_backup_dir", "")):
+        values[key] = str(form.get(key, current.get(key, default)) or "").strip()
+    values["pg_backup_max_age_minutes"] = str(
+        max(0, as_int(form.get("pg_backup_max_age_minutes", current.get("pg_backup_max_age_minutes", "360")), 360))
+    )
+    values["pg_backup_timeout_seconds"] = str(
+        min(3600, max(60, as_int(form.get("pg_backup_timeout_seconds", current.get("pg_backup_timeout_seconds", "900")), 900)))
+    )
+    # An empty token means "keep the current one" — the field is a write-only
+    # secret, so saving the card must not silently clear a working token.
+    token = str(form.get("backup_bot_token", "") or "").strip()
+    values["backup_bot_token"] = token or str(current.get("backup_bot_token", "") or "")
     return values
 
 
@@ -282,7 +301,7 @@ async def settings_update(request: Request):
     if sales_changed:
         values["sales_status_updated_at"] = str(now_ts())
         values["sales_status_updated_by"] = current_admin_username(request) or "admin"
-    values.update(backup_values_from_form(form))
+    values.update(backup_values_from_form(form, current_settings))
 
     current_panel = await database.get_panel_settings()
     await database.admin_update_settings(values)

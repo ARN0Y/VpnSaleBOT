@@ -646,6 +646,22 @@ class AsyncDatabase:
             "backup_send_to_telegram": "1",
             "backup_telegram_chat_id": "-1003940678338",
             "backup_defaults_v2_applied": "0",
+            # ── PasarGuard backup that the official `pasarguard restore` accepts ──
+            # Supersedes the older JSON-snapshot + raw pg_dump pair: "auto" runs
+            # the panel's own CLI (reusing its cron archive when fresh) and falls
+            # back to a native pg_dump built in the same layout, then VERIFIES the
+            # archive is restorable before reporting success.
+            "pg_backup_mode": "auto",
+            "pg_backup_compose_file": "/opt/pasarguard/docker-compose.yml",
+            "pg_backup_dir": "/opt/pasarguard/backup",
+            "pg_backup_cli": "/usr/local/bin/pasarguard",
+            "pg_backup_max_age_minutes": "360",
+            "pg_backup_timeout_seconds": "900",
+            "backup_last_pg_status": "off",
+            "backup_last_pg_mode": "",
+            "backup_last_pg_db_bytes": "0",
+            # Dedicated bot for backup delivery; empty falls back to BOT_TOKEN.
+            "backup_bot_token": "",
             "admin_user_ids": "",
             "default_agent_credit_limit_toman": "0",
             "default_agent_price_per_gb": "0",
@@ -2200,6 +2216,285 @@ class AsyncDatabase:
             (cutoff, cutoff, q, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, safe_limit, safe_offset),
         )
         return [self._decorate_order_row(dict(row)) for row in rows]
+
+    # ── order reporting ──────────────────────────────────────────────────
+    # The orders page answers business questions — "who bought between these
+    # two dates, and how much came in?" — so the list and the totals are built
+    # from the SAME predicate. Deriving them separately is how a page and its
+    # summary end up disagreeing with each other.
+
+    _ORDER_IS_RENEWAL = (
+        "(LOWER(COALESCE(orders_view.order_type,''))='renewal'"
+        " OR (COALESCE(orders_view.order_type,'')=''"
+        "     AND (COALESCE(orders_view.plan_id,0)<0"
+        "          OR orders_view.order_id LIKE '%-renew-%')))"
+    )
+    ORDER_STATUSES = ("pending", "approved", "rejected")
+    ORDER_TYPES = ("purchase", "renewal")
+    ORDER_PAYMENT_METHODS = ("rial", "wallet", "agent_wallet", "agent_open", "test_rial", "crypto")
+
+    def _order_filter_sql(
+        self,
+        *,
+        search: str = "",
+        date_from: int = 0,
+        date_to: int = 0,
+        status: str = "",
+        order_type: str = "",
+        payment_method: str = "",
+        user_id: int = 0,
+        min_amount: int = 0,
+        max_amount: int = 0,
+    ) -> tuple[str, list[Any]]:
+        """One WHERE clause, shared by the rows query and the totals query."""
+        q = str(search or "").strip()
+        pattern = f"%{q}%"
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        # created_at is a unix timestamp. The caller passes an inclusive start
+        # and an exclusive end, so two adjacent ranges can never both claim the
+        # same order.
+        if int(date_from or 0) > 0:
+            clauses.append("COALESCE(orders_view.created_at,0)>=?")
+            params.append(int(date_from))
+        if int(date_to or 0) > 0:
+            clauses.append("COALESCE(orders_view.created_at,0)<?")
+            params.append(int(date_to))
+        if str(status or "").strip().lower() in self.ORDER_STATUSES:
+            clauses.append("LOWER(COALESCE(orders_view.status,'pending'))=?")
+            params.append(str(status).strip().lower())
+        wanted_type = str(order_type or "").strip().lower()
+        if wanted_type in self.ORDER_TYPES:
+            # Mirror _decorate_order_row exactly: the table shows every
+            # non-renewal order as a purchase (including 'infinite' ones), so a
+            # filter that matched the raw column would hide rows it displays.
+            clauses.append(("" if wanted_type == "renewal" else "NOT ") + self._ORDER_IS_RENEWAL)
+        if str(payment_method or "").strip().lower() in self.ORDER_PAYMENT_METHODS:
+            clauses.append("LOWER(COALESCE(NULLIF(orders_view.payment_method,''),'rial'))=?")
+            params.append(str(payment_method).strip().lower())
+        if int(user_id or 0) > 0:
+            clauses.append("orders_view.user_id=?")
+            params.append(int(user_id))
+        if int(min_amount or 0) > 0:
+            clauses.append("COALESCE(orders_view.final_price,0)>=?")
+            params.append(int(min_amount))
+        if int(max_amount or 0) > 0:
+            clauses.append("COALESCE(orders_view.final_price,0)<=?")
+            params.append(int(max_amount))
+        if q:
+            clauses.append(
+                "(orders_view.order_id LIKE ?"
+                " OR CAST(orders_view.user_id AS TEXT) LIKE ?"
+                " OR COALESCE(orders_view.client_name,'') LIKE ?"
+                " OR COALESCE(u.first_name,'') LIKE ?"
+                " OR COALESCE(u.username,'') LIKE ?"
+                " OR COALESCE(orders_view.target_sub_id,'') LIKE ?"
+                " OR EXISTS (SELECT 1 FROM subscriptions s"
+                "            WHERE (s.order_id=orders_view.order_id"
+                "                   OR s.sub_id=orders_view.target_sub_id)"
+                "              AND (s.sub_id LIKE ? OR COALESCE(s.client_email,'') LIKE ?)))"
+            )
+            params.extend([pattern] * 8)
+
+        return (" AND ".join(clauses) if clauses else "1=1"), params
+
+    async def admin_orders_report(
+        self,
+        *,
+        search: str = "",
+        period: str = "all",
+        date_from: int = 0,
+        date_to: int = 0,
+        status: str = "",
+        order_type: str = "",
+        payment_method: str = "",
+        user_id: int = 0,
+        min_amount: int = 0,
+        max_amount: int = 0,
+        sort: str = "newest",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """One page of matching orders plus the totals for the WHOLE match.
+
+        The totals describe every order the filter selects, not just the rows on
+        screen — "how much came in this week" must not change when you page.
+        """
+        await self.ensure_admin_runtime_schema()
+        safe_limit = max(1, min(200, int(limit)))
+        safe_offset = max(0, int(offset))
+        order_columns = await self._table_columns("orders")
+        order_select = self._order_select_list(order_columns)
+
+        # An explicit range always wins; `period` stays supported so existing
+        # callers (and the quick-range chips) keep working.
+        start = int(date_from or 0)
+        if start <= 0:
+            start = self._period_cutoff_ts(period)
+        where, params = self._order_filter_sql(
+            search=search,
+            date_from=start,
+            date_to=date_to,
+            status=status,
+            order_type=order_type,
+            payment_method=payment_method,
+            user_id=user_id,
+            min_amount=min_amount,
+            max_amount=max_amount,
+        )
+        order_by = {
+            "newest": "COALESCE(orders_view.created_at,0) DESC",
+            "oldest": "COALESCE(orders_view.created_at,0) ASC",
+            "amount_desc": "COALESCE(orders_view.final_price,0) DESC",
+            "amount_asc": "COALESCE(orders_view.final_price,0) ASC",
+        }.get(str(sort or "newest").strip().lower(), "COALESCE(orders_view.created_at,0) DESC")
+
+        base = f"WITH orders_view AS (SELECT\n              {order_select}\n              FROM orders o)"
+        sub_match = (
+            "(COALESCE(orders_view.target_sub_id,'')<>'' AND s.sub_id=orders_view.target_sub_id)"
+            " OR (COALESCE(orders_view.target_sub_id,'')='' AND s.order_id=orders_view.order_id)"
+        )
+        rows = await self.fetchall(
+            f"""
+            {base}
+            SELECT
+              orders_view.*,
+              u.first_name,
+              u.username,
+              (SELECT s.client_email FROM subscriptions s
+                 WHERE {sub_match} ORDER BY s.created_at ASC LIMIT 1) AS subscription_name,
+              (SELECT s.sub_id FROM subscriptions s
+                 WHERE {sub_match} ORDER BY s.created_at ASC LIMIT 1) AS subscription_id,
+              (SELECT COUNT(*) FROM subscriptions s
+                 WHERE {sub_match}) AS subscription_count,
+              NULL AS fallback_subscription_name,
+              '' AS fallback_subscription_id,
+              0 AS fallback_subscription_count
+            FROM orders_view
+            LEFT JOIN users u ON u.user_id=orders_view.user_id
+            WHERE {where}
+            ORDER BY {order_by}
+            LIMIT ? OFFSET ?
+            """,
+            (*params, safe_limit + 1, safe_offset),
+        )
+        has_more = len(rows) > safe_limit
+        items = [self._decorate_order_row(dict(row)) for row in rows[:safe_limit]]
+
+        approved = "LOWER(COALESCE(orders_view.status,'pending'))='approved'"
+        summary_row = await self.fetchone(
+            f"""
+            {base}
+            SELECT
+              COUNT(*) AS total_count,
+              COUNT(DISTINCT orders_view.user_id) AS buyers,
+              COALESCE(SUM(CASE WHEN {approved} THEN 1 ELSE 0 END),0) AS approved_count,
+              COALESCE(SUM(CASE WHEN LOWER(COALESCE(orders_view.status,'pending'))='pending'
+                                THEN 1 ELSE 0 END),0) AS pending_count,
+              COALESCE(SUM(CASE WHEN LOWER(COALESCE(orders_view.status,'pending'))='rejected'
+                                THEN 1 ELSE 0 END),0) AS rejected_count,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN COALESCE(orders_view.final_price,0) ELSE 0 END),0) AS approved_amount,
+              COALESCE(SUM(COALESCE(orders_view.final_price,0)),0) AS total_amount,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN COALESCE(orders_view.discount_amount,0) ELSE 0 END),0) AS discount_amount,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN COALESCE(orders_view.gb,0)*MAX(COALESCE(orders_view.qty,1),1)
+                                ELSE 0 END),0) AS approved_gb,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN MAX(COALESCE(orders_view.qty,1),1) ELSE 0 END),0) AS approved_qty,
+              MIN(NULLIF(COALESCE(orders_view.created_at,0),0)) AS first_at,
+              MAX(COALESCE(orders_view.created_at,0)) AS last_at
+            FROM orders_view
+            LEFT JOIN users u ON u.user_id=orders_view.user_id
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        keys = (
+            "total_count", "buyers", "approved_count", "pending_count", "rejected_count",
+            "approved_amount", "total_amount", "discount_amount", "approved_gb",
+            "approved_qty", "first_at", "last_at",
+        )
+        summary: dict[str, Any] = {
+            key: int(summary_row[key] or 0) if summary_row and summary_row[key] is not None else 0
+            for key in keys
+        }
+        approved_count = summary["approved_count"]
+        summary["avg_order_value"] = summary["approved_amount"] // approved_count if approved_count else 0
+
+        buyer_rows = await self.fetchall(
+            f"""
+            {base}
+            SELECT
+              orders_view.user_id AS user_id,
+              u.first_name AS first_name,
+              u.username AS username,
+              COUNT(*) AS orders,
+              COALESCE(SUM(CASE WHEN {approved} THEN 1 ELSE 0 END),0) AS approved_orders,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN COALESCE(orders_view.final_price,0) ELSE 0 END),0) AS spent,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN COALESCE(orders_view.gb,0)*MAX(COALESCE(orders_view.qty,1),1)
+                                ELSE 0 END),0) AS gb
+            FROM orders_view
+            LEFT JOIN users u ON u.user_id=orders_view.user_id
+            WHERE {where}
+            GROUP BY orders_view.user_id
+            ORDER BY spent DESC, orders DESC
+            LIMIT 10
+            """,
+            tuple(params),
+        )
+        summary["top_buyers"] = [dict(row) for row in buyer_rows]
+
+        method_rows = await self.fetchall(
+            f"""
+            {base}
+            SELECT
+              LOWER(COALESCE(NULLIF(orders_view.payment_method,''),'rial')) AS payment_method,
+              COUNT(*) AS orders,
+              COALESCE(SUM(CASE WHEN {approved}
+                                THEN COALESCE(orders_view.final_price,0) ELSE 0 END),0) AS amount
+            FROM orders_view
+            LEFT JOIN users u ON u.user_id=orders_view.user_id
+            WHERE {where}
+            GROUP BY payment_method
+            ORDER BY amount DESC, orders DESC
+            """,
+            tuple(params),
+        )
+        summary["by_payment_method"] = [dict(row) for row in method_rows]
+
+        return {
+            "items": items,
+            "summary": summary,
+            "has_more": has_more,
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
+
+    async def admin_orders_export_rows(
+        self,
+        *,
+        limit: int = 5000,
+        **filters: Any,
+    ) -> list[dict[str, Any]]:
+        """Every matching order, flattened for CSV export.
+
+        Export honours the same filter as the screen, so what the operator
+        downloads is exactly what they were looking at.
+        """
+        report = await self.admin_orders_report(limit=min(200, int(limit)), offset=0, **filters)
+        rows = list(report["items"])
+        total = max(0, int(limit))
+        while report["has_more"] and len(rows) < total:
+            report = await self.admin_orders_report(
+                limit=200, offset=len(rows), **filters
+            )
+            rows.extend(report["items"])
+        return rows[:total]
 
     @staticmethod
     def _period_cutoff_ts(period: str) -> int:

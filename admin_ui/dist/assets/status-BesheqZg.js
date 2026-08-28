@@ -1,1 +1,0 @@
-const e={approved:{label:"تایید شده",variant:"success"},pending:{label:"در انتظار",variant:"warning"},rejected:{label:"رد شده",variant:"danger"},failed:{label:"ناموفق",variant:"danger"},reserved:{label:"رزرو",variant:"muted"}};function r(a){return e[String(a||"").toLowerCase()]||{label:a||"—",variant:"muted"}}export{r as s};

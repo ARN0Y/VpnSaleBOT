@@ -532,6 +532,211 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
 
+    async def process_catalog_purchase(
+        self,
+        *,
+        user_id: int,
+        plan: dict,
+        gb: int,
+        qty: int,
+        unit_total: int,
+        client_name: str = "",
+        pg_client=None,
+        group_ids: list[int] | None = None,
+        panel=None,
+        idempotency_key: str | None = None,
+    ) -> list[dict]:
+        """Buy ``qty`` services of one catalog plan, on whichever panel it targets.
+
+        One method for all three backends because the money is identical on all
+        of them: reserve once, provision, approve — or roll everything back. Only
+        the provisioning call in the middle differs.
+
+        ``unit_total`` is the price of ONE service, already computed by the
+        catalog for this buyer and this volume. It is passed in rather than
+        recomputed from a per-GB rate because a fixed-price plan has no per-GB
+        rate to recompute from; the caller re-derives it from the plan right
+        before calling, so a stale button cannot set the price.
+
+        Returns one delivery dict per created service, carrying whatever that
+        backend gives a customer — a subscription link, or the credentials and
+        endpoints an L2TP account needs.
+        """
+        from . import catalog as catalog_mod
+
+        requested_qty = max(0, int(qty))
+        if requested_qty <= 0:
+            raise ValueError("تعداد خرید معتبر نیست.")
+        unit = max(0, int(unit_total))
+        if unit <= 0:
+            raise ValueError("قیمت این پلن معتبر نیست.")
+        final_total = unit * requested_qty
+
+        target = (plan or {}).get("target") or {}
+        kind = str(target.get("kind") or catalog_mod.TARGET_PASARGUARD)
+        real_gb = max(0, int(gb))
+        days = max(0, int(((plan or {}).get("volume") or {}).get("days") or 0))
+        # A plan whose real volume is hidden is an "unlimited" service to every
+        # part of the bot that shows numbers to the customer.
+        is_infinite = bool(((plan or {}).get("display") or {}).get("hide_volume"))
+
+        order_id = f"{user_id}-cat-{now_ts()}-{secrets.token_hex(3)}"
+        idem = idempotency_key or order_id
+        payment_method = PaymentMethod.WALLET
+        async with self.db.transaction() as conn:
+            existing = await self.db.fetchone(
+                "SELECT order_id,status FROM idempotency_keys WHERE key=?", (idem,)
+            )
+            if existing:
+                raise RuntimeError(f"duplicate purchase request: {existing['status']}")
+            agent_row = await self.db.fetchone(
+                "SELECT * FROM agents WHERE user_id=?", (int(user_id),)
+            )
+            # Re-price inside the transaction from the plan itself, so a rate
+            # that changed between the invoice and the tap cannot be charged.
+            agent_unit = int(agent_row["price_per_gb"] or 0) if agent_row else 0
+            tx_unit = catalog_mod.price_for(
+                plan,
+                gb=(real_gb if str((plan.get("volume") or {}).get("mode")) == catalog_mod.VOLUME_VARIABLE else None),
+                is_agent=bool(agent_row),
+                agent_unit_price=agent_unit,
+            )
+            if tx_unit <= 0 or tx_unit != unit:
+                raise ValueError("قیمت این پلن تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
+            if agent_row and self.db.normalize_agent_access_value(agent_row["access_level"]) == "open":
+                payment_method = PaymentMethod.AGENT_OPEN
+                credit_update = await conn.execute(
+                    """
+                    UPDATE agents SET credit_used_toman=credit_used_toman+?
+                    WHERE user_id=? AND (credit_limit_toman<=0 OR credit_used_toman + ? <= credit_limit_toman)
+                    """,
+                    (int(final_total), int(user_id), int(final_total)),
+                )
+                if credit_update.rowcount != 1:
+                    raise ValueError("سقف اعتبار شما کافی نیست. لطفا بدهی خود را تسویه کنید.")
+                await conn.execute(
+                    "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                    (int(user_id), int(final_total), "credit_reserve", order_id, now_ts()),
+                )
+            else:
+                debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, final_total)
+                if debit.rowcount != 1:
+                    raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
+            await conn.execute(
+                """
+                INSERT INTO orders
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                   final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
+                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                """,
+                (
+                    order_id, int(user_id), 0, real_gb, requested_qty, unit,
+                    final_total, 0, final_total, now_ts(),
+                    payment_method.value, ("infinite" if is_infinite else "purchase"), None,
+                    ((client_name or str(plan.get("title") or "")).strip()[:64] or None),
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO idempotency_keys(key,user_id,order_id,status,created_at) VALUES(?,?,?,?,?)",
+                (idem, int(user_id), order_id, "reserved", now_ts()),
+            )
+
+        created: list[str] = []
+        rows: list[PanelClientPayload] = []
+        deliveries: list[dict] = []
+        expire_ts = (now_ts() + days * 86400) if days > 0 else 0
+        data_bytes = gb_to_bytes(real_gb) if real_gb > 0 else 0
+        try:
+            if kind == catalog_mod.TARGET_PASARGUARD:
+                if pg_client is None or not (group_ids or []):
+                    raise ValueError("اتصال به سرور برقرار نشد. لطفاً با پشتیبانی تماس بگیرید.")
+                base = "".join(c for c in sanitize_client_name(client_name) if c.isalnum() or c == "_")
+                base = base[:18].strip("_") or f"u{int(user_id)}"
+                for _ in range(requested_qty):
+                    username = f"{base}_{secrets.token_hex(4)}"
+                    resp = await pg_client.create_user(
+                        username=username,
+                        group_ids=list(group_ids or []),
+                        data_limit_bytes=data_bytes,
+                        expire=expire_ts,
+                        note=f"tg:{int(user_id)}",
+                    )
+                    created.append(username)
+                    sub_url = str((resp or {}).get("subscription_url") or "")
+                    rows.append(
+                        PanelClientPayload(
+                            user_id=int(user_id), sub_id=username, sub_link=sub_url,
+                            inbound_id=PG_INBOUND_SENTINEL, client_uuid="",
+                            client_email=username, gb=real_gb,
+                        )
+                    )
+                    deliveries.append({
+                        "backend": catalog_mod.TARGET_PASARGUARD,
+                        "sub_link": sub_url,
+                    })
+            else:
+                if panel is None:
+                    raise ValueError("اتصال به سرور برقرار نشد. لطفاً با پشتیبانی تماس بگیرید.")
+                provisions = await panel.add_subscriptions(
+                    user_id=user_id,
+                    gb=real_gb,
+                    qty=requested_qty,
+                    preferred_name=client_name,
+                    expiry_ms=expire_ts * 1000,
+                )
+                rows.extend(provisions)
+                created.extend([p.sub_id for p in provisions])
+                deliveries.extend(
+                    {"backend": catalog_mod.TARGET_XUI, "sub_link": p.sub_link} for p in provisions
+                )
+
+            await self.db.insert_subscriptions(rows, order_id=order_id, is_infinite=is_infinite)
+            approved = await self.db.approve_order(order_id)
+            if not approved:
+                raise RuntimeError("catalog order approval failed after provisioning")
+            await self.db.execute(
+                "UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,)
+            )
+            # Seed the local snapshot so «اشتراک‌های من» is right before the
+            # first sync, and so a depleted service is detectable immediately.
+            if kind != catalog_mod.TARGET_XUI:
+                for row in rows:
+                    await self.db.execute(
+                        """
+                        UPDATE subscriptions
+                        SET panel_total_bytes=?, panel_used_bytes=0, panel_remaining_bytes=?,
+                            panel_enabled=1, panel_expiry_time=?, panel_synced_at=?
+                        WHERE sub_id=?
+                        """,
+                        (data_bytes, data_bytes, expire_ts * 1000, now_ts(), row.sub_id),
+                    )
+            return deliveries
+        except Exception:
+            for name in created:
+                try:
+                    if kind == catalog_mod.TARGET_PASARGUARD and pg_client is not None:
+                        await pg_client.delete_user(name)
+                    elif panel is not None:
+                        await panel.delete_subscription(name)
+                except Exception:
+                    LOG.exception("catalog rollback: could not delete %s on %s", name, kind)
+            await self.db.delete_subscriptions(created)
+            if payment_method == PaymentMethod.AGENT_OPEN:
+                async with self.db.transaction() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET credit_used_toman=max(0, credit_used_toman-?) WHERE user_id=?",
+                        (int(final_total), int(user_id)),
+                    )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO agent_ledger(user_id,amount_toman,kind,ref_id,created_at) VALUES(?,?,?,?,?)",
+                        (int(user_id), -int(final_total), "credit_refund", f"{order_id}:refund", now_ts()),
+                    )
+            else:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.reject_order(order_id)
+            await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
+            raise
+
     async def process_pg_checkout(
         self,
         *,

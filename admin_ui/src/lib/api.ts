@@ -52,18 +52,54 @@ function post<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
 }
 
+/** Serialise the orders filter; empty values are left out entirely. */
+export function orderQuery(filters: import("./types").OrderFilters): string {
+  const params = new URLSearchParams();
+  const put = (key: string, value: unknown) => {
+    if (value === undefined || value === null || value === "" || value === 0) return;
+    params.set(key, String(value));
+  };
+  put("q", filters.q);
+  put("from", filters.from);
+  put("to", filters.to);
+  put("status", filters.status);
+  put("type", filters.type);
+  put("method", filters.method);
+  put("user_id", filters.user_id);
+  put("min_amount", filters.min_amount);
+  put("max_amount", filters.max_amount);
+  if (filters.sort && filters.sort !== "newest") params.set("sort", filters.sort);
+  return params.toString();
+}
+
 export const api = {
   me: () => request<{ username: string; csrf: string }>("/me"),
+  runBackup: () =>
+    post<{
+      ok: boolean;
+      error?: string;
+      mode?: string;
+      file?: string;
+      status?: string;
+      delivered?: boolean;
+      errors?: string[];
+      pg?: { included: boolean; mode: string; db_mb: number; restorable: boolean };
+    }>("/backup/run", {}),
+  catalog: () => request<import("./types").CatalogBundle>("/catalog"),
+  saveCatalog: (catalog: { categories: import("./types").Category[]; plans: import("./types").Plan[] }) =>
+    post<{ ok: boolean; catalog: import("./types").CatalogData; problems: Record<string, string[]> }>("/catalog", { catalog }),
   login: (username: string, password: string) =>
     post<{ ok: boolean; username: string; csrf: string }>("/login", { username, password }),
   logout: () => post<{ ok: boolean }>("/logout"),
 
   dashboard: (q = "") =>
     request<import("./types").DashboardResponse>(`/dashboard?q=${encodeURIComponent(q)}`),
-  orders: (q = "", period = "all", page = 1) =>
-    request<import("./types").Paginated<import("./types").Order>>(
-      `/orders?q=${encodeURIComponent(q)}&period=${period}&page=${page}`,
+  orders: (filters: import("./types").OrderFilters = {}, page = 1, pageSize = 20) =>
+    request<import("./types").OrdersReport>(
+      `/orders?${orderQuery(filters)}&page=${page}&page_size=${pageSize}`,
     ),
+  ordersExportUrl: (filters: import("./types").OrderFilters = {}) =>
+    `${BASE}/orders/export.csv?${orderQuery(filters)}`,
   users: (q = "", filter = "all", page = 1) =>
     request<import("./types").Paginated<import("./types").User>>(
       `/users?q=${encodeURIComponent(q)}&filter=${filter}&page=${page}`,

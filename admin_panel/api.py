@@ -11,13 +11,19 @@ working in parallel until the SPA fully replaces it (strangler migration).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+import csv
+import io
 import secrets
 import string
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
+from async_storefront import catalog
+from async_storefront.db import AsyncDatabase
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 
@@ -33,6 +39,8 @@ from .routers.settings import (
     settings_values_from_form,
     sync_env,
 )
+
+LOG = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/api/v1")
 
@@ -115,13 +123,129 @@ async def dashboard(request: Request, q: str = ""):
     return {"metrics": metrics, "recent_orders": recent_orders}
 
 
+def _order_filter_args(request: Request) -> dict:
+    """Read the orders filter off the query string.
+
+    Unknown enum values are rejected rather than ignored: silently dropping a
+    mistyped ``status`` would show the operator unfiltered revenue under a
+    filtered heading, which is worse than an error.
+    """
+    qp = request.query_params
+
+    def _int(name: str) -> int:
+        raw = str(qp.get(name) or "").strip()
+        if not raw:
+            return 0
+        try:
+            return max(0, int(float(raw)))
+        except ValueError:
+            raise _BadFilter(name)
+
+    def _enum(name: str, allowed: tuple[str, ...]) -> str:
+        raw = str(qp.get(name) or "").strip().lower()
+        if not raw or raw == "all":
+            return ""
+        if raw not in allowed:
+            raise _BadFilter(name)
+        return raw
+
+    date_from = _int("from")
+    date_to = _int("to")
+    if date_from and date_to and date_to <= date_from:
+        raise _BadFilter("range")
+    return {
+        "search": str(qp.get("q") or "").strip(),
+        "period": str(qp.get("period") or "all").strip() or "all",
+        "date_from": date_from,
+        "date_to": date_to,
+        "status": _enum("status", AsyncDatabase.ORDER_STATUSES),
+        "order_type": _enum("type", AsyncDatabase.ORDER_TYPES),
+        "payment_method": _enum("method", AsyncDatabase.ORDER_PAYMENT_METHODS),
+        "user_id": _int("user_id"),
+        "min_amount": _int("min_amount"),
+        "max_amount": _int("max_amount"),
+        "sort": _enum("sort", ORDER_SORTS) or "newest",
+    }
+
+
+class _BadFilter(Exception):
+    def __init__(self, field: str) -> None:
+        super().__init__(field)
+        self.field = field
+
+
+ORDER_SORTS = ("newest", "oldest", "amount_desc", "amount_asc")
+
+
 @router.get("/orders")
-async def orders(request: Request, q: str = "", period: str = "all", page: int = 1, page_size: int = 20):
+async def orders(request: Request, page: int = 1, page_size: int = 20):
+    try:
+        filters = _order_filter_args(request)
+    except _BadFilter as exc:
+        return JSONResponse({"ok": False, "error": "bad_filter", "field": exc.field}, status_code=400)
     pg = max(1, int(page))
     ps = max(1, min(100, int(page_size)))
-    # Fetch one extra row to know if a next page exists (no expensive COUNT).
-    rows = await db(request).admin_list_orders(q, period, limit=ps + 1, offset=(pg - 1) * ps)
-    return {"items": rows[:ps], "page": pg, "page_size": ps, "has_more": len(rows) > ps}
+    report = await db(request).admin_orders_report(limit=ps, offset=(pg - 1) * ps, **filters)
+    return {
+        "items": report["items"],
+        "summary": report["summary"],
+        "page": pg,
+        "page_size": ps,
+        "has_more": report["has_more"],
+    }
+
+
+@router.get("/orders/export.csv")
+async def orders_export(request: Request):
+    """The filtered orders as a spreadsheet, exactly as shown on screen."""
+    try:
+        filters = _order_filter_args(request)
+    except _BadFilter as exc:
+        return JSONResponse({"ok": False, "error": "bad_filter", "field": exc.field}, status_code=400)
+    rows = await db(request).admin_orders_export_rows(limit=20000, **filters)
+    headers = [
+        ("order_id", "شناسه سفارش"),
+        ("created_at", "تاریخ"),
+        ("user_id", "شناسه کاربر"),
+        ("first_name", "نام"),
+        ("username", "یوزرنیم"),
+        ("subscription_name", "نام سرویس"),
+        ("subscription_id", "شناسه اشتراک"),
+        ("order_type_label", "نوع"),
+        ("gb", "حجم (GB)"),
+        ("qty", "تعداد"),
+        ("unit_price", "قیمت واحد"),
+        ("discount_code", "کد تخفیف"),
+        ("discount_amount", "تخفیف"),
+        ("final_price", "مبلغ نهایی"),
+        ("payment_method", "روش پرداخت"),
+        ("status", "وضعیت"),
+    ]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([label for _, label in headers])
+    for row in rows:
+        out = []
+        for key, _ in headers:
+            value = row.get(key)
+            if key == "created_at":
+                value = _iso_local(int(value or 0))
+            out.append("" if value is None else str(value))
+        writer.writerow(out)
+    # BOM so Excel opens the Persian headers in UTF-8 instead of mojibake.
+    payload = ("\ufeff" + buf.getvalue()).encode("utf-8")
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    return Response(
+        content=payload,
+        media_type="text/csv; charset=utf-8",
+        headers={"content-disposition": f'attachment; filename="orders-{stamp}.csv"'},
+    )
+
+
+def _iso_local(ts: int) -> str:
+    if ts <= 0:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
 @router.get("/users")
@@ -159,6 +283,10 @@ async def settings(request: Request):
         items["sub_link_base"] = str(panel_row["sub_link_base"] or "")
     items["panel_password"] = ""
     items["pg_password"] = ""  # PasarGuard admin password — never exposed
+    # The backup bot token controls the archive channel — never send it to the
+    # browser. Report only whether one is configured so the UI can say so.
+    items["backup_bot_token_set"] = "1" if str(items.get("backup_bot_token") or "").strip() else "0"
+    items["backup_bot_token"] = ""
     return {"items": items}
 
 
@@ -489,8 +617,8 @@ async def update_settings(request: Request):
     values = settings_values_from_form(body, current)
     # Only touch backup settings if the caller actually sent backup_* fields,
     # otherwise backup_values_from_form would reset them to its hardcoded defaults.
-    if any(str(k).startswith("backup_") for k in body):
-        values.update(backup_values_from_form(body))
+    if any(str(k).startswith(("backup_", "pg_backup_")) for k in body):
+        values.update(backup_values_from_form(body, current))
     current_panel = await database.get_panel_settings()
     await database.admin_update_settings(values)
     panel_values = None
@@ -970,3 +1098,105 @@ async def set_ui_mode(request: Request):
     mode = "classic" if str(body.get("mode")) == "classic" else "modern"
     await db(request).admin_update_settings({"ui_mode": mode})
     return {"ok": True, "mode": mode}
+
+
+@router.get("/catalog")
+async def get_catalog(request: Request):
+    """The sales catalog plus everything the editor needs to be usable.
+
+    Every panel a plan can target is resolved live — PasarGuard groups and the
+    configured 3x-ui panel — so a target is picked from what actually exists
+    instead of typed from memory. A mistyped group is the difference between a
+    sale and a failed purchase.
+    """
+    database = db(request)
+    data = await catalog.load_catalog(database)
+
+    groups: list[dict] = []
+    groups_error = ""
+    client = None
+    try:
+        client = await _pg_client(database)
+    except Exception as exc:
+        groups_error = str(exc)[:200]
+    if client is not None:
+        try:
+            for group in await client.list_groups():
+                groups.append({"id": group.get("id"), "name": str(group.get("name") or "")})
+        except Exception as exc:
+            groups_error = str(exc)[:200]
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    panels = [{"key": "1", "label": "پنل اصلی 3x-ui"}]
+
+    # Report per-plan problems so the editor can flag a plan the bot would
+    # refuse to sell, rather than the admin finding out from a failed purchase.
+    problems = {p["id"]: catalog.validate_plan(p) for p in data.get("plans") or []}
+    return {
+        "catalog": data,
+        "groups": groups,
+        "groups_error": groups_error,
+        "panels": panels,
+        "problems": {k: v for k, v in problems.items() if v},
+        "migrated_from_packages": str(await database.get_setting("catalog_migrated_from_packages", "0")) == "1",
+    }
+
+
+@router.post("/catalog")
+async def save_catalog_endpoint(request: Request):
+    """Replace the catalog. Normalised and validated server-side, so a malformed
+    plan can never reach the buy flow."""
+    body = await _json_body(request)
+    incoming = body.get("catalog") if isinstance(body.get("catalog"), dict) else body
+    if not isinstance(incoming, dict):
+        return JSONResponse({"ok": False, "error": "invalid catalog payload"}, status_code=400)
+
+    categories = incoming.get("categories")
+    plans = incoming.get("plans")
+    if not isinstance(categories, list) or not isinstance(plans, list):
+        return JSONResponse({"ok": False, "error": "catalog must contain categories and plans"}, status_code=400)
+    if len(categories) > 40 or len(plans) > 200:
+        return JSONResponse({"ok": False, "error": "too many categories or plans"}, status_code=400)
+
+    database = db(request)
+    saved = await catalog.save_catalog(database, {"categories": categories, "plans": plans})
+    problems = {p["id"]: catalog.validate_plan(p) for p in saved.get("plans") or []}
+    return {"ok": True, "catalog": saved, "problems": {k: v for k, v in problems.items() if v}}
+
+
+@router.post("/backup/run")
+async def api_run_backup(request: Request):
+    """Take a backup right now and report what it produced.
+
+    Runs inline rather than fire-and-forget so the panel can show the real
+    outcome — including whether the PasarGuard archive came out restorable,
+    which is the only part that matters when you actually need it.
+    """
+    from pathlib import Path
+
+    from .backup import run_backup_now
+
+    try:
+        result = await run_backup_now(request.app, source="manual")
+    except Exception as exc:
+        LOG.exception("manual backup failed")
+        return {"ok": False, "error": str(exc)[:500]}
+    pg = result.pg_export
+    database = db(request)
+    status = str(await database.get_setting("backup_last_status", ""))
+    return {
+        "ok": True,
+        "mode": result.mode,
+        "file": Path(result.archive_path).name,
+        "delivered": status in {"ok", "partial"},
+        "status": status,
+        "errors": list(result.errors),
+        "pg": {
+            "included": bool(pg),
+            "mode": pg.mode if pg else "",
+            "db_mb": round((pg.db_bytes if pg else 0) / (1024 * 1024), 1),
+            "restorable": bool(pg.restorable) if pg else False,
+        },
+    }
