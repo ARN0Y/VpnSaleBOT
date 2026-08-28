@@ -660,6 +660,7 @@ class AsyncDatabase:
             "backup_last_pg_status": "off",
             "backup_last_pg_mode": "",
             "backup_last_pg_db_bytes": "0",
+            "backup_last_pg_digest": "",
             # Dedicated bot for backup delivery; empty falls back to BOT_TOKEN.
             "backup_bot_token": "",
             "admin_user_ids": "",

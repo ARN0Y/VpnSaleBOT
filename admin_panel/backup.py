@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import hashlib
 import logging
 import shutil
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,15 @@ async def _send_document(
         with contextlib.suppress(Exception):
             detail = str(response.json().get("description") or "")
         raise RuntimeError(f"Telegram sendDocument failed ({response.status_code}): {detail or response.text[:200]}")
+
+
+def _file_digest(path: Path) -> str:
+    """Content fingerprint, used to avoid re-sending an identical archive."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 async def _deliver_archive(
@@ -492,6 +502,22 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
     # every backup and spammed errors each minute when no chat id was set).
     delivered = False
     delivery_error = ""
+    pg_digest = ""
+    pg_resent = True
+    if result.pg_path and Path(result.pg_path).exists():
+        with contextlib.suppress(Exception):
+            pg_digest = await asyncio.to_thread(_file_digest, Path(result.pg_path))
+        # Within its freshness window the panel hands back the SAME archive every
+        # run. Sending 40 MB of identical bytes to Telegram each time is not a
+        # second backup — it is the same one, again.
+        if pg_digest and pg_digest == str(await db.get_setting("backup_last_pg_digest", "")):
+            LOG.info("PasarGuard archive unchanged since the last delivery; not resending")
+            # Our copy has no further use — the panel keeps the original in its
+            # own backup folder, and 40 MB per run would otherwise pile up.
+            with contextlib.suppress(Exception):
+                Path(result.pg_path).unlink(missing_ok=True)
+            result = replace(result, pg_path=None)
+            pg_resent = False
     try:
         delivered = await send_backup_to_telegram(app, result, source=source)
     except Exception as exc:
@@ -504,6 +530,8 @@ async def _run_backup_now_locked(app, *, source: str = "manual") -> BackupResult
     await db.set_setting("backup_last_pg_status", "ok" if (pg and pg.restorable) else ("failed" if include_pg else "off"))
     await db.set_setting("backup_last_pg_mode", pg.mode if pg else "")
     await db.set_setting("backup_last_pg_db_bytes", str(pg.db_bytes if pg else 0))
+    if delivered and pg_digest and pg_resent:
+        await db.set_setting("backup_last_pg_digest", pg_digest)
     if delivered:
         await db.set_setting("backup_last_status", "partial" if base_errs else "ok")
         await db.set_setting("backup_last_error", "\n".join(base_errs)[:1000])

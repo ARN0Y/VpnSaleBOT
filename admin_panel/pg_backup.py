@@ -44,8 +44,16 @@ DEFAULT_CLI = "/usr/local/bin/pasarguard"
 DEFAULT_MAX_AGE_MINUTES = 360  # the stock cron runs every 6h; reuse within that
 DEFAULT_TIMEOUT_SECONDS = 900
 
-# Files the official restore reads. Missing .env or db_backup.sql = unrestorable.
-REQUIRED_MEMBERS = ("db_backup.sql", ".env")
+# `pasarguard restore` reads .env for the database URL, then takes the dump in
+# one of three layouts (see lib/pasarguard-restore.sh):
+#   • pg_dump/manifest.tsv + per-database dumps — what today's CLI writes
+#   • db_backup.sql                             — the older single-file layout
+#   • db_backup.sqlite                          — SQLite installs
+# Requiring only the single-file layout would reject the panel's OWN archive.
+ENV_MEMBER = ".env"
+MANIFEST_MEMBER = "pg_dump/manifest.tsv"
+SINGLE_SQL_MEMBER = "db_backup.sql"
+SINGLE_SQLITE_MEMBER = "db_backup.sqlite"
 
 RESTORE_NOTE = """\
 PasarGuard backup — how to restore
@@ -179,14 +187,48 @@ def archive_report(path: Path) -> tuple[int, bool, str]:
                 return name
         return None
 
-    missing = [m for m in REQUIRED_MEMBERS if _find(m) is None]
-    db_member = _find("db_backup.sql")
-    db_bytes = int(sizes.get(db_member, 0)) if db_member else 0
-    if missing:
-        return db_bytes, False, "missing from archive: " + ", ".join(missing)
-    if db_bytes <= 0:
-        return 0, False, "db_backup.sql is empty — the database dump failed"
-    return db_bytes, True, ""
+    if _find(ENV_MEMBER) is None:
+        return 0, False, "missing from archive: .env"
+
+    manifest = _find(MANIFEST_MEMBER)
+    if manifest and int(sizes.get(manifest, 0)) > 0:
+        # Multi-database layout: every dump the manifest names must be present
+        # and non-empty, or restore would skip a database and still "succeed".
+        prefix = manifest[: -len("manifest.tsv")]
+        try:
+            with zipfile.ZipFile(path) as zf:
+                rows = zf.read(manifest).decode("utf-8", "replace").splitlines()
+        except Exception as exc:
+            return 0, False, f"manifest unreadable: {exc}"
+        total = 0
+        listed = 0
+        for row in rows:
+            fields = row.split("	")
+            if len(fields) < 4 or not fields[0].strip():
+                continue
+            listed += 1
+            member = _find(prefix + fields[3].strip()) or _find(fields[3].strip())
+            size = int(sizes.get(member, 0)) if member else 0
+            if size <= 0:
+                return total, False, f"dump for database {fields[0]!r} is missing or empty"
+            total += size
+        if listed == 0:
+            return 0, False, "the manifest lists no databases"
+        return total, True, ""
+
+    for member_name in (SINGLE_SQL_MEMBER, SINGLE_SQLITE_MEMBER):
+        member = _find(member_name)
+        if member is None:
+            continue
+        size = int(sizes.get(member, 0))
+        if size <= 0:
+            return 0, False, f"{member_name} is empty — the database dump failed"
+        return size, True, ""
+
+    return 0, False, (
+        "no database dump in the archive (expected pg_dump/manifest.tsv, "
+        "db_backup.sql or db_backup.sqlite)"
+    )
 
 
 def _newest_archive(backup_dir: Path) -> Path | None:
