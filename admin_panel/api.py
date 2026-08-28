@@ -18,6 +18,13 @@ import io
 import secrets
 import string
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+try:  # optional: only affects how dates are labelled in exports
+    import jdatetime
+except Exception:  # pragma: no cover - the fallback is Gregorian
+    jdatetime = None
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -205,7 +212,8 @@ async def orders_export(request: Request):
     rows = await db(request).admin_orders_export_rows(limit=20000, **filters)
     headers = [
         ("order_id", "شناسه سفارش"),
-        ("created_at", "تاریخ"),
+        ("created_at", "تاریخ شمسی"),
+        ("created_at_greg", "تاریخ میلادی"),
         ("user_id", "شناسه کاربر"),
         ("first_name", "نام"),
         ("username", "یوزرنیم"),
@@ -227,14 +235,17 @@ async def orders_export(request: Request):
     for row in rows:
         out = []
         for key, _ in headers:
-            value = row.get(key)
             if key == "created_at":
-                value = _iso_local(int(value or 0))
+                value = _jalali_label(int(row.get("created_at") or 0))
+            elif key == "created_at_greg":
+                value = _tehran_label(int(row.get("created_at") or 0))
+            else:
+                value = row.get(key)
             out.append("" if value is None else str(value))
         writer.writerow(out)
     # BOM so Excel opens the Persian headers in UTF-8 instead of mojibake.
     payload = ("\ufeff" + buf.getvalue()).encode("utf-8")
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    stamp = datetime.now(TEHRAN).strftime("%Y%m%d-%H%M%S")
     return Response(
         content=payload,
         media_type="text/csv; charset=utf-8",
@@ -242,10 +253,26 @@ async def orders_export(request: Request):
     )
 
 
-def _iso_local(ts: int) -> str:
+# The panel renders every date in Tehran time; the server runs on UTC. An
+# export stamped in UTC would be three and a half hours away from the row the
+# operator is reconciling it against.
+TEHRAN = ZoneInfo("Asia/Tehran")
+
+
+def _tehran_label(ts: int) -> str:
     if ts <= 0:
         return ""
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    return datetime.fromtimestamp(int(ts), TEHRAN).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _jalali_label(ts: int) -> str:
+    """The date as the operator reads it. Falls back to Gregorian without jdatetime."""
+    if ts <= 0:
+        return ""
+    moment = datetime.fromtimestamp(int(ts), TEHRAN)
+    if jdatetime is not None:
+        return jdatetime.datetime.fromgregorian(datetime=moment).strftime("%Y/%m/%d %H:%M")
+    return moment.strftime("%Y-%m-%d %H:%M")
 
 
 @router.get("/users")
