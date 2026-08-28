@@ -14,8 +14,8 @@ import { CatalogTab } from "./settings/CatalogTab";
 type Audience = "all" | "user" | "agent";
 
 const RUNTIME_FIELDS: { key: string; label: string; hint?: string }[] = [
-  { key: "price_per_gb", label: "قیمت هر گیگ (تومان)" },
-  { key: "minimum_purchase_gb", label: "حداقل خرید (گیگ)" },
+  { key: "price_per_gb", label: "قیمت هر گیگ (تومان)", hint: "نرخ تمدید سرویس‌ها. قیمت خرید در تب «پلن‌های فروش» تعیین می‌شود." },
+  { key: "minimum_purchase_gb", label: "حداقل خرید (گیگ)", hint: "حداقل حجم تمدید. حداقل حجم خرید، در همان پلن تنظیم می‌شود." },
   { key: "crypto_address", label: "آدرس تتر" },
   { key: "support_id", label: "آیدی پشتیبانی", hint: "با @ ، مثل @YourSupport" },
   { key: "admin_user_ids", label: "ادمین‌ها", hint: "آیدی‌ها با کاما" },
@@ -428,8 +428,12 @@ export function Settings() {
 
         <Card>
           <CardHeader>
-            <CardTitle>تعرفه پلکانی (بر اساس حجم)</CardTitle>
-            <p className="text-sm text-muted-foreground">قیمت هر گیگ را بر اساس بازه‌ی حجم خرید تعیین کنید؛ بازه تا شروع ردیف بعدی ادامه می‌یابد. خالی گذاشتن یعنی استفاده از «قیمت هر گیگ» ثابت.</p>
+            <CardTitle>تعرفه پلکانی تمدید (بر اساس حجم)</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              نرخ هر گیگ <b className="text-white">تمدید</b> را بر اساس بازه‌ی حجم تعیین کنید؛ بازه تا شروع ردیف بعدی ادامه می‌یابد.
+              خالی گذاشتن یعنی استفاده از «قیمت هر گیگ» ثابت. برای قیمت‌گذاری <b className="text-white">خرید</b>، به تب «پلن‌های فروش» بروید —
+              هر پلن پله‌های قیمتی خودش را دارد.
+            </p>
           </CardHeader>
           <CardContent className="space-y-3">
             {tiers.length === 0 && <p className="text-sm text-muted-foreground">هیچ بازه‌ای تعریف نشده — قیمت ثابت اعمال می‌شود.</p>}
@@ -457,8 +461,12 @@ export function Settings() {
 
         <Card>
           <CardHeader>
-            <CardTitle>بسته‌ی بی‌نهایت (مصرف منصفانه)</CardTitle>
-            <p className="text-sm text-muted-foreground">بسته‌ای با حجم بالا و قیمت سفارشی؛ پس از رسیدن به سقف، کانفیگ خودکار در پنل غیرفعال می‌شود.</p>
+            <CardTitle>بسته‌ی بی‌نهایت (روش قدیمی)</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              دکمه‌ی جداگانه‌ی «بسته بی‌نهایت» در ربات، با حجم بالا و قیمت سفارشی؛ پس از رسیدن به سقف، کانفیگ خودکار در پنل غیرفعال می‌شود.
+              <b className="text-white"> پیشنهاد:</b> به‌جای این، در تب «پلن‌های فروش» یک پلن با حجم واقعی بسازید و گزینه‌ی «حجم واقعی از کاربر مخفی بماند» را بزنید؛
+              آن‌وقت همه‌چیز از یک جا فروخته و قیمت‌گذاری می‌شود.
+            </p>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between rounded-xl border border-border bg-white/[0.02] p-4">
