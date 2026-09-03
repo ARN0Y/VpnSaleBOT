@@ -2414,7 +2414,10 @@ class AsyncDatabase:
             )
             params.extend([now, now])
         elif state == "expired":
-            clauses.append("(ends_at>0 AND ends_at<=?) OR (max_uses>0 AND used_count>=max_uses)")
+            # Parenthesised as one clause: without the outer brackets the OR
+            # escapes the AND with the search term and the filter returns
+            # exhausted codes that nobody searched for.
+            clauses.append("((ends_at>0 AND ends_at<=?) OR (max_uses>0 AND used_count>=max_uses))")
             params.append(now)
         elif state == "disabled":
             clauses.append("enabled=0")
@@ -2466,10 +2469,17 @@ class AsyncDatabase:
         problems = discounts.validate(record)
         if not record["code"] or any("کد فقط" in p or "خالی است" in p for p in problems):
             raise ValueError(problems[0] if problems else "کد تخفیف معتبر نیست.")
-        previous = discounts.normalize_code(original_code) or record["code"]
+        previous = discounts.normalize_code(original_code)
+        creating = not previous
+        previous = previous or record["code"]
         now = now_ts()
         async with self.transaction() as conn:
             existing = await self.fetchone("SELECT created_at FROM discount_codes WHERE code=?", (previous,))
+            if creating and existing:
+                # Saving a NEW code over a live one would inherit its usage
+                # counters and quietly change what buyers are already being
+                # offered. Editing is an explicit act — it sends original_code.
+                raise ValueError("کد تخفیف با همین نام از قبل وجود دارد.")
             if previous != record["code"]:
                 clash = await self.fetchone("SELECT code FROM discount_codes WHERE code=?", (record["code"],))
                 if clash:

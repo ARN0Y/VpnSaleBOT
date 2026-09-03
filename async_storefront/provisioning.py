@@ -62,6 +62,18 @@ def package_price(pkg: dict, agent) -> int:
     return int(pkg["price"])
 
 
+def _assert_promised_discount(actual: int, promised: int | None) -> None:
+    """The buyer confirmed a specific price; do not quietly charge another one.
+
+    An admin editing a code between the invoice and the tap would otherwise
+    shrink the discount and take the difference silently. Mirrors the existing
+    guard on the plan price.
+    """
+    if promised is None or int(actual) == int(promised):
+        return
+    raise ValueError("مبلغ تخفیف تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
+
+
 def _safe_positive_int(value, default: int = 1) -> int:
     try:
         return max(1, int(str(value).strip()))
@@ -78,7 +90,9 @@ class ProvisioningService:
     async def minimum_purchase_gb(self) -> int:
         return _safe_positive_int(await self.db.get_setting("minimum_purchase_gb", "1"), 1)
 
-    async def _reserve_wallet_payment(self, conn, *, user_id: int, amount_toman: int, agent_row=None) -> PaymentMethod:
+    async def _reserve_wallet_payment(
+        self, conn, *, user_id: int, amount_toman: int, agent_row=None, allow_free: bool = False
+    ) -> PaymentMethod:
         """Reserve money for any checkout by debiting the buyer's wallet.
 
         Agent credit/open-access is intentionally not supported on this branch:
@@ -87,11 +101,12 @@ class ProvisioningService:
         reporting; rollback always refunds the same wallet.
         """
         amount = int(amount_toman)
-        if amount < 0:
+        if amount < 0 or (amount == 0 and not allow_free):
+            # Zero is a real price only when a discount made it so. Everywhere
+            # else it means a misconfigured tariff, and giving the service away
+            # silently is worse than failing loudly.
             raise ValueError("مبلغ فاکتور معتبر نیست.")
         if amount == 0:
-            # A 100% discount is a real thing to sell. Nothing to debit, and
-            # nothing to refund if provisioning then fails.
             return PaymentMethod.AGENT_WALLET if agent_row else PaymentMethod.WALLET
         debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, amount)
         if debit.rowcount != 1:
@@ -497,6 +512,7 @@ class ProvisioningService:
         final_total: int,
         idempotency_key: str | None = None,
         discount_code: str = "",
+        expected_discount: int | None = None,
     ) -> str:
         clean_sub_id = str(sub_id or "").strip()
         if not clean_sub_id:
@@ -558,12 +574,14 @@ class ProvisioningService:
                     conn, code=discount_code, user_id=user_id, order_id=order_id,
                     base_total=base_total, order_kind="renewal",
                 )
+                _assert_promised_discount(discount, expected_discount)
             final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn,
                 user_id=user_id,
                 amount_toman=final_total,
                 agent_row=agent,
+                allow_free=True,
             )
 
             await conn.execute(
@@ -625,6 +643,7 @@ class ProvisioningService:
         pkg: dict,
         idempotency_key: str | None = None,
         discount_code: str = "",
+        expected_discount: int | None = None,
         plan_id: str = "",
         category_id: str = "",
     ) -> str:
@@ -674,9 +693,11 @@ class ProvisioningService:
                     base_total=base_total, order_kind="renewal",
                     plan_id=plan_id, category_id=category_id,
                 )
+                _assert_promised_discount(discount, expected_discount)
             final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
-                conn, user_id=user_id, amount_toman=final_total, agent_row=agent_row
+                conn, user_id=user_id, amount_toman=final_total, agent_row=agent_row,
+                allow_free=True,
             )
             await conn.execute(
                 """
@@ -739,6 +760,7 @@ class ProvisioningService:
         client_name: str = "",
         idempotency_key: str | None = None,
         discount_code: str = "",
+        expected_discount: int | None = None,
         plan_id: str = "",
         category_id: str = "",
     ) -> list[str]:
@@ -780,12 +802,14 @@ class ProvisioningService:
                     base_total=base_total, order_kind="purchase",
                     plan_id=plan_id, category_id=category_id,
                 )
+                _assert_promised_discount(discount, expected_discount)
             final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn,
                 user_id=user_id,
                 amount_toman=final_total,
                 agent_row=agent_row,
+                allow_free=True,
             )
             await conn.execute(
                 """
@@ -843,6 +867,7 @@ class ProvisioningService:
         client_name: str = "",
         idempotency_key: str | None = None,
         discount_code: str = "",
+        expected_discount: int | None = None,
         plan_id: str = "",
         category_id: str = "",
     ) -> list[str]:
@@ -882,12 +907,14 @@ class ProvisioningService:
                     base_total=base_total, order_kind="purchase",
                     plan_id=plan_id, category_id=category_id,
                 )
+                _assert_promised_discount(discount, expected_discount)
             final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn,
                 user_id=user_id,
                 amount_toman=final_total,
                 agent_row=agent_row,
+                allow_free=True,
             )
             await conn.execute(
                 """

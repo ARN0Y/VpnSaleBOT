@@ -678,6 +678,11 @@ def stored_discount_code(context: ContextTypes.DEFAULT_TYPE, flow: str) -> str:
     return str((_flow_bucket(context, flow).get("discount") or {}).get("code") or "")
 
 
+def stored_discount_amount(context: ContextTypes.DEFAULT_TYPE, flow: str) -> int:
+    """What the invoice the buyer is looking at promised to take off."""
+    return int((_flow_bucket(context, flow).get("discount") or {}).get("amount") or 0)
+
+
 def clear_discount(context: ContextTypes.DEFAULT_TYPE, flow: str) -> None:
     _flow_bucket(context, flow).pop("discount", None)
 
@@ -1127,6 +1132,7 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     client_name = str(data.get("client_name") or "").strip()
     # Only the CODE travels to the money path; the amount is recomputed there.
     discount_code = stored_discount_code(context, "pkg")
+    discount_amount = stored_discount_amount(context, "pkg")
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
         if panel_key == "pg":
@@ -1154,6 +1160,7 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 client_name=client_name,
                 idempotency_key=idem,
                 discount_code=discount_code,
+                expected_discount=discount_amount,
                 plan_id=plan_id,
                 category_id=str(plan.get("category_id") or ""),
             )
@@ -1169,6 +1176,7 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 client_name=client_name,
                 idempotency_key=idem,
                 discount_code=discount_code,
+                expected_discount=discount_amount,
                 plan_id=plan_id,
                 category_id=str(plan.get("category_id") or ""),
             )
@@ -2939,6 +2947,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    renew_discount = stored_discount_amount(context, "renewal")
     # This per-GB volume path only runs for legacy 3x-ui subs; PasarGuard subs
     # renew via the plan flow (mode == "plan" → renew_confirm_plan) above.
     await edit_flow_query(update, context, "⏳ <b>در حال تمدید اشتراک...</b>\n\nلطفاً چند لحظه صبر کنید.")
@@ -2951,6 +2960,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             final_total=total,
             idempotency_key=str(renewal.get("idem") or query.id),
             discount_code=stored_discount_code(context, "renewal"),
+            expected_discount=stored_discount_amount(context, "renewal"),
         )
     except ValueError as exc:
         clear_flow_state(context)
@@ -2969,11 +2979,14 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await edit_text(query, f"❌ خطا در تمدید اشتراک:\n{html.escape(str(exc))}", back_keyboard())
         return ConversationHandler.END
 
+    clear_flow_state(context)
     await edit_text(
         query,
         "✅ <b>تمدید با موفقیت انجام شد.</b>\n\n"
         f"📦 حجم اضافه‌شده: <b>{gb}</b> گیگ\n"
-        f"💰 مبلغ ثبت‌شده: <b>{total:,}</b> تومان\n"
+        f"💰 مبلغ پرداختی: <b>{max(0, total - renew_discount):,}</b> تومان"
+        + (f" (تخفیف {renew_discount:,} تومان)" if renew_discount else "")
+        + "\n"
         f"🟢 روش ثبت: {html.escape(method_label)}\n\n"
         "🔗 لینک اشتراک شما:\n"
         f"<code>{html.escape(sub_link)}</code>",
@@ -3006,6 +3019,7 @@ async def renew_confirm_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     provisioning: ProvisioningService = context.application.bot_data["provisioning"]
+    renew_discount = stored_discount_amount(context, "renewal")
     await edit_flow_query(update, context, "⏳ <b>در حال تمدید سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
         pg_client = await get_pg_client(context)
@@ -3018,6 +3032,7 @@ async def renew_confirm_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pkg=pkg,
             idempotency_key=str(renewal.get("idem") or query.id),
             discount_code=stored_discount_code(context, "renewal"),
+            expected_discount=stored_discount_amount(context, "renewal"),
         )
     except ValueError as exc:
         clear_flow_state(context)
@@ -3047,7 +3062,9 @@ async def renew_confirm_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🎁 پلن: <b>{html.escape(str(pkg.get('title') or '-'))}</b>\n"
         f"📦 حجم: <b>{vol_line}</b>\n"
         f"{days_line}"
-        f"💰 مبلغ ثبت‌شده: <b>{price:,}</b> تومان\n\n"
+        f"💰 مبلغ پرداختی: <b>{max(0, price - renew_discount):,}</b> تومان"
+        + (f" (تخفیف {renew_discount:,} تومان)" if renew_discount else "")
+        + "\n\n"
         "🔗 لینک اشتراک شما:\n"
         f"<code>{html.escape(sub_link)}</code>",
         back_keyboard(),

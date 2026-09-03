@@ -101,6 +101,48 @@ function NumberInput({ value, onChange, placeholder }: {
   );
 }
 
+function Restriction({ label, hint, options, selected, onToggle }: {
+  label: string;
+  hint: string;
+  options: { id: string; label: string }[];
+  selected: string[];
+  onToggle: (id: string, on: boolean) => void;
+}) {
+  const known = new Set(options.map((o) => o.id));
+  const orphans = selected.filter((id) => !known.has(id));
+  return (
+    <Row label={label} hint={hint}>
+      <div className="max-h-32 space-y-1 overflow-y-auto rounded-xl border border-border bg-card p-2">
+        {options.length === 0 && orphans.length === 0 && (
+          <div className="p-1 text-xs text-muted-foreground">موردی تعریف نشده.</div>
+        )}
+        {options.map((o) => (
+          <label key={o.id} className="flex items-center gap-2 rounded-lg px-1 py-0.5 text-xs hover:bg-white/5">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 accent-[hsl(var(--brand))]"
+              checked={selected.includes(o.id)}
+              onChange={(e) => onToggle(o.id, e.target.checked)}
+            />
+            <span className="text-foreground">{o.label}</span>
+          </label>
+        ))}
+        {orphans.map((id) => (
+          <label key={id} className="flex items-center gap-2 rounded-lg px-1 py-0.5 text-xs hover:bg-white/5">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 accent-[hsl(var(--brand))]"
+              checked
+              onChange={() => onToggle(id, false)}
+            />
+            <span className="text-amber-300">{id} — حذف‌شده، کد را بی‌اثر می‌کند</span>
+          </label>
+        ))}
+      </div>
+    </Row>
+  );
+}
+
 function Editor({
   open, onOpenChange, initial, bundle, onSaved,
 }: {
@@ -279,46 +321,24 @@ function Editor({
               </Row>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
-              <Row label="فقط این پلن‌ها" hint="هیچ‌کدام انتخاب نشود = همه‌ی پلن‌ها.">
-                <div className="max-h-32 space-y-1 overflow-y-auto rounded-xl border border-border bg-card p-2">
-                  {bundle.plans.length === 0 && <div className="p-1 text-xs text-muted-foreground">پلنی تعریف نشده.</div>}
-                  {bundle.plans.map((p) => (
-                    <label key={p.id} className="flex items-center gap-2 rounded-lg px-1 py-0.5 text-xs hover:bg-white/5">
-                      <input
-                        type="checkbox"
-                        className="h-3.5 w-3.5 accent-[hsl(var(--brand))]"
-                        checked={form.plan_ids.includes(p.id)}
-                        onChange={(e) =>
-                          set("plan_ids", e.target.checked
-                            ? [...form.plan_ids, p.id]
-                            : form.plan_ids.filter((x) => x !== p.id))
-                        }
-                      />
-                      <span className="text-foreground">{p.title || p.id}</span>
-                    </label>
-                  ))}
-                </div>
-              </Row>
-              <Row label="فقط این دسته‌ها" hint="هیچ‌کدام انتخاب نشود = همه‌ی دسته‌ها.">
-                <div className="max-h-32 space-y-1 overflow-y-auto rounded-xl border border-border bg-card p-2">
-                  {bundle.categories.length === 0 && <div className="p-1 text-xs text-muted-foreground">دسته‌ای تعریف نشده.</div>}
-                  {bundle.categories.map((c) => (
-                    <label key={c.id} className="flex items-center gap-2 rounded-lg px-1 py-0.5 text-xs hover:bg-white/5">
-                      <input
-                        type="checkbox"
-                        className="h-3.5 w-3.5 accent-[hsl(var(--brand))]"
-                        checked={form.category_ids.includes(c.id)}
-                        onChange={(e) =>
-                          set("category_ids", e.target.checked
-                            ? [...form.category_ids, c.id]
-                            : form.category_ids.filter((x) => x !== c.id))
-                        }
-                      />
-                      <span className="text-foreground">{`${c.emoji || ""} ${c.title}`.trim()}</span>
-                    </label>
-                  ))}
-                </div>
-              </Row>
+              <Restriction
+                label="فقط این پلن‌ها"
+                hint="هیچ‌کدام انتخاب نشود = همه‌ی پلن‌ها."
+                options={bundle.plans.map((p) => ({ id: p.id, label: p.title || p.id }))}
+                selected={form.plan_ids}
+                onToggle={(id, on) =>
+                  set("plan_ids", on ? [...form.plan_ids, id] : form.plan_ids.filter((x) => x !== id))
+                }
+              />
+              <Restriction
+                label="فقط این دسته‌ها"
+                hint="هیچ‌کدام انتخاب نشود = همه‌ی دسته‌ها."
+                options={bundle.categories.map((c) => ({ id: c.id, label: `${c.emoji || ""} ${c.title}`.trim() }))}
+                selected={form.category_ids}
+                onToggle={(id, on) =>
+                  set("category_ids", on ? [...form.category_ids, id] : form.category_ids.filter((x) => x !== id))
+                }
+              />
             </div>
           </section>
 
