@@ -283,7 +283,10 @@ def check(
         raise DiscountError("این کد برای نمایندگان قابل استفاده نیست.")
     if audience == AUDIENCE_AGENTS and not is_agent:
         raise DiscountError("این کد فقط برای نمایندگان است.")
-    if audience == AUDIENCE_NEW and has_approved_order:
+    if audience == AUDIENCE_NEW and (has_approved_order or int(used_by_user or 0) > 0):
+        # "First purchase" is once per person by definition. Reading only the
+        # approved-order flag would let someone with an unlimited per-user cap
+        # spend it again before their first order finished being approved.
         raise DiscountError("این کد فقط برای اولین خرید است.")
 
     allowed_users = code.get("user_ids") or []
