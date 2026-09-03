@@ -54,6 +54,20 @@ function post<T>(path: string, body?: unknown): Promise<T> {
 
 export const api = {
   me: () => request<{ username: string; csrf: string }>("/me"),
+  discounts: (q = "", state = "all") =>
+    request<import("./types").DiscountBundle>(
+      `/discounts?q=${encodeURIComponent(q)}&state=${state}`,
+    ),
+  discountDetail: (code: string) =>
+    request<import("./types").DiscountDetail>(`/discounts/${encodeURIComponent(code)}`),
+  saveDiscount: (discount: Partial<import("./types").DiscountCode>, originalCode = "") =>
+    post<{ ok: boolean; discount: import("./types").DiscountCode; problems: string[] }>(
+      "/discounts", { discount, original_code: originalCode },
+    ),
+  toggleDiscount: (code: string, enabled: boolean) =>
+    post<{ ok: boolean }>(`/discounts/${encodeURIComponent(code)}/toggle`, { enabled }),
+  deleteDiscount: (code: string) =>
+    post<{ ok: boolean }>(`/discounts/${encodeURIComponent(code)}/delete`),
   login: (username: string, password: string) =>
     post<{ ok: boolean; username: string; csrf: string }>("/login", { username, password }),
   logout: () => post<{ ok: boolean }>("/logout"),

@@ -84,7 +84,14 @@ export function Orders() {
                     </TD>
                     <TD className="text-xs">{o.order_type === "renewal" ? "تمدید" : "خرید"}</TD>
                     <TD>{o.gb}×{o.qty} GB</TD>
-                    <TD>{toman(o.final_price)}</TD>
+                    <TD className="whitespace-nowrap">
+                      {toman(o.final_price)}
+                      {Number(o.discount_amount || 0) > 0 && (
+                        <div className="text-[0.62rem] text-emerald-300">
+                          🎟 {String(o.discount_code || "")} − {toman(o.discount_amount)}
+                        </div>
+                      )}
+                    </TD>
                     <TD>
                       <Badge variant={s.variant}>{s.label}</Badge>
                     </TD>

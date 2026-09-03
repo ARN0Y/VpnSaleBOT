@@ -87,8 +87,12 @@ class ProvisioningService:
         reporting; rollback always refunds the same wallet.
         """
         amount = int(amount_toman)
-        if amount <= 0:
+        if amount < 0:
             raise ValueError("مبلغ فاکتور معتبر نیست.")
+        if amount == 0:
+            # A 100% discount is a real thing to sell. Nothing to debit, and
+            # nothing to refund if provisioning then fails.
+            return PaymentMethod.AGENT_WALLET if agent_row else PaymentMethod.WALLET
         debit = await self.db.try_debit_wallet_in_transaction(conn, user_id, amount)
         if debit.rowcount != 1:
             raise ValueError("موجودی کیف پول شما کافی نیست. لطفا حساب خود را شارژ کنید.")
@@ -492,6 +496,7 @@ class ProvisioningService:
         unit_price: int,
         final_total: int,
         idempotency_key: str | None = None,
+        discount_code: str = "",
     ) -> str:
         clean_sub_id = str(sub_id or "").strip()
         if not clean_sub_id:
@@ -546,6 +551,14 @@ class ProvisioningService:
                 raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً تمدید را دوباره ثبت کنید.")
             effective_unit_price = tx_effective_unit_price
 
+            base_total = int(final_total)
+            discount = 0
+            if discount_code:
+                discount = await self.db.reserve_discount_in_transaction(
+                    conn, code=discount_code, user_id=user_id, order_id=order_id,
+                    base_total=base_total, order_kind="renewal",
+                )
+            final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn,
                 user_id=user_id,
@@ -556,9 +569,9 @@ class ProvisioningService:
             await conn.execute(
                 """
                 INSERT INTO orders
-                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_code,discount_amount,
                    final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
-                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
                 """,
                 (
                     order_id,
@@ -567,8 +580,9 @@ class ProvisioningService:
                     requested_gb,
                     1,
                     int(effective_unit_price),
-                    int(effective_unit_price) * requested_gb,
-                    0,
+                    int(base_total),
+                    (discount_code or None) if discount else None,
+                    int(discount),
                     int(final_total),
                     now_ts(),
                     payment_method.value,
@@ -595,7 +609,9 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
             return detail.sub_link
         except Exception:
-            await self.db.credit_wallet(user_id, final_total)
+            if final_total > 0:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.release_discount(order_id)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -608,6 +624,9 @@ class ProvisioningService:
         sub_id: str,
         pkg: dict,
         idempotency_key: str | None = None,
+        discount_code: str = "",
+        plan_id: str = "",
+        category_id: str = "",
     ) -> str:
         """Renew a PasarGuard service by applying a chosen package to the SAME
         config (renew the current plan, or upgrade to another). The config keeps
@@ -647,20 +666,29 @@ class ProvisioningService:
             tx_total = package_price(pkg, agent_row)
             if int(final_total) != int(tx_total):
                 raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً تمدید را دوباره ثبت کنید.")
-            final_total = int(tx_total)
+            base_total = int(tx_total)
+            discount = 0
+            if discount_code:
+                discount = await self.db.reserve_discount_in_transaction(
+                    conn, code=discount_code, user_id=user_id, order_id=order_id,
+                    base_total=base_total, order_kind="renewal",
+                    plan_id=plan_id, category_id=category_id,
+                )
+            final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn, user_id=user_id, amount_toman=final_total, agent_row=agent_row
             )
             await conn.execute(
                 """
                 INSERT INTO orders
-                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_code,discount_amount,
                    final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
-                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
                 """,
                 (
-                    order_id, int(user_id), -1, int(cap_gb), 1, int(final_total),
-                    int(final_total), 0, int(final_total), now_ts(),
+                    order_id, int(user_id), -1, int(cap_gb), 1, int(base_total),
+                    int(base_total), (discount_code or None) if discount else None,
+                    int(discount), int(final_total), now_ts(),
                     payment_method.value, "renewal", clean_sub_id, client_name,
                 ),
             )
@@ -696,7 +724,9 @@ class ProvisioningService:
             await self.db.execute("UPDATE idempotency_keys SET status='approved' WHERE key=?", (idem,))
             return sub_url
         except Exception:
-            await self.db.credit_wallet(user_id, final_total)
+            if final_total > 0:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.release_discount(order_id)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -708,6 +738,9 @@ class ProvisioningService:
         pkg: dict,
         client_name: str = "",
         idempotency_key: str | None = None,
+        discount_code: str = "",
+        plan_id: str = "",
+        category_id: str = "",
     ) -> list[str]:
         """Buy a per-panel package (volume or fair-usage 'unlimited') on THIS
         provisioning instance's panel. Charges the audience-correct price, sets
@@ -736,7 +769,18 @@ class ProvisioningService:
             tx_final_total = package_price(pkg, agent_row)
             if int(final_total) != int(tx_final_total):
                 raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
-            final_total = int(tx_final_total)
+            base_total = int(tx_final_total)
+            # The code is spent HERE, not when it was quoted: between the two the
+            # buyer may have used their last allowance, or the code may have run
+            # out entirely. reserve_* re-checks every rule and raises otherwise.
+            discount = 0
+            if discount_code:
+                discount = await self.db.reserve_discount_in_transaction(
+                    conn, code=discount_code, user_id=user_id, order_id=order_id,
+                    base_total=base_total, order_kind="purchase",
+                    plan_id=plan_id, category_id=category_id,
+                )
+            final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn,
                 user_id=user_id,
@@ -746,13 +790,14 @@ class ProvisioningService:
             await conn.execute(
                 """
                 INSERT INTO orders
-                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_code,discount_amount,
                    final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
-                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
                 """,
                 (
-                    order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
-                    int(final_total), 0, int(final_total), now_ts(),
+                    order_id, int(user_id), 0, int(cap_gb), 1, int(base_total),
+                    int(base_total), (discount_code or None) if discount else None,
+                    int(discount), int(final_total), now_ts(),
                     payment_method.value, ("infinite" if kind == "unlimited" else "purchase"), None,
                     ((client_name or str(pkg.get("title") or "")).strip()[:64] or None),
                 ),
@@ -779,7 +824,10 @@ class ProvisioningService:
                     await self.panel.delete_subscription(provision.sub_id)
                 except Exception:
                     pass
-            await self.db.credit_wallet(user_id, final_total)
+            if final_total > 0:
+                await self.db.credit_wallet(user_id, final_total)
+            # Give the code's use back, or a failed purchase quietly burns it.
+            await self.db.release_discount(order_id)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise
@@ -794,6 +842,9 @@ class ProvisioningService:
         days: int = 0,
         client_name: str = "",
         idempotency_key: str | None = None,
+        discount_code: str = "",
+        plan_id: str = "",
+        category_id: str = "",
     ) -> list[str]:
         """Buy a PasarGuard package (volume or fair-usage 'unlimited') at navid's
         package price. Mirrors process_package_purchase's money rules but creates
@@ -821,7 +872,17 @@ class ProvisioningService:
             tx_final_total = package_price(pkg, agent_row)
             if int(final_total) != int(tx_final_total):
                 raise ValueError("تعرفه حساب شما تغییر کرده است. لطفاً خرید را دوباره ثبت کنید.")
-            final_total = int(tx_final_total)
+            base_total = int(tx_final_total)
+            # Spent inside the same transaction that takes the money, so a code
+            # can never be redeemed for an order that was not actually paid for.
+            discount = 0
+            if discount_code:
+                discount = await self.db.reserve_discount_in_transaction(
+                    conn, code=discount_code, user_id=user_id, order_id=order_id,
+                    base_total=base_total, order_kind="purchase",
+                    plan_id=plan_id, category_id=category_id,
+                )
+            final_total = max(0, base_total - int(discount))
             payment_method = await self._reserve_wallet_payment(
                 conn,
                 user_id=user_id,
@@ -831,13 +892,14 @@ class ProvisioningService:
             await conn.execute(
                 """
                 INSERT INTO orders
-                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_amount,
+                  (order_id,user_id,plan_id,gb,qty,unit_price,price,discount_code,discount_amount,
                    final_price,status,created_at,payment_method,order_type,target_sub_id,client_name)
-                VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
                 """,
                 (
-                    order_id, int(user_id), 0, int(cap_gb), 1, int(final_total),
-                    int(final_total), 0, int(final_total), now_ts(),
+                    order_id, int(user_id), 0, int(cap_gb), 1, int(base_total),
+                    int(base_total), (discount_code or None) if discount else None,
+                    int(discount), int(final_total), now_ts(),
                     payment_method.value, ("infinite" if kind == "unlimited" else "purchase"), None,
                     ((client_name or str(pkg.get("title") or "")).strip()[:64] or None),
                 ),
@@ -904,7 +966,9 @@ class ProvisioningService:
                     await pg_client.delete_user(uname)
                 except Exception:
                     pass
-            await self.db.credit_wallet(user_id, final_total)
+            if final_total > 0:
+                await self.db.credit_wallet(user_id, final_total)
+            await self.db.release_discount(order_id)
             await self.db.reject_order(order_id)
             await self.db.execute("UPDATE idempotency_keys SET status='failed' WHERE key=?", (idem,))
             raise

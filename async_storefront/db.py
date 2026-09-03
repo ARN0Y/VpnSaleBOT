@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Iterable
 
 import aiosqlite
 
+from . import discounts
 from .env_sync import BUSINESS_ENV_TO_SETTING, INFRA_ENV_TO_SETTING, PANEL_ENV_TO_COLUMN
 from .models import AgentAccess, PaymentMethod
 from .util import iran_day_bounds_ts, now_ts
@@ -215,6 +216,44 @@ class AsyncDatabase:
               created_at INTEGER NOT NULL,
               expires_at INTEGER NOT NULL,
               status TEXT NOT NULL DEFAULT 'created'
+            );
+
+            CREATE TABLE IF NOT EXISTS discount_codes (
+              code TEXT PRIMARY KEY,
+              title TEXT NOT NULL DEFAULT '',
+              kind TEXT NOT NULL DEFAULT 'percent',
+              value INTEGER NOT NULL DEFAULT 0,
+              max_discount_toman INTEGER NOT NULL DEFAULT 0,
+              min_order_toman INTEGER NOT NULL DEFAULT 0,
+              max_order_toman INTEGER NOT NULL DEFAULT 0,
+              starts_at INTEGER NOT NULL DEFAULT 0,
+              ends_at INTEGER NOT NULL DEFAULT 0,
+              max_uses INTEGER NOT NULL DEFAULT 0,
+              max_uses_per_user INTEGER NOT NULL DEFAULT 1,
+              audience TEXT NOT NULL DEFAULT 'all',
+              applies_to TEXT NOT NULL DEFAULT 'all',
+              user_ids TEXT NOT NULL DEFAULT '[]',
+              plan_ids TEXT NOT NULL DEFAULT '[]',
+              category_ids TEXT NOT NULL DEFAULT '[]',
+              enabled INTEGER NOT NULL DEFAULT 1,
+              note TEXT NOT NULL DEFAULT '',
+              used_count INTEGER NOT NULL DEFAULT 0,
+              total_discount_toman INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL DEFAULT 0,
+              updated_at INTEGER NOT NULL DEFAULT 0
+            );
+
+            -- One row per redemption. `status` is what makes a rolled-back
+            -- purchase give the code back instead of burning a use.
+            CREATE TABLE IF NOT EXISTS discount_redemptions (
+              order_id TEXT PRIMARY KEY,
+              code TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
+              base_toman INTEGER NOT NULL DEFAULT 0,
+              amount_toman INTEGER NOT NULL DEFAULT 0,
+              order_kind TEXT NOT NULL DEFAULT 'purchase',
+              status TEXT NOT NULL DEFAULT 'used',
+              created_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS admin_events (
@@ -438,6 +477,10 @@ class AsyncDatabase:
             CREATE INDEX IF NOT EXISTS idx_agent_ledger_user     ON agent_ledger(user_id);
             CREATE INDEX IF NOT EXISTS idx_test_configs_user     ON agent_test_configs(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_admin_events_status   ON admin_events(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_discount_red_code     ON discount_redemptions(code, status);
+            CREATE INDEX IF NOT EXISTS idx_discount_red_user     ON discount_redemptions(code, user_id, status);
+            CREATE INDEX IF NOT EXISTS idx_discount_red_created  ON discount_redemptions(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_orders_discount_code  ON orders(discount_code);
             """
         )
 
@@ -2167,6 +2210,341 @@ class AsyncDatabase:
                 "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [(str(k), str(v)) for k, v in values.items()],
             )
+
+    # ───────────────────────── discount codes ─────────────────────────
+    # Quoting a code and spending it are deliberately separate. The quote runs
+    # while the buyer is still reading the invoice; the spend runs inside the
+    # purchase transaction and re-checks everything, because the two are minutes
+    # apart and a shared code can be exhausted in between.
+
+    _DISCOUNT_COLUMNS = (
+        "code", "title", "kind", "value", "max_discount_toman", "min_order_toman",
+        "max_order_toman", "starts_at", "ends_at", "max_uses", "max_uses_per_user",
+        "audience", "applies_to", "user_ids", "plan_ids", "category_ids",
+        "enabled", "note", "used_count", "total_discount_toman", "created_at", "updated_at",
+    )
+
+    @staticmethod
+    def _discount_row_to_dict(row) -> dict[str, Any]:
+        out = dict(row)
+        for key in ("user_ids", "plan_ids", "category_ids"):
+            raw = out.get(key)
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else []
+            except Exception:
+                parsed = []
+            out[key] = parsed if isinstance(parsed, list) else []
+        out["enabled"] = bool(int(out.get("enabled") or 0))
+        for key in ("value", "max_discount_toman", "min_order_toman", "max_order_toman",
+                    "starts_at", "ends_at", "max_uses", "max_uses_per_user",
+                    "used_count", "total_discount_toman", "created_at", "updated_at"):
+            out[key] = int(out.get(key) or 0)
+        return out
+
+    async def discount_by_code(self, code: str) -> dict[str, Any] | None:
+        clean = discounts.normalize_code(code)
+        if not clean:
+            return None
+        row = await self.fetchone("SELECT * FROM discount_codes WHERE code=?", (clean,))
+        return self._discount_row_to_dict(row) if row else None
+
+    async def discount_uses_by_user(self, code: str, user_id: int) -> int:
+        row = await self.fetchone(
+            "SELECT COUNT(*) AS c FROM discount_redemptions"
+            " WHERE code=? AND user_id=? AND status='used'",
+            (discounts.normalize_code(code), int(user_id)),
+        )
+        return int(row["c"] or 0) if row else 0
+
+    async def user_has_approved_order(self, user_id: int) -> bool:
+        row = await self.fetchone(
+            "SELECT 1 AS x FROM orders WHERE user_id=? AND status='approved' LIMIT 1",
+            (int(user_id),),
+        )
+        return bool(row)
+
+    async def quote_discount(
+        self,
+        code: str,
+        *,
+        user_id: int,
+        base_total: int,
+        order_kind: str = discounts.APPLIES_PURCHASE,
+        plan_id: str = "",
+        category_id: str = "",
+    ) -> dict[str, Any]:
+        """Preview a code for this buyer and this basket.
+
+        Raises ``discounts.DiscountError`` with the sentence to show them.
+        """
+        row = await self.discount_by_code(code)
+        if not row:
+            raise discounts.DiscountError("کد تخفیف پیدا نشد.")
+        agent = await self.get_agent(int(user_id))
+        amount = discounts.check(
+            row,
+            now=now_ts(),
+            base_total=int(base_total),
+            user_id=int(user_id),
+            is_agent=bool(agent),
+            order_kind=order_kind,
+            plan_id=plan_id,
+            category_id=category_id,
+            used_by_user=await self.discount_uses_by_user(row["code"], user_id),
+            has_approved_order=await self.user_has_approved_order(user_id),
+        )
+        return {
+            "code": row["code"],
+            "title": row.get("title") or "",
+            "summary": discounts.summary(row),
+            "amount": int(amount),
+            "base": int(base_total),
+            "final": max(0, int(base_total) - int(amount)),
+        }
+
+    async def reserve_discount_in_transaction(
+        self,
+        conn,
+        *,
+        code: str,
+        user_id: int,
+        order_id: str,
+        base_total: int,
+        order_kind: str = discounts.APPLIES_PURCHASE,
+        plan_id: str = "",
+        category_id: str = "",
+    ) -> int:
+        """Spend one use of ``code`` for ``order_id``. Returns the discount.
+
+        Must be called inside the caller's purchase transaction: the total-uses
+        cap is enforced by a conditional UPDATE, so two buyers racing for the
+        last use cannot both win.
+        """
+        clean = discounts.normalize_code(code)
+        if not clean:
+            return 0
+        row = await self.fetchone("SELECT * FROM discount_codes WHERE code=?", (clean,))
+        if not row:
+            raise discounts.DiscountError("کد تخفیف پیدا نشد.")
+        record = self._discount_row_to_dict(row)
+        agent_row = await self.fetchone("SELECT user_id FROM agents WHERE user_id=?", (int(user_id),))
+        amount = discounts.check(
+            record,
+            now=now_ts(),
+            base_total=int(base_total),
+            user_id=int(user_id),
+            is_agent=bool(agent_row),
+            order_kind=order_kind,
+            plan_id=plan_id,
+            category_id=category_id,
+            used_by_user=await self.discount_uses_by_user(clean, user_id),
+            has_approved_order=await self.user_has_approved_order(user_id),
+        )
+
+        claimed = await conn.execute(
+            """
+            UPDATE discount_codes
+               SET used_count = used_count + 1,
+                   total_discount_toman = total_discount_toman + ?
+             WHERE code = ?
+               AND enabled = 1
+               AND (max_uses = 0 OR used_count < max_uses)
+            """,
+            (int(amount), clean),
+        )
+        if claimed.rowcount != 1:
+            raise discounts.DiscountError("ظرفیت استفاده از این کد تکمیل شده است.")
+        await conn.execute(
+            """
+            INSERT INTO discount_redemptions
+              (order_id, code, user_id, base_toman, amount_toman, order_kind, status, created_at)
+            VALUES (?,?,?,?,?,?, 'used', ?)
+            ON CONFLICT(order_id) DO UPDATE SET
+              code=excluded.code, user_id=excluded.user_id,
+              base_toman=excluded.base_toman, amount_toman=excluded.amount_toman,
+              order_kind=excluded.order_kind, status='used', created_at=excluded.created_at
+            """,
+            (str(order_id), clean, int(user_id), int(base_total), int(amount),
+             str(order_kind or "purchase"), now_ts()),
+        )
+        return int(amount)
+
+    async def release_discount(self, order_id: str) -> None:
+        """Give a code's use back when its purchase was rolled back.
+
+        Idempotent: a redemption already released stays released, so a retried
+        rollback cannot credit the code twice.
+        """
+        async with self.transaction() as conn:
+            row = await self.fetchone(
+                "SELECT code, amount_toman FROM discount_redemptions"
+                " WHERE order_id=? AND status='used'",
+                (str(order_id),),
+            )
+            if not row:
+                return
+            await conn.execute(
+                "UPDATE discount_codes"
+                "   SET used_count = MAX(0, used_count - 1),"
+                "       total_discount_toman = MAX(0, total_discount_toman - ?)"
+                " WHERE code = ?",
+                (int(row["amount_toman"] or 0), str(row["code"])),
+            )
+            await conn.execute(
+                "UPDATE discount_redemptions SET status='released' WHERE order_id=?",
+                (str(order_id),),
+            )
+
+    # ── admin side ──
+
+    async def admin_list_discounts(
+        self, *, search: str = "", state: str = "all", limit: int = 200, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        query = str(search or "").strip()
+        if query:
+            clauses.append("(code LIKE ? OR title LIKE ? OR note LIKE ?)")
+            params.extend([f"%{query.upper()}%", f"%{query}%", f"%{query}%"])
+        now = now_ts()
+        if state == "active":
+            clauses.append(
+                "enabled=1 AND (starts_at=0 OR starts_at<=?) AND (ends_at=0 OR ends_at>?)"
+                " AND (max_uses=0 OR used_count<max_uses)"
+            )
+            params.extend([now, now])
+        elif state == "expired":
+            clauses.append("(ends_at>0 AND ends_at<=?) OR (max_uses>0 AND used_count>=max_uses)")
+            params.append(now)
+        elif state == "disabled":
+            clauses.append("enabled=0")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = await self.fetchall(
+            f"SELECT * FROM discount_codes{where} ORDER BY created_at DESC, code ASC LIMIT ? OFFSET ?",
+            (*params, max(1, min(500, int(limit))), max(0, int(offset))),
+        )
+        return [self._discount_row_to_dict(r) for r in rows]
+
+    async def admin_discount_detail(self, code: str) -> dict[str, Any] | None:
+        record = await self.discount_by_code(code)
+        if not record:
+            return None
+        rows = await self.fetchall(
+            """
+            SELECT r.order_id, r.user_id, r.base_toman, r.amount_toman, r.order_kind,
+                   r.status, r.created_at, u.first_name, u.username
+              FROM discount_redemptions r
+              LEFT JOIN users u ON u.user_id = r.user_id
+             WHERE r.code = ?
+             ORDER BY r.created_at DESC
+             LIMIT 100
+            """,
+            (record["code"],),
+        )
+        stats = await self.fetchone(
+            """
+            SELECT COUNT(*) AS used,
+                   COUNT(DISTINCT user_id) AS buyers,
+                   COALESCE(SUM(amount_toman),0) AS given,
+                   COALESCE(SUM(base_toman),0) AS gross
+              FROM discount_redemptions WHERE code=? AND status='used'
+            """,
+            (record["code"],),
+        )
+        record["redemptions"] = [dict(r) for r in rows]
+        record["stats"] = {
+            "used": int(stats["used"] or 0) if stats else 0,
+            "buyers": int(stats["buyers"] or 0) if stats else 0,
+            "given": int(stats["given"] or 0) if stats else 0,
+            "gross": int(stats["gross"] or 0) if stats else 0,
+        }
+        return record
+
+    async def admin_save_discount(self, payload: dict, *, original_code: str = "") -> dict[str, Any]:
+        """Create or update a code. Counters are never overwritten by an edit."""
+        record = discounts.normalize(payload)
+        problems = discounts.validate(record)
+        if not record["code"] or any("کد فقط" in p or "خالی است" in p for p in problems):
+            raise ValueError(problems[0] if problems else "کد تخفیف معتبر نیست.")
+        previous = discounts.normalize_code(original_code) or record["code"]
+        now = now_ts()
+        async with self.transaction() as conn:
+            existing = await self.fetchone("SELECT created_at FROM discount_codes WHERE code=?", (previous,))
+            if previous != record["code"]:
+                clash = await self.fetchone("SELECT code FROM discount_codes WHERE code=?", (record["code"],))
+                if clash:
+                    raise ValueError("کد تخفیف دیگری با همین نام وجود دارد.")
+                # Renaming carries the redemption history with it, so the stats
+                # on the new code are still the truth about who used it.
+                await conn.execute("UPDATE discount_codes SET code=? WHERE code=?", (record["code"], previous))
+                await conn.execute("UPDATE discount_redemptions SET code=? WHERE code=?", (record["code"], previous))
+                await conn.execute("UPDATE orders SET discount_code=? WHERE discount_code=?", (record["code"], previous))
+            await conn.execute(
+                """
+                INSERT INTO discount_codes
+                  (code,title,kind,value,max_discount_toman,min_order_toman,max_order_toman,
+                   starts_at,ends_at,max_uses,max_uses_per_user,audience,applies_to,
+                   user_ids,plan_ids,category_ids,enabled,note,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(code) DO UPDATE SET
+                  title=excluded.title, kind=excluded.kind, value=excluded.value,
+                  max_discount_toman=excluded.max_discount_toman,
+                  min_order_toman=excluded.min_order_toman,
+                  max_order_toman=excluded.max_order_toman,
+                  starts_at=excluded.starts_at, ends_at=excluded.ends_at,
+                  max_uses=excluded.max_uses, max_uses_per_user=excluded.max_uses_per_user,
+                  audience=excluded.audience, applies_to=excluded.applies_to,
+                  user_ids=excluded.user_ids, plan_ids=excluded.plan_ids,
+                  category_ids=excluded.category_ids, enabled=excluded.enabled,
+                  note=excluded.note, updated_at=excluded.updated_at
+                """,
+                (
+                    record["code"], record["title"], record["kind"], record["value"],
+                    record["max_discount_toman"], record["min_order_toman"], record["max_order_toman"],
+                    record["starts_at"], record["ends_at"], record["max_uses"],
+                    record["max_uses_per_user"], record["audience"], record["applies_to"],
+                    json.dumps(record["user_ids"]), json.dumps(record["plan_ids"]),
+                    json.dumps(record["category_ids"]), 1 if record["enabled"] else 0,
+                    record["note"],
+                    int(existing["created_at"]) if existing else now,
+                    now,
+                ),
+            )
+        saved = await self.discount_by_code(record["code"])
+        return saved or record
+
+    async def admin_delete_discount(self, code: str) -> bool:
+        clean = discounts.normalize_code(code)
+        if not clean:
+            return False
+        async with self.transaction() as conn:
+            cur = await conn.execute("DELETE FROM discount_codes WHERE code=?", (clean,))
+            # Redemptions stay: they are the record of money already discounted,
+            # and orders still reference the code by name.
+            return cur.rowcount > 0
+
+    async def admin_discount_overview(self) -> dict[str, int]:
+        now = now_ts()
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN enabled=1
+                                      AND (starts_at=0 OR starts_at<=?)
+                                      AND (ends_at=0 OR ends_at>?)
+                                      AND (max_uses=0 OR used_count<max_uses)
+                                     THEN 1 ELSE 0 END),0) AS active,
+                   COALESCE(SUM(used_count),0) AS uses,
+                   COALESCE(SUM(total_discount_toman),0) AS given
+              FROM discount_codes
+            """,
+            (now, now),
+        )
+        return {
+            "total": int(row["total"] or 0) if row else 0,
+            "active": int(row["active"] or 0) if row else 0,
+            "uses": int(row["uses"] or 0) if row else 0,
+            "given": int(row["given"] or 0) if row else 0,
+        }
 
     async def admin_list_orders(self, search: str = "", period: str = "all", limit: int = 300, offset: int = 0) -> list[dict[str, Any]]:
         await self.ensure_admin_runtime_schema()

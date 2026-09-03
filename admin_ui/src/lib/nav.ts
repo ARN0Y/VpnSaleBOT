@@ -8,6 +8,7 @@ import {
   Megaphone,
   Activity,
   SlidersHorizontal,
+  Ticket,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
@@ -26,6 +27,7 @@ export const NAV: NavItem[] = [
   { to: "/orders", label: "سفارش‌ها", icon: ShoppingCart, group: "main" },
   { to: "/users", label: "کاربران", icon: Users, group: "main" },
   { to: "/subscriptions", label: "کانفیگ‌ها", icon: Boxes, group: "main" },
+  { to: "/discounts", label: "کدهای تخفیف", icon: Ticket, group: "ops" },
   { to: "/topups", label: "شارژ کیف پول", icon: Wallet, group: "ops" },
   { to: "/agent-requests", label: "درخواست نمایندگی", icon: Handshake, group: "ops" },
   { to: "/broadcast", label: "پیام همگانی", icon: Megaphone, group: "ops" },
@@ -39,6 +41,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "/orders": "سفارش‌ها",
   "/users": "کاربران",
   "/subscriptions": "کانفیگ‌ها",
+  "/discounts": "کدهای تخفیف",
   "/topups": "شارژ کیف پول",
   "/agent-requests": "درخواست‌های نمایندگی",
   "/broadcast": "پیام همگانی",

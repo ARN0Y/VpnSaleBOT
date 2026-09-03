@@ -142,3 +142,57 @@ export type CatalogBundle = {
   problems: Record<string, string[]>;
   migrated_from_packages: boolean;
 };
+
+export type DiscountKind = "percent" | "fixed";
+export type DiscountAudience = "all" | "users" | "agents" | "new";
+export type DiscountApplies = "all" | "purchase" | "renewal";
+
+export interface DiscountCode {
+  code: string;
+  title: string;
+  kind: DiscountKind;
+  value: number;
+  max_discount_toman: number;
+  min_order_toman: number;
+  max_order_toman: number;
+  /** epoch seconds; 0 = open-ended */
+  starts_at: number;
+  ends_at: number;
+  max_uses: number;
+  max_uses_per_user: number;
+  audience: DiscountAudience;
+  applies_to: DiscountApplies;
+  user_ids: number[];
+  plan_ids: string[];
+  category_ids: string[];
+  enabled: boolean;
+  note: string;
+  used_count: number;
+  total_discount_toman: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface DiscountRedemption {
+  order_id: string;
+  user_id: number;
+  base_toman: number;
+  amount_toman: number;
+  order_kind: string;
+  status: string;
+  created_at: number;
+  first_name?: string | null;
+  username?: string | null;
+}
+
+export interface DiscountDetail extends DiscountCode {
+  redemptions: DiscountRedemption[];
+  stats: { used: number; buyers: number; given: number; gross: number };
+}
+
+export interface DiscountBundle {
+  items: DiscountCode[];
+  overview: { total: number; active: number; uses: number; given: number };
+  plans: { id: string; title: string; category_id: string }[];
+  categories: { id: string; title: string; emoji: string }[];
+}

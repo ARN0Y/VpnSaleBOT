@@ -21,7 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from async_storefront import catalog
+from async_storefront import catalog, discounts
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.provisioning import PG_INBOUND_SENTINEL
@@ -1207,3 +1207,100 @@ async def set_ui_mode(request: Request):
     mode = "classic" if str(body.get("mode")) == "classic" else "modern"
     await db(request).admin_update_settings({"ui_mode": mode})
     return {"ok": True, "mode": mode}
+
+
+# ───────────────────────── discount codes ─────────────────────────
+
+
+@router.get("/discounts")
+async def list_discounts(request: Request, q: str = "", state: str = "all"):
+    """Every code, plus the plans and categories the editor offers as targets.
+
+    The plan/category lists come from the live catalog, so a code can only ever
+    be restricted to something that exists — a typed plan id that no longer
+    exists would silently make the code unusable.
+    """
+    database = db(request)
+    filter_state = state if state in {"all", "active", "expired", "disabled"} else "all"
+    rows = await database.admin_list_discounts(search=q, state=filter_state)
+    data = await catalog.load_catalog(database)
+    return {
+        "items": rows,
+        "overview": await database.admin_discount_overview(),
+        "plans": [
+            {"id": p["id"], "title": p.get("title") or "", "category_id": p.get("category_id") or ""}
+            for p in (data.get("plans") or [])
+        ],
+        "categories": [
+            {"id": c["id"], "title": c.get("title") or "", "emoji": c.get("emoji") or ""}
+            for c in (data.get("categories") or [])
+        ],
+    }
+
+
+@router.get("/discounts/{code}")
+async def discount_detail(request: Request, code: str):
+    record = await db(request).admin_discount_detail(code)
+    if not record:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    return record
+
+
+@router.post("/discounts")
+async def save_discount(request: Request):
+    """Create or update a code. Normalised and validated server-side, so a
+    malformed code can never reach the buy flow."""
+    body = await _json_body(request)
+    payload = body.get("discount") if isinstance(body.get("discount"), dict) else body
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "invalid payload"}, status_code=400)
+    try:
+        saved = await db(request).admin_save_discount(
+            payload, original_code=str(body.get("original_code") or "")
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return {"ok": True, "discount": saved, "problems": discounts.validate(saved)}
+
+
+@router.post("/discounts/{code}/toggle")
+async def toggle_discount(request: Request, code: str):
+    database = db(request)
+    record = await database.discount_by_code(code)
+    if not record:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    body = await _json_body(request)
+    record["enabled"] = bool(body.get("enabled")) if "enabled" in body else (not record["enabled"])
+    saved = await database.admin_save_discount(record, original_code=record["code"])
+    return {"ok": True, "discount": saved}
+
+
+@router.post("/discounts/{code}/delete")
+async def delete_discount(request: Request, code: str):
+    removed = await db(request).admin_delete_discount(code)
+    if not removed:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    return {"ok": True}
+
+
+@router.post("/discounts/preview")
+async def preview_discount(request: Request):
+    """Answer "would this code work for this buyer, on this amount?".
+
+    Lets an admin check a complaint without asking the customer to try again.
+    """
+    body = await _json_body(request)
+    try:
+        quote = await db(request).quote_discount(
+            str(body.get("code") or ""),
+            user_id=int(body.get("user_id") or 0),
+            base_total=int(body.get("base_total") or 0),
+            order_kind=str(body.get("order_kind") or "purchase"),
+            plan_id=str(body.get("plan_id") or ""),
+            category_id=str(body.get("category_id") or ""),
+        )
+    except discounts.DiscountError as exc:
+        return {"ok": False, "reason": str(exc)}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=400)
+    return {"ok": True, **quote}

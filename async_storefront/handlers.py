@@ -27,6 +27,7 @@ from telegram.ext import (
 from .config import Settings
 from . import catalog
 from .db import AsyncDatabase
+from . import discounts
 from .panel import PanelClient
 from .pasarguard import PasarGuardClient
 from .provisioning import ProvisioningService, package_price, parse_packages, PG_INBOUND_SENTINEL
@@ -44,8 +45,8 @@ LOG = logging.getLogger(__name__)
 BUY_GB, BUY_CUSTOM_GB, BUY_QTY, BUY_NAME_MODE, BUY_NAME_INPUT, BUY_CONFIRM = range(6)
 TOPUP_AMOUNT, TOPUP_CUSTOM_AMOUNT, TOPUP_AMOUNT_CONFIRM, TOPUP_C2C_PHOTO, TOPUP_CRYPTO_TXID = range(10, 15)
 AGENT_TEXT, AGENT_CONFIRM = range(30, 32)
-RENEW_SELECT, RENEW_SEARCH, RENEW_GB, RENEW_CUSTOM_GB, RENEW_CONFIRM = range(40, 45)
-PKG_SELECT, PKG_NAME_MODE, PKG_NAME_INPUT, PKG_CONFIRM = range(60, 64)
+RENEW_SELECT, RENEW_SEARCH, RENEW_GB, RENEW_CUSTOM_GB, RENEW_CONFIRM, RENEW_DISCOUNT = range(40, 46)
+PKG_SELECT, PKG_NAME_MODE, PKG_NAME_INPUT, PKG_CONFIRM, PKG_DISCOUNT = range(60, 65)
 
 FLOW_PROMPT_KEY = "_flow_prompt_message_id"
 HOME_MESSAGE_KEY = "_home_message_id"
@@ -662,6 +663,311 @@ def _set_pkg_context_from_name_callback(update: Update, context: ContextTypes.DE
     return plan_id, gb
 
 
+# ───────────────────────── discount codes ─────────────────────────
+# The code lives on the flow state (pkg / renewal) and is re-quoted every time
+# an invoice is drawn. Storing the discounted amount and trusting it later is
+# how a buyer ends up paying a price the shop never agreed to — the quote is a
+# preview, and the purchase transaction re-checks it from scratch.
+
+
+def _flow_bucket(context: ContextTypes.DEFAULT_TYPE, flow: str) -> dict:
+    return context.user_data.setdefault(flow, {})
+
+
+def stored_discount_code(context: ContextTypes.DEFAULT_TYPE, flow: str) -> str:
+    return str((_flow_bucket(context, flow).get("discount") or {}).get("code") or "")
+
+
+def clear_discount(context: ContextTypes.DEFAULT_TYPE, flow: str) -> None:
+    _flow_bucket(context, flow).pop("discount", None)
+
+
+async def resolve_discount(
+    context: ContextTypes.DEFAULT_TYPE,
+    flow: str,
+    *,
+    user_id: int,
+    base_total: int,
+    order_kind: str = "purchase",
+    plan_id: str = "",
+    category_id: str = "",
+) -> dict:
+    """Re-price the stored code against the invoice being drawn right now.
+
+    Returns ``{"code", "amount", "final", "error"}``. A code that stopped
+    applying (expired mid-flow, basket changed, allowance used up elsewhere) is
+    dropped and reported, never silently kept at its old value.
+    """
+    base = max(0, int(base_total))
+    code = stored_discount_code(context, flow)
+    if not code:
+        return {"code": "", "amount": 0, "final": base, "error": ""}
+    db: AsyncDatabase = context.application.bot_data["db"]
+    try:
+        quote = await db.quote_discount(
+            code,
+            user_id=int(user_id),
+            base_total=base,
+            order_kind=order_kind,
+            plan_id=plan_id,
+            category_id=category_id,
+        )
+    except discounts.DiscountError as exc:
+        clear_discount(context, flow)
+        return {"code": "", "amount": 0, "final": base, "error": str(exc)}
+    _flow_bucket(context, flow)["discount"] = {"code": quote["code"], "amount": int(quote["amount"])}
+    return {
+        "code": str(quote["code"]),
+        "amount": int(quote["amount"]),
+        "final": int(quote["final"]),
+        "error": "",
+    }
+
+
+def discount_lines(state: dict, base_total: int) -> str:
+    """The price block of an invoice: with a code applied, or without."""
+    base = max(0, int(base_total))
+    if state.get("code") and int(state.get("amount") or 0) > 0:
+        amount = int(state["amount"])
+        final = max(0, base - amount)
+        return (
+            f"💰 مبلغ سرویس: <b>{base:,}</b> تومان\n"
+            f"🎟 کد <code>{html.escape(str(state['code']))}</code>: "
+            f"<b>−{amount:,}</b> تومان\n"
+            f"💳 مبلغ قابل پرداخت: <b>{final:,}</b> تومان"
+            + ("\n🎉 این سفارش برای شما رایگان است." if final == 0 else "")
+        )
+    return f"💰 مبلغ قابل پرداخت: <b>{base:,}</b> تومان"
+
+
+def discount_button_row(state: dict, *, prefix: str) -> list[InlineKeyboardButton]:
+    if state.get("code"):
+        return [InlineKeyboardButton("🎟 حذف کد تخفیف", callback_data=f"{prefix}:disc:clear")]
+    return [InlineKeyboardButton("🎟 کد تخفیف دارم", callback_data=f"{prefix}:disc:add")]
+
+
+async def _ask_for_code(update: Update, context: ContextTypes.DEFAULT_TYPE, *, prefix: str, note: str = "") -> None:
+    await edit_flow_query(
+        update,
+        context,
+        (f"⚠️ {html.escape(note)}\n\n" if note else "")
+        + "🎟 <b>کد تخفیف</b>\n\n"
+        "کد خود را ارسال کنید.\n"
+        "<i>حروف بزرگ و کوچک فرقی ندارد.</i>",
+        InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت به فاکتور", callback_data=f"{prefix}:disc:back")],
+                              [InlineKeyboardButton("❌ انصراف", callback_data=f"{prefix}:cancel")]]),
+    )
+
+
+async def pkg_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    if not (context.user_data.get("pkg") or {}).get("plan_id"):
+        await edit_text(update.callback_query, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+    await _ask_for_code(update, context, prefix="buy")
+    return PKG_DISCOUNT
+
+
+async def pkg_discount_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    return await build_package_invoice(update, context)
+
+
+async def pkg_discount_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query, "کد تخفیف حذف شد")
+    clear_discount(context, "pkg")
+    return await build_package_invoice(update, context)
+
+
+async def pkg_discount_typed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    data = context.user_data.get("pkg") or {}
+    plan_id = str(data.get("plan_id") or "")
+    if not plan_id:
+        await send_flow_prompt(update, context, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+    catalog_data = await catalog.load_catalog(db)
+    plan = catalog.find_plan(catalog_data, plan_id)
+    if not catalog.plan_is_sellable(catalog_data, plan):
+        clear_flow_state(context)
+        await send_flow_prompt(update, context, "⚠️ این پلن دیگر در دسترس نیست.", back_keyboard())
+        return ConversationHandler.END
+
+    agent = await db.get_agent(update.effective_user.id)
+    base = catalog.price_for(plan, gb=data.get("gb"), is_agent=bool(agent))
+    code = discounts.normalize_code((update.effective_message.text or ""))
+    try:
+        quote = await db.quote_discount(
+            code,
+            user_id=update.effective_user.id,
+            base_total=base,
+            order_kind="purchase",
+            plan_id=plan_id,
+            category_id=str(plan.get("category_id") or ""),
+        )
+    except discounts.DiscountError as exc:
+        await send_flow_prompt(
+            update,
+            context,
+            f"⚠️ <b>{html.escape(str(exc))}</b>\n\nکد دیگری بفرستید یا به فاکتور برگردید.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت به فاکتور", callback_data="buy:disc:back")],
+                                  [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
+        )
+        return PKG_DISCOUNT
+    context.user_data.setdefault("pkg", {})["discount"] = {
+        "code": quote["code"], "amount": int(quote["amount"])
+    }
+    return await build_package_invoice(update, context)
+
+
+async def renew_discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    if not (context.user_data.get("renewal") or {}).get("sub_id"):
+        await edit_text(update.callback_query, "⚠️ اطلاعات تمدید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+    await _ask_for_code(update, context, prefix="renew")
+    return RENEW_DISCOUNT
+
+
+async def renew_discount_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query)
+    return await _redraw_renew_invoice(update, context)
+
+
+async def renew_discount_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await _answer_query(update.callback_query, "کد تخفیف حذف شد")
+    clear_discount(context, "renewal")
+    return await _redraw_renew_invoice(update, context)
+
+
+async def renew_discount_typed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    db: AsyncDatabase = context.application.bot_data["db"]
+    renewal = context.user_data.get("renewal") or {}
+    base = _renewal_base_total(renewal)
+    if base <= 0:
+        await send_flow_prompt(update, context, "⚠️ اطلاعات تمدید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
+        return ConversationHandler.END
+    code = discounts.normalize_code((update.effective_message.text or ""))
+    try:
+        quote = await db.quote_discount(
+            code, user_id=update.effective_user.id, base_total=base, order_kind="renewal",
+        )
+    except discounts.DiscountError as exc:
+        await send_flow_prompt(
+            update,
+            context,
+            f"⚠️ <b>{html.escape(str(exc))}</b>\n\nکد دیگری بفرستید یا به فاکتور برگردید.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("↩️ بازگشت به فاکتور", callback_data="renew:disc:back")],
+                                  [InlineKeyboardButton("❌ انصراف", callback_data="renew:cancel")]]),
+        )
+        return RENEW_DISCOUNT
+    renewal["discount"] = {"code": quote["code"], "amount": int(quote["amount"])}
+    return await _redraw_renew_invoice(update, context)
+
+
+def _renewal_base_total(renewal: dict) -> int:
+    """The renewal price before any discount, for either renewal shape."""
+    if isinstance(renewal.get("pkg"), dict):
+        return max(0, int(renewal.get("plan_price") or 0))
+    return max(0, int(renewal.get("total") or 0))
+
+
+async def _redraw_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Re-render whichever renewal invoice the buyer is looking at."""
+    renewal = context.user_data.setdefault("renewal", {})
+    if isinstance(renewal.get("pkg"), dict):
+        return await _render_renew_plan_invoice(update, context)
+    return await _render_renew_volume_invoice(update, context)
+
+
+async def _render_renew_plan_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Invoice for renewing onto a package (PasarGuard plan renewal)."""
+    db: AsyncDatabase = context.application.bot_data["db"]
+    renewal = context.user_data.setdefault("renewal", {})
+    pkg = renewal.get("pkg") if isinstance(renewal.get("pkg"), dict) else None
+    if not pkg:
+        clear_flow_state(context)
+        await _renew_fail(update, context, "⚠️ اطلاعات تمدید ناقص است. لطفاً دوباره شروع کنید.")
+        return ConversationHandler.END
+
+    agent = await db.get_agent(update.effective_user.id)
+    price = package_price(pkg, agent)
+    renewal["plan_price"] = int(price)
+    state = await resolve_discount(
+        context, "renewal",
+        user_id=update.effective_user.id, base_total=price, order_kind="renewal",
+    )
+    name = str(renewal.get("client_name") or renewal.get("sub_id") or "بدون نام")
+    vol = "♾️ نامحدود (مصرف منصفانه)" if str(pkg.get("kind")) == "unlimited" else f"{int(pkg.get('gb') or 0)} گیگ"
+    days = int(pkg.get("days") or 0)
+    days_line = f"⏳ اعتبار: <b>{days}</b> روز (از اولین اتصال)\n" if days > 0 else ""
+    text = (
+        "🧾 <b>تایید تمدید سرویس</b>\n\n"
+        + (f"⚠️ {html.escape(state['error'])}\n\n" if state.get("error") else "")
+        + f"🪪 کانفیگ: <b>{html.escape(name)}</b>\n"
+        f"🎁 پلن: <b>{html.escape(str(pkg.get('title') or '-'))}</b>\n"
+        f"📦 حجم: <b>{vol}</b>\n"
+        f"{days_line}"
+        f"{discount_lines(state, price)}\n\n"
+        "با تایید، همین کانفیگ با این پلن تمدید می‌شود (لینک اشتراک تغییر نمی‌کند)."
+    )
+    keyboard = renew_confirm_keyboard(discount=state)
+    if update.callback_query:
+        await edit_flow_query(update, context, text, keyboard)
+    else:
+        await send_flow_prompt(update, context, text, keyboard)
+    return RENEW_CONFIRM
+
+
+async def _render_renew_volume_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Invoice for adding volume to an existing 3x-ui subscription."""
+    db: AsyncDatabase = context.application.bot_data["db"]
+    renewal = context.user_data.setdefault("renewal", {})
+    gb = int(renewal.get("gb") or 0)
+    agent = await db.get_agent(update.effective_user.id)
+    unit_price = await unit_price_for_gb(db, update.effective_user.id, gb, agent)
+    min_gb = await minimum_purchase_gb(db)
+    if gb < min_gb:
+        renewal.pop("gb", None)
+        await send_flow_prompt(
+            update, context,
+            invalid_gb_text(min_gb, renewal=True),
+            await gb_choice_keyboard(db, update.effective_user.id, "renew", "renew:cancel", min_gb),
+        )
+        return RENEW_GB
+    total = gb * unit_price
+    method_label = "کیف پول نماینده" if agent else "کسر از کیف پول"
+    renewal.update(unit_price=unit_price, total=total, method_label=method_label)
+    renewal.setdefault("idem", f"renew-{update.effective_user.id}-{secrets.token_hex(8)}")
+    state = await resolve_discount(
+        context, "renewal",
+        user_id=update.effective_user.id, base_total=total, order_kind="renewal",
+    )
+    text = (
+        "🧾 <b>تایید تمدید اشتراک</b>\n\n"
+        + (f"⚠️ {html.escape(state['error'])}\n\n" if state.get("error") else "")
+        + f"🪪 کانفیگ: <b>{html.escape(str(renewal.get('client_name') or 'بدون نام'))}</b>\n"
+        f"📦 حجم افزایشی: <b>{gb}</b> گیگ\n"
+        f"💵 قیمت هر گیگ: <b>{unit_price:,}</b> تومان\n"
+        f"{discount_lines(state, total)}\n"
+        f"💳 روش پرداخت: <b>{method_label}</b>\n\n"
+        "در صورت تایید، حجم به اشتراک انتخاب‌شده اضافه می‌شود."
+    )
+    keyboard = renew_confirm_keyboard(discount=state)
+    if update.callback_query:
+        await edit_flow_query(update, context, text, keyboard)
+    else:
+        await send_flow_prompt(update, context, text, keyboard)
+    return RENEW_CONFIRM
+
+
+async def _renew_fail(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str) -> None:
+    if update.callback_query:
+        await edit_text(update.callback_query, message, back_keyboard())
+    else:
+        await send_flow_prompt(update, context, message, back_keyboard())
+
+
 async def build_package_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db: AsyncDatabase = context.application.bot_data["db"]
     data = context.user_data.get("pkg") or {}
@@ -688,19 +994,28 @@ async def build_package_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     client_name = str(data.get("client_name") or "").strip()
     data["awaiting_name"] = False
     note = str((plan.get("display") or {}).get("note") or "").strip()
+    state = await resolve_discount(
+        context, "pkg",
+        user_id=update.effective_user.id,
+        base_total=price,
+        order_kind="purchase",
+        plan_id=plan_id,
+        category_id=str(plan.get("category_id") or ""),
+    )
     text = (
         "🧾 <b>تایید خرید</b>\n"
         "<code>─────────────────────</code>\n"
-        f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
+        + (f"⚠️ {html.escape(state['error'])}\n" if state.get("error") else "")
+        + f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
         f"{_plan_volume_line(plan, gb)}\n"
         f"{_plan_duration_line(plan)}\n"
         f"🪪 نام کانفیگ: <b>{html.escape(client_name) if client_name else '🎲 رندوم'}</b>\n"
         + (f"ℹ️ {html.escape(note)}\n" if note else "")
         + "<code>─────────────────────</code>\n"
-        f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
-        "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
+        + f"{discount_lines(state, price)}\n\n"
+        + "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
     )
-    keyboard = package_confirm_keyboard(plan_id, gb)
+    keyboard = package_confirm_keyboard(plan_id, gb, state)
     if update.callback_query:
         await edit_flow_query(update, context, text, keyboard)
     else:
@@ -810,6 +1125,8 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     data = context.user_data.get("pkg") or {}
     idem = str(data.get("idem") or query.id)
     client_name = str(data.get("client_name") or "").strip()
+    # Only the CODE travels to the money path; the amount is recomputed there.
+    discount_code = stored_discount_code(context, "pkg")
     await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
     try:
         if panel_key == "pg":
@@ -836,6 +1153,9 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 days=int(pkg.get("days") or 0),
                 client_name=client_name,
                 idempotency_key=idem,
+                discount_code=discount_code,
+                plan_id=plan_id,
+                category_id=str(plan.get("category_id") or ""),
             )
         else:
             provisioning = await _provisioning_for_panel(context, panel_key)
@@ -843,7 +1163,15 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 clear_flow_state(context)
                 await edit_text(query, "🌐 این سرور در حال حاضر در دسترس نیست.", back_keyboard())
                 return ConversationHandler.END
-            links = await provisioning.process_package_purchase(user_id=update.effective_user.id, pkg=pkg, client_name=client_name, idempotency_key=idem)
+            links = await provisioning.process_package_purchase(
+                user_id=update.effective_user.id,
+                pkg=pkg,
+                client_name=client_name,
+                idempotency_key=idem,
+                discount_code=discount_code,
+                plan_id=plan_id,
+                category_id=str(plan.get("category_id") or ""),
+            )
     except ValueError as exc:
         clear_flow_state(context)
         await edit_text(
@@ -996,10 +1324,12 @@ def package_name_keyboard(plan_id: str, gb: int | None) -> InlineKeyboardMarkup:
     )
 
 
-def package_confirm_keyboard(plan_id: str, gb: int | None) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{plan_id}:{_gb_token(gb)}"), InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]
-    )
+def package_confirm_keyboard(plan_id: str, gb: int | None, discount: dict | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        discount_button_row(discount or {}, prefix="buy"),
+        [InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{plan_id}:{_gb_token(gb)}"),
+         InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
+    ])
 
 
 def buy_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -1008,10 +1338,12 @@ def buy_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def renew_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ تایید تمدید", callback_data="renew:confirm"), InlineKeyboardButton("❌ انصراف", callback_data="renew:cancel")]]
-    )
+def renew_confirm_keyboard(discount: dict | None = None) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        discount_button_row(discount or {}, prefix="renew"),
+        [InlineKeyboardButton("✅ تایید تمدید", callback_data="renew:confirm"),
+         InlineKeyboardButton("❌ انصراف", callback_data="renew:cancel")],
+    ])
 
 
 def topup_amount_keyboard(method: str, unit_price: int) -> InlineKeyboardMarkup:
@@ -2485,21 +2817,7 @@ async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     renewal["mode"] = "plan"
     renewal["pkg"] = dict(pkg)
     renewal["idem"] = f"renew-plan-{update.effective_user.id}-{secrets.token_hex(8)}"
-    vol = "♾️ نامحدود (مصرف منصفانه)" if str(pkg.get("kind")) == "unlimited" else f"{int(pkg.get('gb') or 0)} گیگ"
-    days = int(pkg.get("days") or 0)
-    days_line = f"⏳ اعتبار: <b>{days}</b> روز (از اولین اتصال)\n" if days > 0 else ""
-    await edit_text(
-        query,
-        "🧾 <b>تایید تمدید سرویس</b>\n\n"
-        f"🪪 کانفیگ: <b>{html.escape(name)}</b>\n"
-        f"🎁 پلن: <b>{html.escape(str(pkg.get('title') or '-'))}</b>\n"
-        f"📦 حجم: <b>{vol}</b>\n"
-        f"{days_line}"
-        f"💰 مبلغ: <b>{price:,}</b> تومان\n\n"
-        "با تایید، همین کانفیگ با این پلن تمدید می‌شود (لینک اشتراک تغییر نمی‌کند).",
-        renew_confirm_keyboard(),
-    )
-    return RENEW_CONFIRM
+    return await _render_renew_plan_invoice(update, context)
 
 
 async def renew_gb_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2535,19 +2853,7 @@ async def build_renew_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE
     method_label = "کیف پول نماینده" if agent else "کسر از کیف پول"
     renewal["idem"] = f"renew-{update.effective_user.id}-{secrets.token_hex(8)}"
     renewal.update(unit_price=unit_price, total=total, method_label=method_label)
-    await send_flow_prompt(
-        update,
-        context,
-        "🧾 <b>تایید تمدید اشتراک</b>\n\n"
-        f"🪪 کانفیگ: <b>{html.escape(str(renewal.get('client_name') or 'بدون نام'))}</b>\n"
-        f"📦 حجم افزایشی: <b>{gb}</b> گیگ\n"
-        f"💵 قیمت هر گیگ: <b>{unit_price:,}</b> تومان\n"
-        f"💰 مبلغ کل: <b>{total:,}</b> تومان\n"
-        f"💳 روش پرداخت: <b>{method_label}</b>\n\n"
-        "در صورت تایید، حجم به اشتراک انتخاب‌شده اضافه می‌شود.",
-        renew_confirm_keyboard(),
-    )
-    return RENEW_CONFIRM
+    return await _render_renew_volume_invoice(update, context)
 
 
 async def renew_gb_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2644,6 +2950,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             unit_price=unit_price,
             final_total=total,
             idempotency_key=str(renewal.get("idem") or query.id),
+            discount_code=stored_discount_code(context, "renewal"),
         )
     except ValueError as exc:
         clear_flow_state(context)
@@ -2710,6 +3017,7 @@ async def renew_confirm_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
             sub_id=sub_id,
             pkg=pkg,
             idempotency_key=str(renewal.get("idem") or query.id),
+            discount_code=stored_discount_code(context, "renewal"),
         )
     except ValueError as exc:
         clear_flow_state(context)
@@ -3720,7 +4028,15 @@ def build_main_conversation() -> ConversationHandler:
         PKG_CONFIRM: [
             MessageHandler(_nav_filter, handle_nav_btn),
             CallbackQueryHandler(pkg_confirm, pattern=r"^pkg:ok:[A-Za-z0-9_\-]+:(?:-|\d+)$"),
+            CallbackQueryHandler(pkg_discount_start, pattern=r"^buy:disc:add$"),
+            CallbackQueryHandler(pkg_discount_clear, pattern=r"^buy:disc:clear$"),
             CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+        ],
+        PKG_DISCOUNT: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(pkg_discount_back, pattern=r"^buy:disc:back$"),
+            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, pkg_discount_typed),
         ],
         RENEW_SELECT: [
             MessageHandler(_nav_filter, handle_nav_btn),
@@ -3752,7 +4068,15 @@ def build_main_conversation() -> ConversationHandler:
         RENEW_CONFIRM: [
             MessageHandler(_nav_filter, handle_nav_btn),
             CallbackQueryHandler(renew_confirm, pattern=r"^renew:confirm$"),
+            CallbackQueryHandler(renew_discount_start, pattern=r"^renew:disc:add$"),
+            CallbackQueryHandler(renew_discount_clear, pattern=r"^renew:disc:clear$"),
             CallbackQueryHandler(renew_cancel, pattern=r"^renew:cancel$"),
+        ],
+        RENEW_DISCOUNT: [
+            MessageHandler(_nav_filter, handle_nav_btn),
+            CallbackQueryHandler(renew_discount_back, pattern=r"^renew:disc:back$"),
+            CallbackQueryHandler(renew_cancel, pattern=r"^renew:cancel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, renew_discount_typed),
         ],
         TOPUP_AMOUNT: [
             MessageHandler(_nav_filter, handle_nav_btn),

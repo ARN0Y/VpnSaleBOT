@@ -15,6 +15,7 @@ const AgentRequests = React.lazy(() => import("@/pages/AgentRequests").then((m) 
 const Subscriptions = React.lazy(() => import("@/pages/Subscriptions").then((m) => ({ default: m.Subscriptions })));
 const SubscriptionDetail = React.lazy(() => import("@/pages/SubscriptionDetail").then((m) => ({ default: m.SubscriptionDetail })));
 const Broadcast = React.lazy(() => import("@/pages/Broadcast").then((m) => ({ default: m.Broadcast })));
+const Discounts = React.lazy(() => import("@/pages/Discounts").then((m) => ({ default: m.Discounts })));
 const Events = React.lazy(() => import("@/pages/Events").then((m) => ({ default: m.Events })));
 const PasarGuardManage = React.lazy(() => import("@/pages/PasarGuardManage").then((m) => ({ default: m.PasarGuardManage })));
 const PasarGuardAdminDetail = React.lazy(() => import("@/pages/PasarGuardAdminDetail").then((m) => ({ default: m.PasarGuardAdminDetail })));
@@ -56,6 +57,7 @@ export function App() {
             <Route path="agent-requests" element={<AgentRequests />} />
             <Route path="subscriptions" element={<Subscriptions />} />
             <Route path="subscriptions/:subId" element={<SubscriptionDetail />} />
+            <Route path="discounts" element={<Discounts />} />
             <Route path="broadcast" element={<Broadcast />} />
             <Route path="pasarguard" element={<PasarGuardManage />} />
             <Route path="pasarguard/admin/:username" element={<PasarGuardAdminDetail />} />
