@@ -2,9 +2,9 @@ import { fileURLToPath, URL } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// The SPA is served by FastAPI under /admin/app, so assets must resolve there.
+// The SPA is the panel: FastAPI serves it at /admin itself.
 export default defineConfig({
-  base: "/admin/app/",
+  base: "/admin/",
   plugins: [react()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },

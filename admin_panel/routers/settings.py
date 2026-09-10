@@ -1,22 +1,19 @@
+"""Shared helpers for the settings the JSON API writes.
+
+The Jinja settings page these grew up in is gone; the React panel posts
+to /admin/api/v1/settings, which normalises through the same functions so
+a value can only be interpreted one way.
+"""
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Form, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import Request
 
 from async_storefront.env_sync import sync_env_from_admin
-from async_storefront.util import now_ts
 
-from ..backup import (
-    DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS,
-    list_backup_files,
-    normalize_xui_backup_timeout,
-    run_backup_now,
-)
-from .common import current_admin_username, db, render
+from ..backup import DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS, normalize_xui_backup_timeout
 
-router = APIRouter(prefix="/admin/settings")
 LOG = logging.getLogger(__name__)
 
 EDITABLE_KEYS = (
@@ -47,41 +44,6 @@ SETTING_FORM_DEFAULTS = {
 }
 BACKUP_UNITS = {"minutes", "hours", "days", "weeks"}
 PANEL_FORM_KEYS = {"panel_base_url", "panel_username", "panel_password", "panel_inbound_id", "sub_link_base"}
-SETTING_META = {
-    "price_per_gb": {
-        "label": "قیمت هر گیگ",
-        "help": "تعرفه پایه برای کاربران عادی؛ نماینده‌ها اگر قیمت اختصاصی داشته باشند از قیمت خودشان استفاده می‌کنند.",
-        "type": "number",
-        "min": "0",
-    },
-    "minimum_purchase_gb": {
-        "label": "حداقل میزان خرید",
-        "help": "کمترین حجم مجاز برای خرید جدید و تمدید. دکمه‌های ربات با ضریب‌های ۱، ۲، ۳ و ۴ همین مقدار ساخته می‌شوند.",
-        "type": "number",
-        "min": "1",
-    },
-    "card_number": {"label": "شماره کارت"},
-    "card_name": {"label": "نام صاحب کارت"},
-    "crypto_address": {"label": "آدرس تتر"},
-    "support_id": {"label": "آیدی پشتیبانی"},
-    "admin_user_ids": {
-        "label": "ادمین‌های ربات",
-        "help": "هر خط یا هر کاما یک user_id ادمین. اگر خالی باشد، ADMIN_ID اصلی fallback می‌شود.",
-    },
-    "default_agent_price_per_gb": {"label": "قیمت پیش‌فرض نماینده", "type": "number", "min": "0"},
-    "broadcast_rate_per_second": {
-        "label": "سرعت ارسال پیام همگانی",
-        "help": "حداکثر پیام در ثانیه برای broadcast؛ برای امنیت زیر سقف تلگرام clamp می‌شود.",
-        "type": "number",
-        "min": "1",
-    },
-    "broadcast_concurrency": {
-        "label": "همزمانی ارسال پیام همگانی",
-        "help": "تعداد workerهای همزمان برای broadcast. نرخ نهایی همچنان با محدودکننده کنترل می‌شود.",
-        "type": "number",
-        "min": "1",
-    },
-}
 
 
 def as_int(value, default: int = 0) -> int:
@@ -221,185 +183,3 @@ def sync_env(request: Request, *, settings: dict[str, str] | None = None, panel:
         sync_env_from_admin(env_path, settings=settings, panel=panel)
     except Exception:
         LOG.exception("failed to sync admin settings to .env")
-
-
-@router.get("")
-async def settings_index(request: Request):
-    database = db(request)
-    all_settings = {item["key"]: item["value"] for item in await database.admin_list_settings()}
-    settings = [
-        {
-            "key": key,
-            "value": all_settings.get(key, SETTING_FORM_DEFAULTS.get(key, "")),
-            **SETTING_META.get(key, {}),
-        }
-        for key in EDITABLE_KEYS
-    ]
-    panel_settings = await database.get_panel_settings()
-    backup = {
-        "enabled": all_settings.get("backup_enabled", "0"),
-        "interval_value": all_settings.get("backup_interval_value", all_settings.get("backup_interval_days", "20")),
-        "interval_unit": all_settings.get("backup_interval_unit", "minutes"),
-        "interval_days": all_settings.get("backup_interval_days", "1"),
-        "xui_timeout_seconds": all_settings.get("backup_xui_timeout_seconds", str(DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS)),
-        "include_bot": all_settings.get("backup_include_bot", "1"),
-        "include_xui": all_settings.get("backup_include_xui", "1"),
-        "include_pg": all_settings.get("backup_include_pg", "0"),
-        "telegram_chat_id": all_settings.get("backup_telegram_chat_id", ""),
-        # Never render the token itself; only whether one is configured.
-        "bot_token_set": bool(str(all_settings.get("backup_bot_token", "") or "").strip()),
-        "pg_mode": all_settings.get("pg_backup_mode", "auto"),
-        "pg_compose_file": all_settings.get("pg_backup_compose_file", "/opt/pasarguard/docker-compose.yml"),
-        "pg_max_age_minutes": all_settings.get("pg_backup_max_age_minutes", "360"),
-        "last_pg_status": all_settings.get("backup_last_pg_status", "off"),
-        "last_pg_mode": all_settings.get("backup_last_pg_mode", ""),
-        "last_pg_db_mb": round(as_int(all_settings.get("backup_last_pg_db_bytes", "0"), 0) / (1024 * 1024), 1),
-        "last_run_ts": all_settings.get("backup_last_run_ts", "0"),
-        "last_status": all_settings.get("backup_last_status", "never"),
-        "last_file": all_settings.get("backup_last_file", ""),
-        "last_error": all_settings.get("backup_last_error", ""),
-        "files": list_backup_files(request.app.state.backup_dir),
-        "dir": str(request.app.state.backup_dir),
-    }
-    master_sales = all_settings.get("sales_status", "open")
-    sales = {
-        "status": master_sales,
-        "user_status": all_settings.get("sales_status_user", master_sales),
-        "agent_status": all_settings.get("sales_status_agent", master_sales),
-        "updated_at": all_settings.get("sales_status_updated_at", "0"),
-        "updated_by": all_settings.get("sales_status_updated_by", ""),
-        "user_updated_at": all_settings.get("sales_status_user_updated_at", all_settings.get("sales_status_updated_at", "0")),
-        "user_updated_by": all_settings.get("sales_status_user_updated_by", all_settings.get("sales_status_updated_by", "")),
-        "agent_updated_at": all_settings.get("sales_status_agent_updated_at", all_settings.get("sales_status_updated_at", "0")),
-        "agent_updated_by": all_settings.get("sales_status_agent_updated_by", all_settings.get("sales_status_updated_by", "")),
-    }
-    return render(
-        request,
-        "settings.html",
-        {
-            "settings": settings,
-            "panel": dict(panel_settings) if panel_settings else {},
-            "backup": backup,
-            "sales": sales,
-            "ui_mode": all_settings.get("ui_mode", "modern"),
-            "title": "تنظیمات",
-        },
-    )
-
-
-@router.post("")
-async def settings_update(request: Request):
-    form = await request.form()
-    database = db(request)
-    current_settings = {item["key"]: item["value"] for item in await database.admin_list_settings()}
-    old_sales_status = str(current_settings.get("sales_status", "open") or "open").strip().lower()
-    values = settings_values_from_form(form, current_settings)
-    new_sales_status = "closed" if str(form.get("sales_status", "open")).strip().lower() == "closed" else "open"
-    sales_changed = old_sales_status != new_sales_status
-    values["sales_status"] = new_sales_status
-    if sales_changed:
-        values["sales_status_updated_at"] = str(now_ts())
-        values["sales_status_updated_by"] = current_admin_username(request) or "admin"
-    values.update(backup_values_from_form(form, current_settings))
-
-    current_panel = await database.get_panel_settings()
-    await database.admin_update_settings(values)
-    panel_values = None
-    if any(key in form for key in PANEL_FORM_KEYS):
-        panel_values = panel_values_from_form(form, current_panel)
-        await database.upsert_panel_settings(
-            **panel_values,
-            cookie=str(current_panel["cookie"] or "") if current_panel else "",
-            cookie_ts=int(current_panel["cookie_ts"] or 0) if current_panel else 0,
-        )
-    sync_env(request, settings=values, panel=panel_values)
-
-    if sales_changed:
-        title, text = sales_broadcast(new_sales_status)
-        targets = await database.admin_broadcast_targets("all")
-        await database.create_admin_event(
-            kind="sales_status_broadcast",
-            title=title,
-            payload={"audience": "all", "text": text, "already_html": True, "sales_status": new_sales_status},
-            total_count=len(targets),
-        )
-    return RedirectResponse("/admin/settings", status_code=303)
-
-
-@router.post("/sales")
-async def update_sales_status(
-    request: Request,
-    sales_status: str = Form("open"),
-    audience: str = Form("all"),
-):
-    database = db(request)
-    audience = normalize_sales_audience(audience)
-    new_sales_status = "closed" if str(sales_status or "open").strip().lower() == "closed" else "open"
-    master = str(await database.get_setting("sales_status", "open") or "open").strip().lower()
-    admin_name = current_admin_username(request) or "admin"
-    now = str(now_ts())
-
-    # Which concrete setting keys this audience controls.
-    if audience == "all":
-        target_keys = ("sales_status", "sales_status_user", "sales_status_agent")
-    elif audience == "agent":
-        target_keys = ("sales_status_agent",)
-    else:
-        target_keys = ("sales_status_user",)
-
-    # Skip a no-op (and its broadcast) when nothing actually changes.
-    changed = False
-    for key in target_keys:
-        current = str(await database.get_setting(key, master) or master).strip().lower()
-        if current != new_sales_status:
-            changed = True
-            break
-    if not changed:
-        return RedirectResponse("/admin/settings", status_code=303)
-
-    values: dict[str, str] = {}
-    for key in target_keys:
-        values[key] = new_sales_status
-        values[f"{key}_updated_at"] = now
-        values[f"{key}_updated_by"] = admin_name
-    await database.admin_update_settings(values)
-    sync_env(request, settings=values)
-
-    broadcast_target, _label = SALES_AUDIENCES[audience]
-    title, text = sales_broadcast(new_sales_status, audience)
-    targets = await database.admin_broadcast_targets(broadcast_target)
-    await database.create_admin_event(
-        kind="sales_status_broadcast",
-        title=title,
-        payload={
-            "audience": broadcast_target,
-            "text": text,
-            "already_html": True,
-            "sales_status": new_sales_status,
-        },
-        total_count=len(targets),
-    )
-    return RedirectResponse("/admin/settings", status_code=303)
-
-
-@router.post("/ui-mode")
-async def update_ui_mode(request: Request, ui_mode: str = Form("modern")):
-    mode = "classic" if str(ui_mode).strip().lower() == "classic" else "modern"
-    await db(request).admin_update_settings({"ui_mode": mode})
-    # Switching to modern → open the new dashboard; classic stays here.
-    return RedirectResponse("/admin/app" if mode == "modern" else "/admin/settings", status_code=303)
-
-
-@router.post("/backup/run")
-async def run_backup(request: Request):
-    await run_backup_now(request.app, source="manual")
-    return RedirectResponse("/admin/settings", status_code=303)
-
-
-@router.get("/backup/download/{filename}")
-async def download_backup(request: Request, filename: str):
-    safe_name = filename.replace("/", "").replace("\\", "")
-    path = request.app.state.backup_dir / safe_name
-    if not path.exists() or path.suffix != ".zip":
-        return RedirectResponse("/admin/settings", status_code=303)
-    return FileResponse(path, filename=safe_name, media_type="application/zip")

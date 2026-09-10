@@ -1198,17 +1198,6 @@ async def pg_create_admin_for_reseller(request: Request, user_id: int):
             "panel_url": (await _pg_settings(database))["pg_base_url"]}
 
 
-@router.post("/ui-mode")
-async def set_ui_mode(request: Request):
-    """Switch the panel UI between the modern SPA and the classic Jinja panel.
-    Applies instantly (the /admin entry point reads this on each request — no
-    restart needed)."""
-    body = await _json_body(request)
-    mode = "classic" if str(body.get("mode")) == "classic" else "modern"
-    await db(request).admin_update_settings({"ui_mode": mode})
-    return {"ok": True, "mode": mode}
-
-
 # ───────────────────────── discount codes ─────────────────────────
 
 

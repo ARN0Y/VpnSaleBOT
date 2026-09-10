@@ -90,8 +90,14 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
         # The SPA shell + its static assets load without server auth; the app's
         # JavaScript authenticates itself against the protected JSON API and
-        # renders its own login screen on a 401.
-        if path == "/admin/app" or path.startswith("/admin/app/"):
+        # renders its own login screen on a 401. Everything that returns real
+        # data — the JSON API and the Telegram file proxy, which serves payment
+        # receipts — stays behind the session cookie.
+        if path == "/admin" or (
+            path.startswith("/admin/")
+            and not path.startswith("/admin/api/")
+            and not path.startswith("/admin/file/")
+        ):
             return await call_next(request)
 
         if path in {"/admin/login", "/admin/api/v1/login"}:

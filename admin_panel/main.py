@@ -6,7 +6,7 @@ import contextlib
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional at import time
 from .auth import AuthConfig, install_auth
 from .backup import backup_scheduler
 from .event_worker import event_worker
-from .routers import agent_requests, broadcast, dashboard, events, files, orders, settings, subscriptions, topups, users
+from .routers import files
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
@@ -92,16 +92,16 @@ def _mount_spa(app: FastAPI) -> None:
         return
     assets_dir = SPA_DIST / "assets"
     if assets_dir.exists():
-        app.mount("/admin/app/assets", StaticFiles(directory=str(assets_dir)), name="spa-assets")
+        app.mount("/admin/assets", StaticFiles(directory=str(assets_dir)), name="spa-assets")
 
     index_file = SPA_DIST / "index.html"
     dist_root = SPA_DIST.resolve()
 
-    @app.get("/admin/app")
+    @app.get("/admin")
     async def spa_root() -> FileResponse:
         return FileResponse(index_file)
 
-    @app.get("/admin/app/{spa_path:path}")
+    @app.get("/admin/{spa_path:path}")
     async def spa_catch_all(spa_path: str) -> FileResponse:
         # Serve real files (favicon, etc.) when present, else the SPA shell so
         # client-side routing works on deep links/refreshes. Resolve and confine
@@ -115,6 +115,7 @@ def _mount_spa(app: FastAPI) -> None:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="NavidVPN Admin", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # Only the login page is still server-rendered; the panel itself is the SPA.
     app.state.templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     install_auth(app, AuthConfig.from_env())
     app.state.db_path = Path(os.getenv("BOT_DB_PATH", "navidvpn.db")).resolve()
@@ -129,34 +130,13 @@ def create_app() -> FastAPI:
     async def root() -> RedirectResponse:
         return RedirectResponse("/admin", status_code=303)
 
-    # New React/shadcn dashboard (served as static once built).
-    _mount_spa(app)
-
-    # Single entry point: /admin serves the UI the admin chose in settings
-    # (modern SPA or classic Jinja). Registered before the dashboard router so
-    # it takes precedence for GET /admin. Switching is instant (no restart).
-    @app.get("/admin")
-    async def admin_home(request: Request):
-        mode = "modern"
-        try:
-            mode = (await request.app.state.db.get_setting("ui_mode", "modern") or "modern").strip().lower()
-        except Exception:
-            pass
-        if mode != "classic" and SPA_DIST.exists():
-            return RedirectResponse("/admin/app", status_code=307)
-        return await dashboard.overview(request)
-
+    # The JSON API and the Telegram file proxy first, so the SPA's catch-all
+    # (mounted at /admin) can never shadow them.
     app.include_router(api.router)
-    app.include_router(dashboard.router)
-    app.include_router(users.router)
-    app.include_router(topups.router)
-    app.include_router(agent_requests.router)
-    app.include_router(broadcast.router)
-    app.include_router(events.router)
-    app.include_router(orders.router)
-    app.include_router(subscriptions.router)
-    app.include_router(settings.router)
     app.include_router(files.router)
+
+    # The React dashboard IS the panel — there is no second UI to choose between.
+    _mount_spa(app)
     return app
 
 
