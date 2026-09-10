@@ -18,7 +18,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { JalaliDateInput } from "@/components/ui/jalali-date-input";
 import { useToast } from "@/components/ui/toast";
 import { UserLink } from "@/components/UserLink";
-import { toman, jalaliDate } from "@/lib/utils";
+import { toman, jalaliDate, jalaliDay } from "@/lib/utils";
 import { startOfDayTs, endOfDayTs } from "@/lib/jalali";
 import type { DiscountCode, DiscountBundle } from "@/lib/types";
 
@@ -520,27 +520,33 @@ export function Discounts() {
                         {c.title && <div className="text-[0.68rem] text-muted-foreground">{c.title}</div>}
                       </TD>
                       <TD className="whitespace-nowrap">
-                        {c.kind === "percent" ? `${c.value}٪` : `${toman(c.value)} ت`}
+                        <bdi>{c.kind === "percent" ? `${c.value}٪` : `${toman(c.value)} ت`}</bdi>
                         {c.kind === "percent" && c.max_discount_toman > 0 && (
-                          <div className="text-[0.65rem] text-muted-foreground">سقف {toman(c.max_discount_toman)} ت</div>
+                          <div className="text-[0.65rem] text-muted-foreground">
+                            سقف <bdi>{toman(c.max_discount_toman)} ت</bdi>
+                          </div>
                         )}
                       </TD>
                       <TD>
                         <div className="flex flex-wrap gap-1">
                           {limits.map((l, i) => (
-                            <span key={i} className="rounded-md bg-white/[0.04] px-1.5 py-0.5 text-[0.65rem] text-muted-foreground">{l}</span>
+                            <span key={i} className="rounded-md bg-white/[0.04] px-1.5 py-0.5 text-[0.65rem] text-muted-foreground"><bdi>{l}</bdi></span>
                           ))}
                         </div>
                         {(c.starts_at > 0 || c.ends_at > 0) && (
                           <div className="mt-1 text-[0.65rem] text-muted-foreground">
-                            {c.starts_at > 0 ? jalaliDate(c.starts_at) : "…"} تا {c.ends_at > 0 ? jalaliDate(c.ends_at) : "…"}
+                            {/* Each date is its own isolated run, so the two of
+                                them cannot swap places around the "تا". */}
+                            <bdi>{c.starts_at > 0 ? jalaliDay(c.starts_at) : "…"}</bdi>
+                            {" تا "}
+                            <bdi>{c.ends_at > 0 ? jalaliDay(c.ends_at) : "…"}</bdi>
                           </div>
                         )}
                       </TD>
                       <TD className="whitespace-nowrap text-xs">
-                        {toman(c.used_count)}{c.max_uses > 0 ? ` / ${toman(c.max_uses)}` : ""}
+                        <bdi>{toman(c.used_count)}{c.max_uses > 0 ? ` / ${toman(c.max_uses)}` : ""}</bdi>
                         <div className="text-[0.65rem] text-muted-foreground">
-                          {c.max_uses_per_user > 0 ? `${c.max_uses_per_user} بار هر نفر` : "نامحدود هر نفر"}
+                          <bdi>{c.max_uses_per_user > 0 ? `${c.max_uses_per_user} بار هر نفر` : "نامحدود هر نفر"}</bdi>
                         </div>
                       </TD>
                       <TD><Badge variant={st.variant}>{st.label}</Badge></TD>

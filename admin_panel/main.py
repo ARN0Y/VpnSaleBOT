@@ -6,7 +6,7 @@ import contextlib
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -103,13 +103,18 @@ def _mount_spa(app: FastAPI) -> None:
 
     @app.get("/admin/{spa_path:path}")
     async def spa_catch_all(spa_path: str) -> FileResponse:
-        # Serve real files (favicon, etc.) when present, else the SPA shell so
+        # Serve real files (fonts, favicon…) when present, else the SPA shell so
         # client-side routing works on deep links/refreshes. Resolve and confine
         # to dist/ so a crafted path like ../../etc/passwd cannot escape.
         if spa_path:
             candidate = (SPA_DIST / spa_path).resolve()
             if candidate.is_file() and candidate.is_relative_to(dist_root):
                 return FileResponse(candidate)
+            # A request that names a file wants that file. Handing it index.html
+            # is a 200 that silently delivers HTML where a font or script was
+            # expected — which is exactly how a stale font path went unnoticed.
+            if Path(spa_path).suffix:
+                raise HTTPException(status_code=404, detail="not found")
         return FileResponse(index_file)
 
 

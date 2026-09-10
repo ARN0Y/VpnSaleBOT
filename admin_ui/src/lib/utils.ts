@@ -22,6 +22,18 @@ export function gbFromBytes(bytes: unknown): string {
   return (n / 1024 ** 3).toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
+/** Just the day, no clock. Use where a range is shown: the time adds nothing
+ *  and its comma makes the bidi algorithm reorder the two dates into nonsense. */
+export function jalaliDay(ts: unknown): string {
+  const seconds = Number((ts as number) || 0);
+  if (!seconds) return "—";
+  try {
+    return new Intl.DateTimeFormat("fa-IR", { dateStyle: "short" }).format(new Date(seconds * 1000));
+  } catch {
+    return new Date(seconds * 1000).toLocaleDateString();
+  }
+}
+
 export function jalaliDate(ts: unknown): string {
   const seconds = Number((ts as number) || 0);
   if (!seconds) return "—";
