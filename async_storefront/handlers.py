@@ -28,11 +28,9 @@ from .config import Settings
 from . import catalog
 from .db import AsyncDatabase
 from . import discounts
-from .panel import PanelClient
 from .pasarguard import PasarGuardClient
-from .provisioning import ProvisioningService, package_price, parse_packages, PG_INBOUND_SENTINEL
+from .provisioning import ProvisioningService, package_price, PG_INBOUND_SENTINEL
 from .qr import QRService
-from .util import resolve_proxy_value
 
 try:
     import jdatetime
@@ -42,7 +40,6 @@ except Exception:
 
 LOG = logging.getLogger(__name__)
 
-BUY_GB, BUY_CUSTOM_GB, BUY_QTY, BUY_NAME_MODE, BUY_NAME_INPUT, BUY_CONFIRM = range(6)
 TOPUP_AMOUNT, TOPUP_CUSTOM_AMOUNT, TOPUP_AMOUNT_CONFIRM, TOPUP_C2C_PHOTO, TOPUP_CRYPTO_TXID = range(10, 15)
 AGENT_TEXT, AGENT_CONFIRM = range(30, 32)
 RENEW_SELECT, RENEW_SEARCH, RENEW_GB, RENEW_CUSTOM_GB, RENEW_CONFIRM, RENEW_DISCOUNT = range(40, 46)
@@ -62,14 +59,11 @@ BTN_SUPPORT = "🛟 تماس با پشتیبانی"
 BTN_TEST_CONFIG = "🆓 دریافت تست رایگان"
 BTN_AGENT_REQ = "🤝 درخواست نمایندگی"
 BTN_INFINITE = "♾️ بسته‌ی بی‌نهایت"
-BTN_PANEL2 = "🌐 سرور اختصاصی"
 
-PANEL2_PRICE_DEFAULT = "7000"
 
 # ── Editable reply-keyboard labels ────────────────────────────────────────────
 # Admins can rename the bot's menu buttons from the panel. Each action has a
 # default label and a settings key; the live label is the override or default.
-# panel2 keeps its own (panel2_label) reply button, fixed here for routing.
 NAV_ACTIONS: tuple[tuple[str, str], ...] = (
     ("buy", BTN_BUY),
     ("renew", BTN_RENEW),
@@ -100,7 +94,6 @@ def _rebuild_nav_index(labels: dict[str, str]) -> None:
         clean = (label or "").strip()
         if clean:
             mapping[clean] = action
-    mapping[BTN_PANEL2.strip()] = "panel2"
     global _NAV_TEXT_TO_ACTION, _NAV_TEXTSET
     _NAV_TEXT_TO_ACTION = mapping
     _NAV_TEXTSET = set(mapping.keys())
@@ -189,13 +182,13 @@ def max_custom_gb(min_gb: int) -> int:
     return max(DEFAULT_CUSTOM_MAX_GB, int(min_gb) * max(GB_BUTTON_FACTORS))
 
 
-async def gb_choice_keyboard(db: AsyncDatabase, user_id: int, prefix: str, cancel_data: str, min_gb: int = 1, *, panel2: bool = False) -> InlineKeyboardMarkup:
+async def gb_choice_keyboard(db: AsyncDatabase, user_id: int, prefix: str, cancel_data: str, min_gb: int = 1) -> InlineKeyboardMarkup:
     minimum = _positive_int(min_gb, 1)
     agent = await db.get_agent(user_id)
     buttons = []
     for factor in GB_BUTTON_FACTORS:
         gb = minimum * factor
-        unit = await buy_unit_price(db, user_id, gb, agent, panel2=panel2)
+        unit = await unit_price_for_gb(db, user_id, gb, agent)
         buttons.append(
             InlineKeyboardButton(f"{gb} گیگ • {gb * unit:,} ت", callback_data=f"{prefix}:gb:{gb}")
         )
@@ -206,14 +199,6 @@ async def gb_choice_keyboard(db: AsyncDatabase, user_id: int, prefix: str, cance
             [InlineKeyboardButton("✍️ حجم دلخواه", callback_data=f"{prefix}:gb:custom")],
             [InlineKeyboardButton("❌ انصراف", callback_data=cancel_data)],
         ]
-    )
-
-
-def gb_choice_prompt(title: str, min_gb: int) -> str:
-    return (
-        f"{title}\n\n"
-        f"📦 حداقل حجم مجاز: <b>{min_gb}</b> گیگ\n"
-        "یکی از حجم‌های پیشنهادی را انتخاب کنید یا برای عدد دقیق‌تر <b>حجم دلخواه</b> را بزنید."
     )
 
 
@@ -235,10 +220,6 @@ def invalid_gb_text(min_gb: int, *, renewal: bool = False) -> str:
     )
 
 
-async def infinite_enabled(db: AsyncDatabase) -> bool:
-    return str(await db.get_setting("infinite_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
-
-
 async def free_test_enabled(db: AsyncDatabase) -> bool:
     """One-time free test for regular (non-agent) users — toggle in settings."""
     return str(await db.get_setting("free_test_enabled", "1") or "1").strip().lower() not in {"0", "false", "off", "no"}
@@ -251,89 +232,6 @@ async def panel1_enabled(db: AsyncDatabase) -> bool:
 
 
 # ───────────────────────── Second (dedicated) 3x-ui panel ─────────────────────────
-async def panel2_available(db: AsyncDatabase) -> bool:
-    """True when the optional second panel is enabled and minimally configured."""
-    enabled = str(await db.get_setting("panel2_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
-    if not enabled:
-        return False
-    return bool((await db.get_setting("panel2_base_url", "")).strip())
-
-
-async def panel2_label(db: AsyncDatabase) -> str:
-    return (await db.get_setting("panel2_label", "") or "").strip() or "سرور اختصاصی"
-
-
-async def panel2_price_per_gb(db: AsyncDatabase) -> int:
-    return _positive_int(await db.get_setting("panel2_price_per_gb", PANEL2_PRICE_DEFAULT), int(PANEL2_PRICE_DEFAULT))
-
-
-async def is_panel2_subscription(db: AsyncDatabase, sub: dict) -> bool:
-    """Best-effort: a subscription belongs to the second panel when its inbound
-    matches the configured panel2 inbound (and that inbound is distinct). Used to
-    keep panel2 services out of the (panel1-only) renewal flow in v1."""
-    if not await panel2_available(db):
-        return False
-    try:
-        p2_inbound = int(str(await db.get_setting("panel2_inbound_id", "0")).strip() or "0")
-        p1_inbound = int(str(await db.get_setting("panel_inbound_id", "0")).strip() or "0")
-        sub_inbound = int(sub.get("inbound_id") or 0)
-    except Exception:
-        return False
-    return p2_inbound > 0 and sub_inbound == p2_inbound and p2_inbound != p1_inbound
-
-
-async def buy_unit_price(db: AsyncDatabase, user_id: int, gb: int, agent=None, *, panel2: bool = False) -> int:
-    """Per-GB price for the buy flow. For the dedicated second panel an agent
-    keeps their own flat rate (if set), otherwise the panel's dedicated price
-    applies; regular users always pay the dedicated price."""
-    if not panel2:
-        return await unit_price_for_gb(db, user_id, gb, agent)
-    if agent is None:
-        agent = await db.get_agent(user_id)
-    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
-    if agent_price > 0:
-        return agent_price
-    return await panel2_price_per_gb(db)
-
-
-async def get_panel2_provisioning(context: ContextTypes.DEFAULT_TYPE) -> "ProvisioningService | None":
-    """Lazily build (and cache) a ProvisioningService bound to the second panel.
-
-    The panel's proxy is resolved from its own settings (panel2_use_proxy /
-    panel2_proxy_url) at build time; changing the proxy needs a bot restart, but
-    credentials/inbound are read live on every request like the primary panel.
-    """
-    app = context.application
-    db: AsyncDatabase = app.bot_data["db"]
-    if not await panel2_available(db):
-        return None
-    prov2 = app.bot_data.get("provisioning2")
-    if prov2 is not None:
-        return prov2
-    settings: Settings = app.bot_data["settings"]
-    try:
-        proxy = resolve_proxy_value(
-            await db.get_setting("panel2_proxy_url", ""),
-            await db.get_setting("panel2_use_proxy", ""),
-        )
-        panel2 = PanelClient(
-            db,
-            proxy_url=proxy,
-            pool_size=settings.panel_pool_size,
-            timeout_seconds=settings.panel_timeout_seconds,
-            kv_prefix="panel2_",
-        )
-    except Exception:
-        # A malformed proxy URL (or any client-construction error) must not blow
-        # up the buy flow — surface it as "unavailable" instead.
-        LOG.exception("failed to build second-panel client")
-        return None
-    prov2 = ProvisioningService(db, panel2, app.bot_data["agents"])
-    app.bot_data["panel2"] = panel2
-    app.bot_data["provisioning2"] = prov2
-    return prov2
-
-
 # ───────────────────────── PasarGuard backend ─────────────────────────
 async def pg_configured(db: AsyncDatabase) -> bool:
     enabled = str(await db.get_setting("pg_enabled", "0") or "0").strip().lower() in {"1", "true", "on", "yes"}
@@ -391,27 +289,12 @@ async def get_pg_client(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ───────────────────────── Sales catalog (categories → plans) ─────────────────────────
-# Legacy per-panel package lists. Kept only so the one-time catalog migration can
-# read them; nothing in the buy flow consults them any more.
-PANEL_PKG_SETTING = {"1": "panel_packages", "2": "panel2_packages", "pg": "pg_packages"}
-
-
 async def get_catalog(context: ContextTypes.DEFAULT_TYPE) -> dict:
     db: AsyncDatabase = context.application.bot_data["db"]
     return await catalog.load_catalog(db)
 
 
 async def _provisioning_for_panel(context: ContextTypes.DEFAULT_TYPE, panel_key: str):
-    if panel_key == "2":
-        return await get_panel2_provisioning(context)
-    return context.application.bot_data["provisioning"]
-
-
-async def _provisioning_for_plan(context: ContextTypes.DEFAULT_TYPE, plan: dict):
-    """Resolve the provisioning service for a plan's own target."""
-    target = plan.get("target") or {}
-    if target.get("kind") == catalog.TARGET_XUI:
-        return await _provisioning_for_panel(context, str(target.get("panel") or "1"))
     return context.application.bot_data["provisioning"]
 
 
@@ -1273,8 +1156,6 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
             InlineKeyboardButton(lbl["account"], callback_data="menu:account"),
         ],
     ]
-    if await panel2_available(db):
-        rows.insert(1, [InlineKeyboardButton(f"🌐 {await panel2_label(db)}", callback_data="menu:buy2")])
     if agent and not int(agent["disabled"] or 0):
         try:
             permissions = {str(item) for item in json.loads(agent["permissions"] or "[]")}
@@ -1306,16 +1187,6 @@ def wallet_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def config_name_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🎲 نام رندوم", callback_data="buy:name:random")],
-            [InlineKeyboardButton("✍️ نام دلخواه", callback_data="buy:name:custom")],
-            [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
-        ]
-    )
-
-
 def _gb_token(gb: int | None) -> str:
     """Volume marker inside callback data; "-" means the plan sets its own."""
     return "-" if gb is None else str(int(gb))
@@ -1338,12 +1209,6 @@ def package_confirm_keyboard(plan_id: str, gb: int | None, discount: dict | None
         [InlineKeyboardButton("✅ تایید و خرید", callback_data=f"pkg:ok:{plan_id}:{_gb_token(gb)}"),
          InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
     ])
-
-
-def buy_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ تایید و خرید", callback_data="buy:confirm"), InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]
-    )
 
 
 def renew_confirm_keyboard(discount: dict | None = None) -> InlineKeyboardMarkup:
@@ -1385,42 +1250,6 @@ def agent_admin_decision_keyboard(ref_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✅ تایید نماینده کیف‌پولی", callback_data=f"agent_admin:approve:{ref_id}")],
             [InlineKeyboardButton("❌ رد", callback_data=f"agent_admin:reject:{ref_id}")],
-        ]
-    )
-
-
-def qty_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("۱ عدد", callback_data="buy:qty:1"),
-                InlineKeyboardButton("۲ عدد", callback_data="buy:qty:2"),
-                InlineKeyboardButton("۳ عدد", callback_data="buy:qty:3"),
-            ],
-            [
-                InlineKeyboardButton("۵ عدد", callback_data="buy:qty:5"),
-                InlineKeyboardButton("۱۰ عدد", callback_data="buy:qty:10"),
-                InlineKeyboardButton("✍️ دلخواه", callback_data="buy:qty:custom"),
-            ],
-            [InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")],
-        ]
-    )
-
-
-def agent_admin_price_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("۱۵۰ هزار/گیگ", callback_data="agent_admin:pg:150000"),
-                InlineKeyboardButton("۱۸۰ هزار/گیگ", callback_data="agent_admin:pg:180000"),
-            ],
-            [
-                InlineKeyboardButton("۲۰۰ هزار/گیگ", callback_data="agent_admin:pg:200000"),
-                InlineKeyboardButton("۲۵۰ هزار/گیگ", callback_data="agent_admin:pg:250000"),
-            ],
-            [InlineKeyboardButton("✍️ قیمت سفارشی", callback_data="agent_admin:pg:custom")],
-            [InlineKeyboardButton("🔁 پیش‌فرض سیستم", callback_data="agent_admin:pg:def")],
-            [InlineKeyboardButton("❌ لغو تایید", callback_data="agent_admin:cancel")],
         ]
     )
 
@@ -1501,7 +1330,7 @@ def agent_admin_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_panel2: bool = False, has_primary: bool = True, has_free_test: bool = False) -> ReplyKeyboardMarkup:
+def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_test: bool = False, has_primary: bool = True, has_free_test: bool = False) -> ReplyKeyboardMarkup:
     def L(action: str) -> str:
         return labels.get(action) or NAV_DEFAULT_LABEL[action]
 
@@ -1515,8 +1344,6 @@ def main_reply_keyboard(labels: dict[str, str], *, is_agent: bool = False, has_t
         rows.insert(0, [KeyboardButton(L("buy"))])
     # Dedicated second-panel buy option as its own full-width row, right under
     # the hero buy button so it stands out.
-    if has_panel2:
-        rows.insert(1, [KeyboardButton(BTN_PANEL2)])
     fourth = []
     if is_agent and has_test:
         fourth.append(KeyboardButton(L("test_config")))
@@ -1679,11 +1506,10 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
             has_test = "test" in permissions
         except Exception:
             has_test = True
-    has_panel2 = await panel2_available(db)
     has_primary = await primary_buy_available(db)
     has_free_test = (not is_agent) and await free_test_enabled(db)
     labels = await resolve_nav_labels(db)
-    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_panel2=has_panel2, has_primary=has_primary, has_free_test=has_free_test)
+    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_primary=has_primary, has_free_test=has_free_test)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1895,422 +1721,11 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return await show_catalog_root(update, context, labels["buy"])
 
 
-async def buy2_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Legacy second-panel button.
-
-    Plans carry their own target now, so a separate per-panel entry point is
-    redundant; keep the button working by sending it to the same catalog.
-    """
-    return await buy_start(update, context)
-
-
-def _checkout_is_panel2(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    return bool((context.user_data.get("checkout") or {}).get("panel2"))
-
-
-async def buy_gb_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    db: AsyncDatabase = context.application.bot_data["db"]
-    min_gb = await minimum_purchase_gb(db)
-    p2 = _checkout_is_panel2(context)
-    await send_flow_prompt(
-        update,
-        context,
-        "📦 لطفاً حجم را از دکمه‌های همین کارت انتخاب کنید.\n\n"
-        f"حداقل حجم مجاز: <b>{min_gb}</b> گیگ. برای وارد کردن عدد، گزینه <b>حجم دلخواه</b> را بزنید.",
-        await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=p2),
-    )
-    return BUY_GB
-
-
-async def buy_gb_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await _answer_query(query)
-    db: AsyncDatabase = context.application.bot_data["db"]
-    min_gb = await minimum_purchase_gb(db)
-    gb = int(query.data.rsplit(":", 1)[1])
-    if gb < min_gb:
-        await edit_text(query, invalid_gb_text(min_gb), await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=_checkout_is_panel2(context)))
-        context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
-        return BUY_GB
-    context.user_data.setdefault("checkout", {})["gb"] = gb
-    await edit_text(
-        query,
-        f"✅ حجم <b>{gb} گیگ</b> انتخاب شد.\n\n"
-        "🛒 <b>مرحله ۲ از ۴ – تعداد اشتراک</b>\n\n"
-        "چند اشتراک می‌خواهید؟",
-        qty_keyboard(),
-    )
-    context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
-    return BUY_QTY
-
-
-async def buy_custom_gb_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    db: AsyncDatabase = context.application.bot_data["db"]
-    min_gb = await minimum_purchase_gb(db)
-    await edit_flow_query(
-        update,
-        context,
-        custom_gb_prompt("حجم دلخواه", min_gb),
-        InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
-    )
-    return BUY_CUSTOM_GB
-
-
-async def buy_custom_gb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = (update.effective_message.text or "").strip()
-    db: AsyncDatabase = context.application.bot_data["db"]
-    min_gb = await minimum_purchase_gb(db)
-    max_gb = max_custom_gb(min_gb)
-    if not text.isdigit() or not (min_gb <= int(text) <= max_gb):
-        await send_flow_prompt(update, context, invalid_gb_text(min_gb))
-        return BUY_CUSTOM_GB
-    gb = int(text)
-    context.user_data.setdefault("checkout", {})["gb"] = gb
-    await send_flow_prompt(
-        update,
-        context,
-        f"✅ حجم <b>{gb} گیگ</b> ثبت شد.\n\n"
-        "🛒 <b>مرحله ۲ از ۴ – تعداد اشتراک</b>\n\n"
-        "چند اشتراک می‌خواهید؟",
-        qty_keyboard(),
-    )
-    return BUY_QTY
-
-
-async def buy_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = (update.effective_message.text or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        await send_flow_prompt(update, context, "⚠️ <b>تعداد معتبر نیست.</b>\n\n🔢 لطفاً یک عدد مثبت ارسال کنید.", qty_keyboard())
-        return BUY_QTY
-    context.user_data.setdefault("checkout", {})["qty"] = int(text)
-    gb = int(context.user_data.get("checkout", {}).get("gb") or 0)
-    await send_flow_prompt(
-        update,
-        context,
-        f"✅ تعداد <b>{int(text)}</b> اشتراک {gb} گیگ ثبت شد.\n\n"
-        "🛒 <b>مرحله ۳ از ۴ – نام کانفیگ</b>\n\n"
-        "می‌توانید نام کانفیگ را خودتان مشخص کنید یا اجازه بدهید ربات نام رندوم بسازد.",
-        config_name_keyboard(),
-    )
-    return BUY_NAME_MODE
-
-
-async def buy_qty_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await _answer_query(query)
-    qty = int(query.data.rsplit(":", 1)[1])
-    gb = int(context.user_data.get("checkout", {}).get("gb") or 0)
-    context.user_data.setdefault("checkout", {})["qty"] = qty
-    await edit_text(
-        query,
-        f"✅ تعداد <b>{qty}</b> اشتراک {gb} گیگ ثبت شد.\n\n"
-        "🛒 <b>مرحله ۳ از ۴ – نام کانفیگ</b>\n\n"
-        "می‌توانید نام کانفیگ را خودتان مشخص کنید یا اجازه بدهید ربات نام رندوم بسازد.",
-        config_name_keyboard(),
-    )
-    context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
-    return BUY_NAME_MODE
-
-
-async def buy_qty_custom_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await edit_flow_query(
-        update,
-        context,
-        "✍️ <b>تعداد دلخواه</b>\n\nعدد تعداد اشتراک را ارسال کنید.",
-        InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="buy:cancel")]]),
-    )
-    return BUY_QTY
-
-
-async def build_buy_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    db: AsyncDatabase = context.application.bot_data["db"]
-    checkout = context.user_data.setdefault("checkout", {})
-    p2 = bool(checkout.get("panel2"))
-    agent = await db.get_agent(update.effective_user.id)
-    gb = int(checkout["gb"])
-    qty = int(checkout["qty"])
-    unit_price = await buy_unit_price(db, update.effective_user.id, gb, agent, panel2=p2)
-    min_gb = await minimum_purchase_gb(db)
-    if gb < min_gb:
-        checkout.pop("gb", None)
-        checkout.pop("qty", None)
-        await send_flow_prompt(
-            update,
-            context,
-            invalid_gb_text(min_gb),
-            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=p2),
-        )
-        return BUY_GB
-    total = gb * qty * unit_price
-    method_label = "کیف پول نماینده" if agent else "کسر از کیف پول"
-    server_line = f"🌐 سرور: <b>{html.escape(await panel2_label(db))}</b>\n" if p2 else ""
-    client_name = str(checkout.get("client_name") or "").strip()
-    # Stable idempotency token per built invoice: a double-tap on "confirm"
-    # (possible because updates run concurrently) reuses the same key so the
-    # purchase can never be charged/provisioned twice.
-    checkout["idem"] = f"buy-{update.effective_user.id}-{secrets.token_hex(8)}"
-    checkout.update(unit_price=unit_price, total=total, method_label=method_label)
-    await send_flow_prompt(
-        update,
-        context,
-        "🧾 <b>تایید نهایی سفارش</b>  ·  مرحله ۴ از ۴\n"
-        "<code>─────────────────────</code>\n"
-        f"{server_line}"
-        f"📦 حجم هر اشتراک: <b>{gb}</b> گیگ\n"
-        f"🔢 تعداد: <b>{qty}</b> عدد\n"
-        f"💵 قیمت هر گیگ: <b>{unit_price:,}</b> تومان\n"
-        f"🪪 نام کانفیگ: <b>{html.escape(client_name) if client_name else '🎲 رندوم'}</b>\n"
-        f"💳 روش پرداخت: <b>{method_label}</b>\n"
-        "<code>─────────────────────</code>\n"
-        f"💰 مبلغ قابل پرداخت: <b>{total:,}</b> تومان\n\n"
-        "✅ با تایید، سرویس شما فوری ساخته و تحویل داده می‌شود.",
-        buy_confirm_keyboard(),
-    )
-    return BUY_CONFIRM
-
-
-async def buy_name_random(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await _answer_query(update.callback_query)
-    context.user_data.setdefault("checkout", {})["client_name"] = ""
-    return await build_buy_invoice(update, context)
-
-
-async def buy_name_custom_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await edit_flow_query(
-        update,
-        context,
-        "✍️ <b>نام دلخواه کانفیگ</b>\n\n"
-        "یک نام کوتاه انگلیسی/عددی بفرستید.\n"
-        "مثال: <code>ali-office</code>",
-    )
-    return BUY_NAME_INPUT
-
-
-async def buy_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    name = (update.effective_message.text or "").strip()
-    if not NAME_RE.match(name):
-        await send_flow_prompt(
-            update,
-            context,
-            "⚠️ نام معتبر نیست.\n\n"
-            "از ۲ تا ۳۲ کاراکتر انگلیسی/عددی و علامت‌های <code>- _ .</code> استفاده کنید.",
-        )
-        return BUY_NAME_INPUT
-    context.user_data.setdefault("checkout", {})["client_name"] = name
-    return await build_buy_invoice(update, context)
-
-
 async def buy_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await _answer_query(update.callback_query, "خرید لغو شد.")
     clear_flow_state(context)
     await edit_text(update.callback_query, "❌ <b>خرید لغو شد.</b>\n\nهر وقت آماده بودید دوباره شروع کنید.", back_keyboard())
     return ConversationHandler.END
-
-
-async def buy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    checkout = context.user_data.get("checkout") or {}
-    p2 = bool(checkout.get("panel2"))
-    gb = int(checkout.get("gb") or 0)
-    qty = int(checkout.get("qty") or 0)
-    unit_price = int(checkout.get("unit_price") or 0)
-    total = int(checkout.get("total") or 0)
-    client_name = str(checkout.get("client_name") or "")
-    method_label = str(checkout.get("method_label") or "کسر از کیف پول")
-    if gb <= 0 or qty <= 0 or unit_price <= 0:
-        clear_flow_state(context)
-        await edit_text(query, "⚠️ اطلاعات خرید کامل نیست. لطفاً دوباره شروع کنید.", back_keyboard())
-        return ConversationHandler.END
-
-    db: AsyncDatabase = context.application.bot_data["db"]
-    min_gb = await minimum_purchase_gb(db)
-    if gb < min_gb:
-        checkout.pop("gb", None)
-        checkout.pop("qty", None)
-        await edit_text(
-            query,
-            invalid_gb_text(min_gb),
-            await gb_choice_keyboard(db, update.effective_user.id, "buy", "buy:cancel", min_gb, panel2=p2),
-        )
-        context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
-        return BUY_GB
-    if not await audience_sales_is_open(db, update.effective_user.id):
-        clear_flow_state(context)
-        await edit_text(
-            query,
-            "🔒 <b>فروش سرویس موقتاً بسته است.</b>\n\n"
-            "این خرید ثبت نشد و هیچ مبلغی کسر نشده است.",
-            back_keyboard(),
-        )
-        return ConversationHandler.END
-
-    if p2:
-        provisioning = await get_panel2_provisioning(context)
-        if provisioning is None:
-            clear_flow_state(context)
-            await edit_text(query, "🌐 این سرویس در حال حاضر در دسترس نیست.", back_keyboard())
-            return ConversationHandler.END
-    else:
-        if not await panel1_enabled(db):
-            clear_flow_state(context)
-            await edit_text(query, "🌐 فروش از سرور اصلی غیرفعال شده است. مبلغی کسر نشد.", back_keyboard())
-            return ConversationHandler.END
-        provisioning = context.application.bot_data["provisioning"]
-    qr: QRService = context.application.bot_data["qr"]
-    await edit_flow_query(update, context, "⏳ <b>در حال ساخت سرویس...</b>\n\nلطفاً چند لحظه صبر کنید.")
-    try:
-        links = await provisioning.process_checkout(
-            user_id=update.effective_user.id,
-            plan_id=0,
-            gb=gb,
-            qty=qty,
-            unit_price=unit_price,
-            final_total=total,
-            client_name=client_name,
-            idempotency_key=str(checkout.get("idem") or query.id),
-        )
-    except ValueError as exc:
-        clear_flow_state(context)
-        await edit_text(
-            query,
-            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
-            InlineKeyboardMarkup([[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")], [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")]]),
-        )
-        return ConversationHandler.END
-    except Exception as exc:
-        if "duplicate purchase request" in str(exc):
-            # A concurrent double-tap on confirm: the first request is already
-            # being processed, so silently ignore this one (no second charge).
-            await _answer_query(query, "این خرید در حال پردازش است…")
-            return ConversationHandler.END
-        LOG.exception("provisioning failed user_id=%s", update.effective_user.id)
-        clear_flow_state(context)
-        await edit_text(query, f"❌ خطا در ساخت سرویس:\n{html.escape(str(exc))}", back_keyboard())
-        return ConversationHandler.END
-
-    await edit_text(query, "⚡ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
-    for idx, sub_link in enumerate(links):
-        safe_link = html.escape(sub_link)
-        caption = (
-            "✅ <b>پرداخت با موفقیت انجام شد!</b>\n"
-            "<i>از اعتماد شما سپاسگزاریم 🌟</i>\n"
-            "<code>─────────────────────</code>\n"
-            f"📦 حجم هر اشتراک: <b>{gb}</b> گیگ × <b>{qty}</b> عدد\n"
-            f"💰 مبلغ پرداختی: <b>{total:,}</b> تومان\n"
-            f"💳 روش پرداخت: {html.escape(method_label)}\n"
-            "<code>─────────────────────</code>\n"
-            "🔗 <b>لینک اشتراک شما:</b>\n"
-            f"<code>{safe_link}</code>\n\n"
-            "📲 لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
-        )
-        is_last = idx == len(links) - 1
-        png = await qr.png(sub_link)
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=BytesIO(png),
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard() if is_last else None,
-        )
-    return ConversationHandler.END
-
-
-async def infinite_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await ensure_user(update, context)
-    if update.callback_query:
-        await update.callback_query.answer()
-    db: AsyncDatabase = context.application.bot_data["db"]
-    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
-    pkg = await provisioning.infinite_package()
-    if not pkg["enabled"]:
-        await new_flow_card(update, context, "♾️ <b>بسته‌ی بی‌نهایت</b>\n\nاین بسته در حال حاضر فعال نیست.", back_keyboard())
-        return
-    text = (
-        "♾️ <b>بسته‌ی بی‌نهایت (مصرف منصفانه)</b>\n\n"
-        "🌊 ترافیک نامحدود با سیاست مصرف منصفانه\n"
-        f"⏳ مدت اعتبار: <b>{pkg['duration_days']:,}</b> روز\n"
-        f"💰 قیمت: <b>{pkg['price']:,}</b> تومان\n\n"
-        "✅ پس از خرید، <b>لینک مستقیم کانفیگ</b> برایتان ارسال می‌شود.\n"
-        "✅ امکان خرید چند بسته وجود دارد."
-    )
-    # Fresh idempotency token per shown offer → a double-tap on buy cannot
-    # charge/provision the package twice.
-    context.user_data["infinite_idem"] = f"inf-{update.effective_user.id}-{secrets.token_hex(8)}"
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✅ خرید و دریافت کانفیگ", callback_data="infinite:buy")],
-            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
-        ]
-    )
-    await new_flow_card(update, context, text, kb)
-
-
-async def infinite_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    db: AsyncDatabase = context.application.bot_data["db"]
-    if not await audience_sales_is_open(db, update.effective_user.id):
-        await edit_text(query, "🔒 <b>فروش سرویس موقتاً بسته است.</b>", back_keyboard())
-        return
-    provisioning: ProvisioningService = context.application.bot_data["provisioning"]
-    panel = context.application.bot_data["panel"]
-    qr: QRService = context.application.bot_data["qr"]
-    await edit_flow_query(update, context, "⏳ <b>در حال ساخت بسته‌ی بی‌نهایت...</b>\n\nلطفاً چند لحظه صبر کنید.")
-    try:
-        links = await provisioning.process_infinite_purchase(
-            user_id=update.effective_user.id,
-            idempotency_key=str(context.user_data.get("infinite_idem") or query.id),
-        )
-    except ValueError as exc:
-        await edit_text(
-            query,
-            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
-            InlineKeyboardMarkup(
-                [[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")], [InlineKeyboardButton("بازگشت به منو", callback_data="menu:main")]]
-            ),
-        )
-        return
-    except Exception as exc:
-        if "duplicate purchase request" in str(exc):
-            await _answer_query(query, "این خرید در حال پردازش است…")
-            return
-        LOG.exception("infinite purchase failed user_id=%s", update.effective_user.id)
-        await edit_text(query, f"❌ خطا در ساخت بسته:\n{html.escape(str(exc))}", back_keyboard())
-        return
-
-    uris: list[str] = []
-    for link in links:
-        try:
-            uris.extend(await panel.fetch_config_uris(link))
-        except Exception:
-            LOG.exception("fetch_config_uris failed for infinite package")
-    uris = [u for u in uris if u]
-    if not uris:
-        await edit_text(
-            query,
-            "✅ بسته ساخته شد، اما دریافت لینک کانفیگ کمی طول کشید.\n"
-            "از بخش «اشتراک‌های من» می‌توانید کانفیگ را ببینید یا با پشتیبانی تماس بگیرید.",
-            back_keyboard(),
-        )
-        return
-    await edit_text(query, "♾️ <b>بسته‌ی بی‌نهایت ساخته شد.</b>\n\nلینک کانفیگ در پیام بعدی ارسال می‌شود.")
-    for idx, uri in enumerate(uris):
-        caption = (
-            "✅ <b>بسته‌ی بی‌نهایت فعال شد!</b>\n"
-            "<i>مصرف منصفانه فعال است.</i>\n\n"
-            "🔗 <b>لینک کانفیگ شما:</b>\n"
-            f"<code>{html.escape(uri)}</code>\n\n"
-            "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
-        )
-        png = await qr.png(uri)
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=BytesIO(png),
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_keyboard() if idx == len(uris) - 1 else None,
-        )
 
 
 def format_join_date(ts: int) -> str:
@@ -2779,17 +2194,6 @@ async def renew_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 back_keyboard(),
             )
             return ConversationHandler.END
-    elif await is_panel2_subscription(db, sub):
-        # v1: dedicated-panel services are buy-only from the bot; renewal of them
-        # isn't wired yet, so guide the user to support instead of failing on the
-        # primary panel.
-        await edit_text(
-            query,
-            "🌐 <b>این سرویس روی سرور اختصاصی است.</b>\n\n"
-            "تمدید این نوع سرویس فعلاً از داخل ربات فعال نیست؛ برای تمدید با پشتیبانی در ارتباط باشید.",
-            back_keyboard(),
-        )
-        return ConversationHandler.END
     name = str(sub.get("client_email") or sub_id)
     context.user_data["renewal"] = {"sub_id": sub_id, "client_name": name}
     # PasarGuard services renew by choosing a plan (same plan or an upgrade);
@@ -2809,7 +2213,6 @@ async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ConversationHandler.END
     renewal = context.user_data.setdefault("renewal", {})
     sub_id = str(renewal.get("sub_id") or "")
-    name = str(renewal.get("client_name") or sub_id)
     if not sub_id:
         await edit_text(query, "⚠️ اطلاعات تمدید ناقص است. لطفاً دوباره شروع کنید.", back_keyboard())
         return ConversationHandler.END
@@ -2818,8 +2221,6 @@ async def renew_pkg_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await edit_text(query, "⚠️ این پلن دیگر در دسترس نیست. لطفاً دوباره انتخاب کنید.", back_keyboard())
         return ConversationHandler.END
     pkg = packages[idx]
-    agent = await db.get_agent(update.effective_user.id)
-    price = package_price(pkg, agent)
     # Store the chosen plan snapshot itself (not just its index) so confirmation
     # never depends on re-deriving/looking up the index again.
     renewal["mode"] = "plan"
@@ -3234,16 +2635,6 @@ async def wallet_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "برای افزایش موجودی، یکی از روش‌های زیر را انتخاب کنید 👇",
         wallet_keyboard(),
     )
-
-
-async def _topup_uses_tiered_pricing(db: AsyncDatabase, user_id: int) -> bool:
-    """True when volume tiers are active for this user (so a single per-GB
-    suggestion is meaningless and the top-up should ask for a free amount)."""
-    agent = await db.get_agent(user_id)
-    agent_price = int(agent["price_per_gb"] or 0) if agent else 0
-    if agent_price > 0:
-        return False
-    return bool(await get_price_tiers(db))
 
 
 async def topup_start(update: Update, context: ContextTypes.DEFAULT_TYPE, method: str) -> int:
@@ -3830,8 +3221,6 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     clear_flow_state(context)
     if action == "buy":
         return await buy_start(update, context)
-    if action == "panel2":
-        return await buy2_start(update, context)
     if action == "renew":
         return await renew_start(update, context)
     if action == "subs":
@@ -3983,7 +3372,6 @@ def build_main_conversation() -> ConversationHandler:
     """
     entry_points = [
         CallbackQueryHandler(buy_start, pattern=r"^menu:buy$"),
-        CallbackQueryHandler(buy2_start, pattern=r"^menu:buy2$"),
         CallbackQueryHandler(renew_start, pattern=r"^menu:renew$"),
         CallbackQueryHandler(topup_c2c_start, pattern=r"^wallet:c2c$"),
         CallbackQueryHandler(topup_crypto_start, pattern=r"^wallet:crypto$"),
@@ -3991,39 +3379,6 @@ def build_main_conversation() -> ConversationHandler:
         MessageHandler(_nav_filter, handle_nav_btn),
     ]
     states = {
-        BUY_GB: [
-            MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(buy_gb_selected, pattern=r"^buy:gb:\d+$"),
-            CallbackQueryHandler(buy_custom_gb_start, pattern=r"^buy:gb:custom$"),
-            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, buy_gb_message),
-        ],
-        BUY_CUSTOM_GB: [
-            MessageHandler(_nav_filter, handle_nav_btn),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, buy_custom_gb),
-        ],
-        BUY_QTY: [
-            MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(buy_qty_selected, pattern=r"^buy:qty:(1|2|3|5|10)$"),
-            CallbackQueryHandler(buy_qty_custom_start, pattern=r"^buy:qty:custom$"),
-            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, buy_qty),
-        ],
-        BUY_NAME_MODE: [
-            MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(buy_name_random, pattern=r"^buy:name:random$"),
-            CallbackQueryHandler(buy_name_custom_start, pattern=r"^buy:name:custom$"),
-            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
-        ],
-        BUY_NAME_INPUT: [
-            MessageHandler(_nav_filter, handle_nav_btn),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, buy_name_input),
-        ],
-        BUY_CONFIRM: [
-            MessageHandler(_nav_filter, handle_nav_btn),
-            CallbackQueryHandler(buy_confirm, pattern=r"^buy:confirm$"),
-            CallbackQueryHandler(buy_cancel, pattern=r"^buy:cancel$"),
-        ],
         PKG_SELECT: [
             MessageHandler(_nav_filter, handle_nav_btn),
             CallbackQueryHandler(catalog_category_select, pattern=r"^cat:[A-Za-z0-9_\-]+$"),
@@ -4192,8 +3547,6 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(pgsub_link, pattern=r"^pgsub:link:"))
     app.add_handler(CallbackQueryHandler(tariffs_info, pattern=r"^menu:tariffs$"))
     app.add_handler(CallbackQueryHandler(agent_test_config, pattern=r"^menu:test_config$"))
-    app.add_handler(CallbackQueryHandler(infinite_start, pattern=r"^menu:infinite$"))
-    app.add_handler(CallbackQueryHandler(infinite_confirm, pattern=r"^infinite:buy$"))
     app.add_handler(CallbackQueryHandler(catalog_category_select, pattern=r"^cat:[A-Za-z0-9_\-]+$"))
     app.add_handler(CallbackQueryHandler(pkg_volume_select, pattern=r"^pkg:gb:[A-Za-z0-9_\-]+:\d+$"))
     app.add_handler(CallbackQueryHandler(pkg_select, pattern=r"^pkg:sel:[A-Za-z0-9_\-]+$"))

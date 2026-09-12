@@ -13,9 +13,7 @@ import httpx
 
 from .db import AsyncDatabase
 from .models import PanelClientPayload, SubscriptionDetail
-from .util import (
-    ceil_gb_from_bytes,
-    gb_to_bytes,
+from .util import (    gb_to_bytes,
     generate_sub_id,
     make_unique_client_name,
     now_ms,

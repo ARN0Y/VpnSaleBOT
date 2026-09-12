@@ -29,7 +29,6 @@ from async_storefront.provisioning import PG_INBOUND_SENTINEL
 from .auth import COOKIE_NAME, current_admin_username, csrf_token, sign_session
 from .routers.common import db, notify_telegram_user, panel
 from .routers.settings import (
-    PANEL_FORM_KEYS,
     SALES_AUDIENCES,
     backup_values_from_form,
     normalize_sales_audience,
@@ -243,7 +242,7 @@ async def approve_agent_request(request: Request, req_id: str):
             request,
             int(result["user_id"]),
             (
-                f"✅ درخواست نمایندگی شما تایید شد.\n"
+                "✅ درخواست نمایندگی شما تایید شد.\n"
                 "از این به بعد خریدهای شما با تعرفه نمایندگی و از کیف پول انجام می‌شود."
             ),
         )
