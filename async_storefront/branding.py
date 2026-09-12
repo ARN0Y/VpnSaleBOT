@@ -71,3 +71,47 @@ async def banner(db) -> str:
     if file_id:
         return file_id
     return str(await db.get_setting(SETTING_BANNER_URL, "") or "").strip()
+
+
+# ── the admin panel's sign-in screen ──
+# Its look is configurable because the panel is handed to a customer who wants
+# it to be theirs. The settings are read by a PUBLIC endpoint: this page renders
+# before anyone has signed in, so it cannot ask for credentials to decorate
+# itself. Nothing secret goes near it.
+
+SETTING_LOGIN_TITLE = "login_title"
+SETTING_LOGIN_TAGLINE = "login_tagline"
+SETTING_LOGIN_IMAGE = "login_image_url"
+SETTING_LOGIN_LAYOUT = "login_layout"
+SETTING_LOGIN_OVERLAY = "login_overlay"
+
+LAYOUTS: dict[str, str] = {
+    "split-right": "دو ستونه — تصویر سمت چپ",
+    "split-left": "دو ستونه — تصویر سمت راست",
+    "centered": "تک ستونه — کارت روی تصویر",
+}
+DEFAULT_LOGIN_TITLE = "ورود مدیریت"
+DEFAULT_LOGIN_TAGLINE = "دسترسی مدیر به پنل فروش"
+
+
+async def login_look(db) -> dict:
+    """Everything the sign-in screen needs to draw itself.
+
+    Always a complete, presentable configuration — a value that was never set,
+    or set to something unknown, falls back rather than leaving the page blank.
+    """
+    layout = str(await db.get_setting(SETTING_LOGIN_LAYOUT, "") or "").strip()
+    try:
+        overlay = int(await db.get_setting(SETTING_LOGIN_OVERLAY, "55") or 55)
+    except (TypeError, ValueError):
+        overlay = 55
+    return {
+        "title": str(await db.get_setting(SETTING_LOGIN_TITLE, "") or "").strip() or DEFAULT_LOGIN_TITLE,
+        "tagline": str(await db.get_setting(SETTING_LOGIN_TAGLINE, "") or "").strip() or DEFAULT_LOGIN_TAGLINE,
+        "image_url": str(await db.get_setting(SETTING_LOGIN_IMAGE, "") or "").strip(),
+        "layout": layout if layout in LAYOUTS else "split-right",
+        # How far to dim the artwork. The operator picks the picture, so the
+        # panel cannot assume it is dark enough for white text.
+        "overlay": max(0, min(90, overlay)),
+        "layouts": [{"key": k, "label": v} for k, v in LAYOUTS.items()],
+    }

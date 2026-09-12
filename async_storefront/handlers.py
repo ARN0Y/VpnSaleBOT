@@ -344,7 +344,6 @@ async def show_catalog_root(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
     text = (
         f"🛒 <b>{html.escape(title)}</b>\n"
-        "<code>─────────────────────</code>\n"
         "ابتدا دسته‌ی مورد نظر را انتخاب کنید 👇"
     )
     await new_flow_card(update, context, text, InlineKeyboardMarkup(rows))
@@ -387,7 +386,6 @@ async def show_category_plans(
     desc = str(cat.get("description") or "").strip()
     text = (
         f"🛒 <b>{html.escape(heading)}</b>\n"
-        "<code>─────────────────────</code>\n"
         + (f"{html.escape(desc)}\n\n" if desc else "")
         + "یکی از پلن‌های زیر را انتخاب کنید 👇"
     )
@@ -452,7 +450,6 @@ async def show_plan_volumes(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data=f"cat:{back_cat}" if back_cat else "menu:main")])
     text = (
         f"📦 <b>{html.escape(str(plan['title']))}</b>\n"
-        "<code>─────────────────────</code>\n"
         f"{_plan_duration_line(plan)}\n\n"
         "چه مقدار حجم می‌خواهید؟ 👇"
     )
@@ -498,13 +495,11 @@ async def _begin_plan_naming(
     note = str((plan.get("display") or {}).get("note") or "").strip()
     text = (
         "🛒 <b>نام کانفیگ</b>\n"
-        "<code>─────────────────────</code>\n"
         f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
         f"{_plan_volume_line(plan, gb)}\n"
         f"{_plan_duration_line(plan)}\n"
         + (f"ℹ️ {html.escape(note)}\n" if note else "")
-        + "<code>─────────────────────</code>\n"
-        f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
+        + f"💰 مبلغ قابل پرداخت: <b>{price:,}</b> تومان\n\n"
         "می‌توانید نام کانفیگ را خودتان مشخص کنید یا اجازه بدهید ربات نام رندوم بسازد."
     )
     await edit_flow_query(update, context, text, package_name_keyboard(plan["id"], gb))
@@ -617,7 +612,7 @@ def discount_lines(state: dict, base_total: int) -> str:
             f"🎟 کد <code>{html.escape(str(state['code']))}</code>: "
             f"<b>−{amount:,}</b> تومان\n"
             f"💳 مبلغ قابل پرداخت: <b>{final:,}</b> تومان"
-            + ("\n🎉 این سفارش برای شما رایگان است." if final == 0 else "")
+            + ("\nاین سفارش برای شما رایگان است." if final == 0 else "")
         )
     return f"💰 مبلغ قابل پرداخت: <b>{base:,}</b> تومان"
 
@@ -886,15 +881,13 @@ async def build_package_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     )
     text = (
         "🧾 <b>تایید خرید</b>\n"
-        "<code>─────────────────────</code>\n"
         + (f"⚠️ {html.escape(state['error'])}\n" if state.get("error") else "")
         + f"🎁 پلن: <b>{html.escape(str(plan['title']))}</b>\n"
         f"{_plan_volume_line(plan, gb)}\n"
         f"{_plan_duration_line(plan)}\n"
         f"🪪 نام کانفیگ: <b>{html.escape(client_name) if client_name else '🎲 رندوم'}</b>\n"
         + (f"ℹ️ {html.escape(note)}\n" if note else "")
-        + "<code>─────────────────────</code>\n"
-        + f"{discount_lines(state, price)}\n\n"
+                + f"{discount_lines(state, price)}\n\n"
         + "✅ با تایید، سرویس فوری ساخته و تحویل داده می‌شود."
     )
     keyboard = package_confirm_keyboard(plan_id, gb, state)
@@ -1098,11 +1091,10 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 chat_id=update.effective_chat.id,
                 photo=BytesIO(png),
                 caption=(
-                    f"✅ <b>{html.escape(str(pkg['title']))}</b>\n"
-                    "<i>سرویس شما فعال شد 🌟</i>\n\n"
-                    "🔗 <b>لینک کانفیگ شما:</b>\n"
+                    f"<b>{html.escape(str(pkg['title']))}</b> فعال شد.\n\n"
+                    "لینک کانفیگ:\n"
                     f"<code>{html.escape(uri)}</code>\n\n"
-                    "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+                    "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
                 ),
                 parse_mode=ParseMode.HTML,
                 reply_markup=back_keyboard() if i == len(uris) - 1 else None,
@@ -1110,22 +1102,19 @@ async def pkg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         clear_flow_state(context)
         return ConversationHandler.END
 
-    await edit_text(query, "✅ <b>سرویس شما با موفقیت ساخته شد.</b>\n\nلینک اتصال و QR Code در پیام بعدی ارسال می‌شود.")
+    await edit_text(query, "<b>سرویس شما ساخته شد.</b>\n\nلینک اتصال و QR در پیام بعدی ارسال می‌شود.")
     for i, sub_link in enumerate(links):
         png = await qr.png(sub_link)
         await context.bot.send_photo(
             chat_id=update.effective_chat.id,
             photo=BytesIO(png),
             caption=(
-                "✅ <b>پرداخت با موفقیت انجام شد!</b>\n"
-                f"<i>{html.escape(str(pkg['title']))} 🌟</i>\n"
-                "<code>─────────────────────</code>\n"
+                f"<b>{html.escape(str(pkg['title']))}</b> فعال شد.\n\n"
                 f"{_package_volume_label(pkg)}\n"
                 f"{_package_duration_label(pkg)}\n"
-                "<code>─────────────────────</code>\n"
-                "🔗 <b>لینک اشتراک شما:</b>\n"
+                "لینک اشتراک:\n"
                 f"<code>{html.escape(sub_link)}</code>\n\n"
-                "📲 لینک بالا را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+                "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=back_keyboard() if i == len(links) - 1 else None,
@@ -1782,13 +1771,11 @@ async def account_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     username_line = f"@{html.escape(username)}" if username else "ندارد"
     text = (
         "👤 <b>حساب کاربری شما</b>\n"
-        "<code>─────────────────────</code>\n"
         f"🆔 یوزرآیدی: <code>{user.id}</code>\n"
         f"👤 نام: {html.escape(user.first_name or snapshot['first_name'] or '')}\n"
         f"📛 یوزرنیم: {username_line}\n"
         f"🔐 سطح دسترسی: <b>{access_level}</b>\n"
         f"📅 تاریخ عضویت: {format_join_date(snapshot['joined_at'])}\n"
-        "<code>─────────────────────</code>\n"
         f"✅ سفارش‌های تاییدشده: {snapshot['approved_orders']}\n"
         f"👥 زیرمجموعه‌ها: {snapshot['referral_count']}\n"
         f"📦 کل حجم خریداری‌شده: {total_gb:,} گیگ\n"
@@ -1963,10 +1950,9 @@ async def pgsub_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         photo=BytesIO(png),
         caption=(
             "🌐 <b>سرور اختصاصی</b>\n"
-            "<code>─────────────────────</code>\n"
-            "🔗 <b>لینک اشتراک شما:</b>\n"
+            "لینک اشتراک:\n"
             f"<code>{html.escape(sub_url)}</code>\n\n"
-            "📲 این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
+            "این لینک را در اپلیکیشن خود وارد کنید یا QR را اسکن کنید."
         ),
         parse_mode=ParseMode.HTML,
         reply_markup=back_keyboard(),
@@ -2644,7 +2630,6 @@ async def wallet_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         update,
         context,
         "💎 <b>کیف پول من</b>\n"
-        "<code>─────────────────────</code>\n"
         f"💰 موجودی فعلی: <b>{wallet:,}</b> تومان\n"
         f"🏷 مبنای شارژ پیشنهادی: <b>{unit_price:,}</b> تومان\n\n"
         "برای افزایش موجودی، یکی از روش‌های زیر را انتخاب کنید 👇",
@@ -2665,7 +2650,6 @@ async def topup_start(update: Update, context: ContextTypes.DEFAULT_TYPE, method
         update,
         context,
         f"💳 <b>شارژ کیف پول — {method_label}</b>\n"
-        "<code>─────────────────────</code>\n"
         "💰 مبلغ موردنظر برای شارژ را به <b>تومان</b> وارد کنید.\n"
         "<i>مثال: 200000</i>\n\n"
         "فقط عدد بفرستید 👇",
@@ -2771,11 +2755,11 @@ async def topup_amount_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
         card_name = card.get("name", "")
         await edit_text(
             query,
-            "💳 <b>پرداخت کارت به کارت</b>\n\n"
-            f"مبلغ قابل پرداخت: <b>{amount:,}</b> تومان\n\n"
+            "<b>پرداخت کارت به کارت</b>\n\n"
+            f"مبلغ: <b>{amount:,}</b> تومان\n\n"
             f"شماره کارت:\n<code>{html.escape(card_number)}</code>\n"
             f"به نام: <b>{html.escape(card_name)}</b>\n\n"
-            "پس از واریز، فقط <b>عکس رسید</b> را ارسال کنید. رسید شما مستقیم در صف تایید مدیریت قرار می‌گیرد.",
+            "پس از واریز فقط <b>عکس رسید</b> را بفرستید؛ در صف تایید مدیریت قرار می‌گیرد.",
             InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="topup:cancel")]]),
         )
         context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
@@ -2784,10 +2768,10 @@ async def topup_amount_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
     address = await db.get_setting("crypto_address", "TRC20 Address Not Set")
     await edit_text(
         query,
-        "🪙 <b>پرداخت با تتر</b>\n\n"
-        f"معادل تومانی ثبت‌شده: <b>{amount:,}</b> تومان\n\n"
+        "<b>پرداخت با تتر</b>\n\n"
+        f"معادل تومانی: <b>{amount:,}</b> تومان\n\n"
         f"آدرس پرداخت:\n<code>{html.escape(address)}</code>\n\n"
-        "پس از انتقال، TXID یا Hash تراکنش را ارسال کنید.",
+        "پس از انتقال، TXID یا هش تراکنش را بفرستید.",
         InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="topup:cancel")]]),
     )
     context.user_data[FLOW_PROMPT_KEY] = query.message.message_id
@@ -2976,13 +2960,11 @@ async def reseller_package_selected(update: Update, context: ContextTypes.DEFAUL
     note = str(package.get("note") or "").strip()
     text = (
         "🧾 <b>تایید خرید پنل نمایندگی</b>\n"
-        "<code>─────────────────────</code>\n"
         f"📦 بسته: <b>{html.escape(str(package['title']))}</b>\n"
         f"💾 حجم: <b>{html.escape(reseller.traffic_label(int(package['traffic_gb'])))}</b>\n"
         f"⏳ اعتبار: <b>{html.escape(reseller.duration_label(package))}</b>\n"
         + (f"ℹ️ {html.escape(note)}\n" if note else "")
-        + "<code>─────────────────────</code>\n"
-        f"💰 مبلغ: <b>{price:,}</b> تومان\n"
+        + f"💰 مبلغ: <b>{price:,}</b> تومان\n"
         f"💎 موجودی شما: <b>{balance:,}</b> تومان\n"
     )
     if short > 0:
@@ -3053,12 +3035,10 @@ async def reseller_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=(
-            "🎉 <b>پنل نمایندگی شما آماده است</b>\n"
-            "<code>─────────────────────</code>\n"
+            "<b>پنل نمایندگی شما آماده است</b>\n\n"
             + (f"🔗 آدرس ورود:\n<code>{html.escape(login)}</code>\n" if login else "")
             + f"👤 یوزرنیم: <code>{html.escape(result['username'])}</code>\n"
             f"🔑 رمز عبور: <code>{html.escape(result['password'])}</code>\n"
-            "<code>─────────────────────</code>\n"
             f"💾 حجم پنل: <b>{html.escape(reseller.traffic_label(int(result['traffic_gb'])))}</b>\n"
             + (f"⏳ اعتبار تا: <b>{format_join_date(int(result['expires_at']))}</b>\n"
                if int(result.get("expires_at") or 0) > 0 else "")
@@ -3128,7 +3108,6 @@ async def reseller_panel_view(update: Update, context: ContextTypes.DEFAULT_TYPE
     await edit_flow_query(
         update, context,
         "🖥 <b>پنل نمایندگی</b>\n"
-        "<code>─────────────────────</code>\n"
         + _reseller_panel_lines(panel) + "\n"
         + (f"\n🔗 آدرس ورود:\n<code>{html.escape(login)}</code>" if login else ""),
         InlineKeyboardMarkup(rows),
@@ -3159,7 +3138,6 @@ async def reseller_topup_packages(update: Update, context: ContextTypes.DEFAULT_
         update, context,
         "➕ <b>افزایش حجم پنل</b>\n"
         f"🪪 <code>{html.escape(str(panel.get('pg_username') or ''))}</code>\n"
-        "<code>─────────────────────</code>\n"
         f"💎 موجودی شما: <b>{balance:,}</b> تومان\n\n"
         "حجم خریداری‌شده به حجم فعلی پنل <b>اضافه</b> می‌شود.",
         InlineKeyboardMarkup(rows),
@@ -3219,7 +3197,6 @@ async def reseller_topup_buy(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await edit_text(
         query,
         "✅ <b>حجم پنل افزایش یافت.</b>\n"
-        "<code>─────────────────────</code>\n"
         f"🪪 <code>{html.escape(result['username'])}</code>\n"
         f"➕ اضافه‌شده: <b>{html.escape(reseller.traffic_label(int(result['added_gb'])))}</b>\n"
         f"📦 حجم کل: <b>{_reseller_bytes_label(int(result['total_bytes']))}</b>\n"
@@ -3323,7 +3300,7 @@ async def topup_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if changed:
             amount = int(topup["amount_toman"])
             approve_msg = (
-                "🎉 <b>شارژ کیف پول شما تایید شد.</b>\n\n"
+                "<b>شارژ کیف پول شما تایید شد.</b>\n\n"
                 f"مبلغ شارژشده: <b>{amount:,}</b> تومان"
             )
             await context.bot.send_message(

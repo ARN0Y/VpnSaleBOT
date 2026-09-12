@@ -33,12 +33,12 @@ function PageFallback() {
 }
 
 export function App() {
-  const { username, loading } = useAuth();
+  const { username, loading, refresh } = useAuth();
 
   if (loading) {
     return <div className="grid min-h-screen place-items-center text-muted-foreground">در حال بارگذاری…</div>;
   }
-  if (!username) return <Login />;
+  if (!username) return <Login onDone={refresh} />;
 
   return (
     <BrowserRouter basename="/admin">

@@ -31,6 +31,9 @@ CSRF_HEADER = "x-csrf-token"
 OPEN_PATHS = frozenset({
     "/admin/api/v1/login",
     "/admin/api/v1/setup",
+    # The sign-in screen's own appearance. It renders before anyone has a
+    # session, and returns nothing but decoration.
+    "/admin/api/v1/branding",
 })
 
 

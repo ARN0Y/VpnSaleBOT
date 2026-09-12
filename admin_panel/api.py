@@ -58,7 +58,7 @@ async def _json_body(request: Request) -> dict:
         return {}
 
 # Paths the auth middleware lets through unauthenticated (see auth.OPEN_PATHS).
-PUBLIC_API_PATHS = {"/admin/api/v1/login", "/admin/api/v1/setup"}
+PUBLIC_API_PATHS = {"/admin/api/v1/login", "/admin/api/v1/setup", "/admin/api/v1/branding"}
 
 
 @router.get("/setup")
@@ -1496,11 +1496,12 @@ async def get_appearance(request: Request):
             action: branding.decorate(action, button.default, await branding.button_style(database))
             for action, button in texts.BUTTON_BY_ACTION.items()
         },
+        "login": await branding.login_look(database),
     }
 
 
 @router.post("/appearance")
-async def save_appearance(request: Request):
+async def save_appearance(request: Request):  # noqa: C901
     """Banner and button styling. Only what was sent is written, so editing one
     field cannot blank the others."""
     body = await _json_body(request)
@@ -1522,6 +1523,41 @@ async def save_appearance(request: Request):
         if style not in branding.STYLES:
             return JSONResponse({"ok": False, "error": "این حالت دکمه شناخته نشد."}, status_code=400)
         values[branding.SETTING_BUTTON_STYLE] = style
+    if "login_title" in body:
+        values[branding.SETTING_LOGIN_TITLE] = str(body.get("login_title") or "").strip()[:80]
+    if "login_tagline" in body:
+        values[branding.SETTING_LOGIN_TAGLINE] = str(body.get("login_tagline") or "").strip()[:160]
+    if "login_image_url" in body:
+        url = str(body.get("login_image_url") or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            return JSONResponse(
+                {"ok": False, "error": "آدرس تصویر ورود باید با http:// یا https:// شروع شود."},
+                status_code=400,
+            )
+        values[branding.SETTING_LOGIN_IMAGE] = url
+    if "login_layout" in body:
+        layout = str(body.get("login_layout") or "").strip()
+        if layout not in branding.LAYOUTS:
+            return JSONResponse({"ok": False, "error": "این چیدمان شناخته نشد."}, status_code=400)
+        values[branding.SETTING_LOGIN_LAYOUT] = layout
+    if "login_overlay" in body:
+        try:
+            overlay = max(0, min(90, int(body.get("login_overlay"))))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "شفافیت باید عددی بین ۰ تا ۹۰ باشد."},
+                                status_code=400)
+        values[branding.SETTING_LOGIN_OVERLAY] = str(overlay)
     if values:
         await db(request).admin_update_settings(values)
     return await get_appearance(request)
+
+
+@router.get("/branding")
+async def get_branding(request: Request):
+    """How the sign-in screen should look.
+
+    Public on purpose: this page renders before anyone has a session, so it
+    cannot authenticate to fetch its own decoration. It returns only
+    appearance — a title, a tagline, an image address and a layout.
+    """
+    return await branding.login_look(db(request))

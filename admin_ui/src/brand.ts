@@ -1,8 +1,6 @@
-// Single source of truth for brand identity. The two deployments differ only
-// in this file — everything else (API, components, theme) is shared.
+// Names shown in the panel chrome. The sign-in screen's own title, tagline and
+// artwork are configurable and come from the server instead — see /branding.
 export const BRAND = {
-  name: "NavidVPN",
-  emoji: "⚡",
-  tagline: "نویدِ یک اینترنت آزاد و پرسرعت",
-  console: "NavidVPN Console",
+  name: "Wolf",
+  console: "پنل مدیریت",
 } as const;

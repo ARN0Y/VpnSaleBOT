@@ -6,6 +6,8 @@ interface AuthState {
   loading: boolean;
   login: (u: string, p: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Re-read the session after the sign-in screen has established one. */
+  refresh: () => Promise<void>;
 }
 
 const AuthContext = React.createContext<AuthState | null>(null);
@@ -34,6 +36,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUsername(res.username);
   }, []);
 
+  const refresh = React.useCallback(async () => {
+    try {
+      const res = await api.me();
+      setCsrf(res.csrf);
+      setUsername(res.username || null);
+    } catch {
+      setUsername(null);
+    }
+  }, []);
+
   const logout = React.useCallback(async () => {
     await api.logout().catch(() => undefined);
     setCsrf("");
@@ -41,7 +53,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ username, loading, login, logout }}>
+    <AuthContext.Provider value={{ username, loading, login, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );

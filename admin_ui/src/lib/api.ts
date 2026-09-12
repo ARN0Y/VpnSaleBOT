@@ -68,6 +68,10 @@ export const api = {
     post<{ ok: boolean }>(`/discounts/${encodeURIComponent(code)}/toggle`, { enabled }),
   deleteDiscount: (code: string) =>
     post<{ ok: boolean }>(`/discounts/${encodeURIComponent(code)}/delete`),
+  branding: () => request<{ title: string; tagline: string; image_url: string; layout: string; overlay: number }>("/branding"),
+  setupStatus: () => request<{ needs_setup: boolean; min_password_length: number }>("/setup"),
+  completeSetup: (token: string, username: string, password: string) =>
+    post<{ ok: boolean; username: string; csrf: string }>("/setup", { token, username, password }),
   login: (username: string, password: string) =>
     post<{ ok: boolean; username: string; csrf: string }>("/login", { username, password }),
   logout: () => post<{ ok: boolean }>("/logout"),
