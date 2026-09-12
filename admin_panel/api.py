@@ -21,7 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from async_storefront import catalog, discounts, reseller, texts
+from async_storefront import branding, catalog, discounts, reseller, texts
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.provisioning import PG_INBOUND_SENTINEL
@@ -1466,3 +1466,50 @@ async def preview_content(request: Request):
         "rendered": texts.fill(template, **sample),
         "unknown_placeholders": texts.unknown_placeholders(key, template),
     }
+
+
+# ───────────────────────── appearance ─────────────────────────
+
+
+@router.get("/appearance")
+async def get_appearance(request: Request):
+    database = db(request)
+    return {
+        "banner_enabled": str(await database.get_setting(branding.SETTING_BANNER_ENABLED, "1")) != "0",
+        "banner_url": await database.get_setting(branding.SETTING_BANNER_URL, ""),
+        "banner_file_id": await database.get_setting(branding.SETTING_BANNER, ""),
+        "button_style": await branding.button_style(database),
+        "styles": [{"key": k, "label": branding.style_label(k)} for k in branding.STYLES],
+        "preview": {
+            action: branding.decorate(action, button.default, await branding.button_style(database))
+            for action, button in texts.BUTTON_BY_ACTION.items()
+        },
+    }
+
+
+@router.post("/appearance")
+async def save_appearance(request: Request):
+    """Banner and button styling. Only what was sent is written, so editing one
+    field cannot blank the others."""
+    body = await _json_body(request)
+    values: dict[str, str] = {}
+    if "banner_enabled" in body:
+        values[branding.SETTING_BANNER_ENABLED] = "1" if _truthy(body.get("banner_enabled")) else "0"
+    if "banner_url" in body:
+        url = str(body.get("banner_url") or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            return JSONResponse(
+                {"ok": False, "error": "آدرس بنر باید با http:// یا https:// شروع شود."},
+                status_code=400,
+            )
+        values[branding.SETTING_BANNER_URL] = url
+    if "banner_file_id" in body:
+        values[branding.SETTING_BANNER] = str(body.get("banner_file_id") or "").strip()
+    if "button_style" in body:
+        style = str(body.get("button_style") or "plain").strip()
+        if style not in branding.STYLES:
+            return JSONResponse({"ok": False, "error": "این حالت دکمه شناخته نشد."}, status_code=400)
+        values[branding.SETTING_BUTTON_STYLE] = style
+    if values:
+        await db(request).admin_update_settings(values)
+    return await get_appearance(request)

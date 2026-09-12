@@ -1,6 +1,8 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Eye, MessageSquareText, RotateCcw, Save, Type } from "lucide-react";
+import {
+  AlertTriangle, Eye, Image as ImageIcon, MessageSquareText, Palette, RotateCcw, Save, Type,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -123,6 +125,128 @@ function MessageEditor({
   );
 }
 
+function AppearanceCard() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const { data } = useQuery({ queryKey: ["appearance"], queryFn: () => api.appearance() });
+  const [url, setUrl] = React.useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: (patch: Record<string, unknown>) => api.saveAppearance(patch),
+    onSuccess: () => {
+      toast({ title: "ظاهر ربات به‌روزرسانی شد", variant: "success" });
+      setUrl(null);
+      qc.invalidateQueries({ queryKey: ["appearance"] });
+    },
+    onError: (e: Error) => toast({ title: "ذخیره نشد", description: e.message, variant: "error" }),
+  });
+
+  if (!data) return <Skeleton className="h-64" />;
+  const bannerUrl = url ?? data.banner_url;
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <ImageIcon className="h-4 w-4" /> بنر بالای پیام خوش‌آمد
+          </CardTitle>
+          <p className="text-xs leading-6 text-muted-foreground">
+            تصویری که همراه پیام خوش‌آمد فرستاده می‌شود. اگر ارسال تصویر به هر دلیلی
+            ناموفق باشد، ربات همان متن را می‌فرستد و کاربر بدون منو نمی‌ماند.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <label className="flex items-start gap-2 rounded-xl border border-border bg-white/[0.02] p-3 text-sm">
+            <input
+              type="checkbox"
+              checked={data.banner_enabled}
+              onChange={(e) => save.mutate({ banner_enabled: e.target.checked })}
+              className="mt-0.5 h-4 w-4 accent-[hsl(var(--brand))]"
+            />
+            <span className="font-bold text-white">بنر نمایش داده شود</span>
+          </label>
+          <div className="flex gap-2">
+            <Input
+              value={bannerUrl}
+              dir="ltr"
+              placeholder="https://example.com/banner.jpg"
+              onChange={(e) => setUrl(e.target.value)}
+            />
+            <Button disabled={save.isPending} onClick={() => save.mutate({ banner_url: bannerUrl })}>
+              <Save className="h-4 w-4" /> ذخیره
+            </Button>
+          </div>
+          {data.banner_file_id && (
+            <div className="rounded-xl border border-emerald-400/25 bg-emerald-400/[0.04] p-3 text-[0.68rem] leading-6 text-emerald-100">
+              یک تصویر آپلودشده ذخیره شده و به آدرس بالا ارجح است.
+              <button
+                type="button"
+                className="mr-2 underline hover:text-white"
+                onClick={() => save.mutate({ banner_file_id: "" })}
+              >
+                حذف تصویر آپلودشده
+              </button>
+            </div>
+          )}
+          {bannerUrl && data.banner_enabled && !data.banner_file_id && (
+            <img
+              src={bannerUrl}
+              alt="پیش‌نمایش بنر"
+              className="max-h-48 w-full rounded-xl border border-border object-cover"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+            />
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Palette className="h-4 w-4" /> ظاهر دکمه‌های منو
+          </CardTitle>
+          <p className="text-xs leading-6 text-muted-foreground">
+            تلگرام اجازه‌ی رنگ‌کردن دکمه‌های کیبورد را به ربات نمی‌دهد؛ کاری که می‌شود
+            کرد یک نشانه‌ی ثابت در ابتدای هر دکمه است. نام دکمه‌ها دست‌نخورده می‌ماند و
+            با برگشتن به حالت ساده، دقیقاً همان چیزی که نوشته‌اید باقی می‌ماند.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-2 sm:grid-cols-3">
+            {data.styles.map((style) => {
+              const active = data.button_style === style.key;
+              return (
+                <button
+                  key={style.key}
+                  onClick={() => save.mutate({ button_style: style.key })}
+                  className={`card-hover rounded-2xl border p-3 text-right transition ${
+                    active ? "border-brand/40 bg-brand/[0.06]" : "border-border hover:border-white/20"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white">{style.label}</span>
+                    {active && <Badge variant="success">فعال</Badge>}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="rounded-xl border border-border bg-white/[0.02] p-3">
+            <div className="mb-2 text-[0.65rem] text-muted-foreground">پیش‌نمایش کیبورد:</div>
+            <div className="flex flex-wrap gap-1.5">
+              {Object.values(data.preview).map((label, i) => (
+                <span key={i} className="rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground">
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export function Content() {
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -190,6 +314,7 @@ export function Content() {
               <TabsTrigger key={g.key} value={g.key} className="px-4 py-2 text-sm">{g.label}</TabsTrigger>
             ))}
             <TabsTrigger value="buttons" className="px-4 py-2 text-sm">دکمه‌های منو</TabsTrigger>
+            <TabsTrigger value="look" className="px-4 py-2 text-sm">ظاهر و بنر</TabsTrigger>
           </TabsList>
         </div>
 
@@ -252,6 +377,10 @@ export function Content() {
               })}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="look" className="space-y-4">
+          <AppearanceCard />
         </TabsContent>
       </Tabs>
     </div>

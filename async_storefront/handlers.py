@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import catalog, reseller, texts
+from . import branding, catalog, reseller, texts
 from .db import AsyncDatabase
 from . import discounts
 from .pasarguard import PasarGuardClient
@@ -1503,7 +1503,14 @@ async def _build_reply_keyboard(user_id: int, db: AsyncDatabase) -> ReplyKeyboar
     has_primary = await primary_buy_available(db)
     has_free_test = (not is_agent) and await free_test_enabled(db)
     labels = await resolve_nav_labels(db)
-    return main_reply_keyboard(labels, is_agent=is_agent, has_test=has_test, has_primary=has_primary, has_free_test=has_free_test)
+    # The style is applied here rather than stored with the label, so switching
+    # it back leaves the operator's own wording exactly as they typed it.
+    style = await branding.button_style(db)
+    styled = {action: branding.decorate(action, label, style) for action, label in labels.items()}
+    # Routing must accept both: a keyboard already on someone's screen still
+    # carries the previous glyph.
+    _rebuild_nav_index({**labels, **styled})
+    return main_reply_keyboard(styled, is_agent=is_agent, has_test=has_test, has_primary=has_primary, has_free_test=has_free_test)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1543,12 +1550,27 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await remove_keyboard(context, chat_id, old_home_id)
     await remove_keyboard(context, chat_id, old_flow_id)
     reply_kb = await _build_reply_keyboard(update.effective_user.id, db)
-    message = await context.bot.send_message(
-        chat_id=chat_id,
-        text=welcome,
-        reply_markup=reply_kb,
-        parse_mode=ParseMode.HTML,
-    )
+    banner = await branding.banner(db)
+    message = None
+    if banner:
+        # The caption carries the welcome, so the banner and the text are one
+        # message and the keyboard sits directly under the picture.
+        try:
+            message = await context.bot.send_photo(
+                chat_id=chat_id, photo=banner, caption=welcome,
+                reply_markup=reply_kb, parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            # A broken image must not cost the user their menu.
+            LOG.warning("welcome banner could not be sent; falling back to text")
+            message = None
+    if message is None:
+        message = await context.bot.send_message(
+            chat_id=chat_id,
+            text=welcome,
+            reply_markup=reply_kb,
+            parse_mode=ParseMode.HTML,
+        )
     context.user_data[HOME_MESSAGE_KEY] = message.message_id
 
 

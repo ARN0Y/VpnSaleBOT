@@ -17,6 +17,7 @@ const SubscriptionDetail = React.lazy(() => import("@/pages/SubscriptionDetail")
 const Broadcast = React.lazy(() => import("@/pages/Broadcast").then((m) => ({ default: m.Broadcast })));
 const Discounts = React.lazy(() => import("@/pages/Discounts").then((m) => ({ default: m.Discounts })));
 const Content = React.lazy(() => import("@/pages/Content").then((m) => ({ default: m.Content })));
+const Reseller = React.lazy(() => import("@/pages/Reseller").then((m) => ({ default: m.Reseller })));
 const Events = React.lazy(() => import("@/pages/Events").then((m) => ({ default: m.Events })));
 const PasarGuardManage = React.lazy(() => import("@/pages/PasarGuardManage").then((m) => ({ default: m.PasarGuardManage })));
 const PasarGuardAdminDetail = React.lazy(() => import("@/pages/PasarGuardAdminDetail").then((m) => ({ default: m.PasarGuardAdminDetail })));
@@ -60,6 +61,7 @@ export function App() {
             <Route path="subscriptions/:subId" element={<SubscriptionDetail />} />
             <Route path="discounts" element={<Discounts />} />
             <Route path="content" element={<Content />} />
+            <Route path="reseller" element={<Reseller />} />
             <Route path="broadcast" element={<Broadcast />} />
             <Route path="pasarguard" element={<PasarGuardManage />} />
             <Route path="pasarguard/admin/:username" element={<PasarGuardAdminDetail />} />

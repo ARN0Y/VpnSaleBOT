@@ -1,0 +1,1 @@
+import{aa as t,a5 as a,w as i}from"./index-Cxb4fvHH.js";const l=t.forwardRef(({className:e,children:s,...r},o)=>a.jsx("select",{ref:o,className:i("h-10 w-full rounded-xl border border-input bg-card px-3 text-sm text-foreground","focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",e),...r,children:s}));l.displayName="Select";export{l as S};

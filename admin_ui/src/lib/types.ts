@@ -267,3 +267,12 @@ export interface SoldPanel {
   first_name?: string | null;
   username?: string | null;
 }
+
+export interface Appearance {
+  banner_enabled: boolean;
+  banner_url: string;
+  banner_file_id: string;
+  button_style: string;
+  styles: { key: string; label: string }[];
+  preview: Record<string, string>;
+}

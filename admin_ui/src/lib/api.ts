@@ -132,6 +132,8 @@ export const api = {
     packages: { kind: "volume" | "unlimited"; title: string; gb: number; days: number; price: number; agent_price: number }[],
   ) => post<Ok>("/panel-packages", { panel, packages }),
   content: () => request<import("./types").ContentBundle>("/content"),
+  appearance: () => request<import("./types").Appearance>("/appearance"),
+  saveAppearance: (p: Record<string, unknown>) => post<import("./types").Appearance>("/appearance", p),
   saveContent: (p: { messages?: Record<string, string>; buttons?: Record<string, string> }) =>
     post<import("./types").ContentBundle & { ok: boolean; unknown_placeholders: Record<string, string[]> }>("/content", p),
   previewContent: (key: string, value: string) =>
