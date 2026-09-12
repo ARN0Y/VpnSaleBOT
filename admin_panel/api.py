@@ -37,6 +37,7 @@ from .auth import (
 )
 from .deps import db, notify_telegram_user, panel
 from .settings_forms import (
+    PANEL_FORM_KEYS,
     SALES_AUDIENCES,
     backup_values_from_form,
     normalize_sales_audience,
@@ -556,6 +557,17 @@ async def update_settings(request: Request):
     # otherwise backup_values_from_form would reset them to its hardcoded defaults.
     if any(str(k).startswith(("backup_", "pg_backup_")) for k in body):
         values.update(backup_values_from_form(body, current))
+    # Anything the caller sent that no writer above claimed is a mistake worth
+    # surfacing: silently dropping it and answering "ok" is how a setting looks
+    # saved and does nothing.
+    handled = set(values) | set(PANEL_FORM_KEYS) | {"panel_password"}
+    ignored = sorted(k for k in body if k not in handled)
+    if ignored:
+        return JSONResponse(
+            {"ok": False, "error": "این تنظیمات از این مسیر قابل ذخیره نیستند: "
+                                   + "، ".join(ignored), "ignored": ignored},
+            status_code=400,
+        )
     current_panel = await database.get_panel_settings()
     await database.admin_update_settings(values)
     panel_values = None

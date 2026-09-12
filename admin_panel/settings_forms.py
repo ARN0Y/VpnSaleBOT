@@ -15,6 +15,12 @@ from .backup import DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS, normalize_xui_backup_tim
 LOG = logging.getLogger(__name__)
 
 EDITABLE_KEYS = (
+    # The bot's own connection. It lives here rather than in a file so a fresh
+    # install is configured entirely from the panel.
+    "bot_token",
+    "bot_username",
+    "proxy_url",
+    "proxy_enabled",
     "price_per_gb",
     "minimum_purchase_gb",
     "card_number",
