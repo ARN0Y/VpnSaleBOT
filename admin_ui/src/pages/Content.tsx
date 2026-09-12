@@ -1,7 +1,8 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, Eye, Image as ImageIcon, MessageSquareText, Palette, RotateCcw, Save, Type,
+  AlertTriangle, Eye, Image as ImageIcon, LayoutTemplate, MessageSquareText, Palette,
+  RotateCcw, Save, Type,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/toast";
-import type { BotMessage, BotButton } from "@/lib/types";
+import type { BotMessage, BotButton, LoginLook } from "@/lib/types";
 
 /** The text as the bot would send it: an override if there is one, else the
  *  built-in default. The editor always shows something real. */
@@ -247,6 +248,179 @@ function AppearanceCard() {
   );
 }
 
+/** A scaled-down sketch of the sign-in screen, drawn from the same settings the
+ *  real page reads — so the operator sees what they are choosing rather than
+ *  saving and switching windows to find out. */
+function LoginPreview({ look, image }: { look: LoginLook; image: string }) {
+  const [failed, setFailed] = React.useState(false);
+  React.useEffect(() => setFailed(false), [image]);
+  const showImage = Boolean(image) && !failed;
+
+  const art = (
+    <div className="relative h-full w-full overflow-hidden bg-black">
+      {showImage ? (
+        <img src={image} alt="" className="h-full w-full object-cover" onError={() => setFailed(true)} />
+      ) : (
+        <div className="absolute inset-0 bg-[radial-gradient(120%_100%_at_70%_20%,hsl(var(--brand)/0.35),transparent_60%)]" />
+      )}
+      <div className="absolute inset-0 bg-background" style={{ opacity: look.overlay / 100 }} />
+    </div>
+  );
+
+  const form = (
+    <div className="flex h-full flex-col justify-center gap-1.5 p-3">
+      <div className="text-[0.6rem] font-black text-white">{look.title || "ورود مدیریت"}</div>
+      <div className="text-[0.5rem] text-muted-foreground">{look.tagline}</div>
+      <div className="mt-1 h-2.5 w-full rounded bg-white/10" />
+      <div className="h-2.5 w-full rounded bg-white/10" />
+      <div className="mt-0.5 h-2.5 w-full rounded bg-primary/70" />
+    </div>
+  );
+
+  if (look.layout === "centered") {
+    return (
+      <div className="relative h-36 overflow-hidden rounded-xl border border-border">
+        {art}
+        <div className="absolute inset-0 grid place-items-center p-3">
+          <div className="w-1/2 rounded-lg border border-border/60 bg-card/85 backdrop-blur-sm">{form}</div>
+        </div>
+      </div>
+    );
+  }
+  const artFirst = look.layout !== "split-left";
+  return (
+    <div className="grid h-36 grid-cols-2 overflow-hidden rounded-xl border border-border">
+      <div className={artFirst ? "order-2" : "order-1"}>{art}</div>
+      <div className={artFirst ? "order-1 bg-card" : "order-2 bg-card"}>{form}</div>
+    </div>
+  );
+}
+
+function LoginLookCard() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const { data } = useQuery({ queryKey: ["appearance"], queryFn: () => api.appearance() });
+  // Held locally while editing so the preview reacts to typing, and only the
+  // fields actually touched are sent.
+  const [draft, setDraft] = React.useState<Partial<LoginLook> | null>(null);
+
+  const save = useMutation({
+    mutationFn: (patch: Record<string, unknown>) => api.saveAppearance(patch),
+    onSuccess: () => {
+      toast({ title: "ظاهر صفحه‌ی ورود ذخیره شد", variant: "success" });
+      setDraft(null);
+      qc.invalidateQueries({ queryKey: ["appearance"] });
+    },
+    onError: (e: Error) => toast({ title: "ذخیره نشد", description: e.message, variant: "error" }),
+  });
+
+  if (!data) return <Skeleton className="h-96" />;
+  const look: LoginLook = { ...data.login, ...(draft ?? {}) };
+  const set = <K extends keyof LoginLook>(k: K, v: LoginLook[K]) =>
+    setDraft((d) => ({ ...(d ?? {}), [k]: v }));
+  const dirty = draft !== null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <LayoutTemplate className="h-4 w-4" /> صفحه‌ی ورود پنل
+            </CardTitle>
+            <p className="mt-1 max-w-2xl text-xs leading-6 text-muted-foreground">
+              همان صفحه‌ای که قبل از ورود دیده می‌شود. اگر تصویری نگذارید، یک پس‌زمینه‌ی
+              آرام کشیده می‌شود که عمدی به نظر برسد — نه مثل عکسِ گم‌شده.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {dirty && <Badge variant="warning">ذخیره نشده</Badge>}
+            <Button
+              disabled={!dirty || save.isPending}
+              onClick={() => save.mutate({
+                login_title: look.title,
+                login_tagline: look.tagline,
+                login_image_url: look.image_url,
+                login_layout: look.layout,
+                login_overlay: look.overlay,
+              })}
+            >
+              <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : "ذخیره"}
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <LoginPreview look={look} image={look.image_url} />
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <div className="mb-1 text-[0.72rem] font-bold text-white">عنوان</div>
+            <Input value={look.title} onChange={(e) => set("title", e.target.value)}
+                   placeholder="ورود مدیریت" />
+          </div>
+          <div>
+            <div className="mb-1 text-[0.72rem] font-bold text-white">زیرعنوان</div>
+            <Input value={look.tagline} onChange={(e) => set("tagline", e.target.value)}
+                   placeholder="دسترسی مدیر به پنل فروش" />
+          </div>
+          <div className="sm:col-span-2">
+            <div className="mb-1 text-[0.72rem] font-bold text-white">آدرس تصویر پس‌زمینه</div>
+            <Input value={look.image_url} dir="ltr"
+                   placeholder="https://example.com/background.jpg"
+                   onChange={(e) => set("image_url", e.target.value)} />
+            <div className="mt-1 text-[0.62rem] text-muted-foreground">
+              خالی بگذارید تا پس‌زمینه‌ی پیش‌فرض استفاده شود. اگر آدرس باز نشود، ربات
+              خودکار به همان پیش‌فرض برمی‌گردد.
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-2 text-[0.72rem] font-bold text-white">چیدمان</div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {look.layouts.map((option) => {
+              const active = look.layout === option.key;
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => set("layout", option.key)}
+                  className={`card-hover rounded-xl border p-2.5 text-right text-xs transition ${
+                    active ? "border-brand/40 bg-brand/[0.06] text-white" : "border-border text-muted-foreground hover:border-white/20"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[0.72rem] font-bold text-white">تیرگی روی تصویر</span>
+            <span className="font-mono text-[0.7rem] text-muted-foreground">{look.overlay}٪</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={90}
+            step={5}
+            value={look.overlay}
+            onChange={(e) => set("overlay", Number(e.target.value))}
+            className="w-full accent-[hsl(var(--brand))]"
+          />
+          <div className="mt-1 text-[0.62rem] leading-5 text-muted-foreground">
+            تصویر را تیره می‌کند تا متن روی آن خوانا بماند. تصویر روشن معمولاً به
+            تیرگی بیشتری نیاز دارد.
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function Content() {
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -314,7 +488,8 @@ export function Content() {
               <TabsTrigger key={g.key} value={g.key} className="px-4 py-2 text-sm">{g.label}</TabsTrigger>
             ))}
             <TabsTrigger value="buttons" className="px-4 py-2 text-sm">دکمه‌های منو</TabsTrigger>
-            <TabsTrigger value="look" className="px-4 py-2 text-sm">ظاهر و بنر</TabsTrigger>
+            <TabsTrigger value="look" className="px-4 py-2 text-sm">ظاهر ربات</TabsTrigger>
+            <TabsTrigger value="panel" className="px-4 py-2 text-sm">ظاهر پنل</TabsTrigger>
           </TabsList>
         </div>
 
@@ -381,6 +556,10 @@ export function Content() {
 
         <TabsContent value="look" className="space-y-4">
           <AppearanceCard />
+        </TabsContent>
+
+        <TabsContent value="panel" className="space-y-4">
+          <LoginLookCard />
         </TabsContent>
       </Tabs>
     </div>

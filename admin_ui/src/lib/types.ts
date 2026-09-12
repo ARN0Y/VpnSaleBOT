@@ -268,6 +268,15 @@ export interface SoldPanel {
   username?: string | null;
 }
 
+export interface LoginLook {
+  title: string;
+  tagline: string;
+  image_url: string;
+  layout: string;
+  overlay: number;
+  layouts: { key: string; label: string }[];
+}
+
 export interface Appearance {
   banner_enabled: boolean;
   banner_url: string;
@@ -275,4 +284,5 @@ export interface Appearance {
   button_style: string;
   styles: { key: string; label: string }[];
   preview: Record<string, string>;
+  login: LoginLook;
 }
