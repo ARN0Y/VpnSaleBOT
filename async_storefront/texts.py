@@ -50,8 +50,8 @@ MESSAGES: tuple[Message, ...] = (
         key="welcome",
         label="پیام خوش‌آمد (/start)",
         group="menu",
-        placeholders=("name", "balance"),
-        note="{name} نام کاربر، {balance} موجودی کیف پول با جداکننده هزارگان.",
+        placeholders=("name", "balance", "support"),
+        note="{name} نام کاربر، {balance} موجودی کیف پول، {support} آیدی پشتیبانی.",
         default=(
             "سلام {name} 👋\n"
             "به فروشگاه ما خوش آمدید.\n\n"
@@ -189,3 +189,54 @@ def unknown_placeholders(key: str, template: str) -> list[str]:
     allowed = set(BY_KEY[key].placeholders) if key in BY_KEY else set()
     found = {m.group(1) for m in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", str(template or ""))}
     return sorted(found - allowed)
+
+# ── the bot's own buttons ──
+# The labels on the persistent keyboard. Same idea as the messages: a default,
+# an override, and clearing the override brings the default back. The routing
+# index is rebuilt from whatever is current, so a renamed button keeps working
+# and the old label keeps working too for anyone whose keyboard has not
+# refreshed yet.
+
+
+@dataclass(frozen=True)
+class Button:
+    action: str
+    label: str                       # what the operator sees in the panel
+    default: str
+
+
+BUTTONS: tuple[Button, ...] = (
+    Button("buy", "خرید سرویس", "⚡ خرید سرویس پرسرعت"),
+    Button("renew", "تمدید سرویس", "🔄 تمدید سرویس"),
+    Button("subs", "سرویس‌های من", "📦 سرویس‌های من"),
+    Button("account", "حساب کاربری", "🪪 حساب کاربری"),
+    Button("wallet", "کیف پول", "💎 کیف پول من"),
+    Button("support", "پشتیبانی", "🛟 تماس با پشتیبانی"),
+    Button("test_config", "تست رایگان", "🆓 دریافت تست رایگان"),
+    Button("agent_request", "بخش نمایندگی", "💎 بخش نمایندگی"),
+)
+BUTTON_BY_ACTION: dict[str, Button] = {b.action: b for b in BUTTONS}
+
+
+def button_setting_key(action: str) -> str:
+    return f"btn_{action}_label"
+
+
+async def button_overview(db) -> list[dict]:
+    out: list[dict] = []
+    for button in BUTTONS:
+        override = str(await db.get_setting(button_setting_key(button.action), "") or "").strip()
+        out.append({
+            "action": button.action,
+            "label": button.label,
+            "default": button.default,
+            "value": override,
+            "customised": bool(override),
+        })
+    return out
+
+
+async def save_button(db, action: str, label: str) -> None:
+    if action not in BUTTON_BY_ACTION:
+        raise ValueError(f"unknown button: {action}")
+    await db.set_setting(button_setting_key(action), str(label or "").strip())

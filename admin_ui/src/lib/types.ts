@@ -196,3 +196,74 @@ export interface DiscountBundle {
   plans: { id: string; title: string; category_id: string }[];
   categories: { id: string; title: string; emoji: string }[];
 }
+
+export interface BotMessage {
+  key: string;
+  label: string;
+  group: string;
+  group_label: string;
+  default: string;
+  value: string;
+  customised: boolean;
+  placeholders: string[];
+  note: string;
+  multiline: boolean;
+}
+
+export interface BotButton {
+  action: string;
+  label: string;
+  default: string;
+  value: string;
+  customised: boolean;
+}
+
+export interface ContentBundle {
+  groups: { key: string; label: string }[];
+  messages: BotMessage[];
+  buttons: BotButton[];
+}
+
+export interface ResellerPackage {
+  id: string;
+  title: string;
+  traffic_gb: number;
+  price: number;
+  days: number;
+  user_limit: number;
+  note: string;
+  enabled: boolean;
+  sort: number;
+}
+
+export interface ResellerSettings {
+  enabled: boolean;
+  topup_enabled: boolean;
+  login_url: string;
+  role_name: string;
+  username_prefix: string;
+}
+
+export interface ResellerBundle {
+  settings: ResellerSettings;
+  packages: ResellerPackage[];
+  problems: Record<string, string[]>;
+  overview: { total: number; active: number; sold_bytes: number; used_bytes: number; revenue: number };
+  bytes_per_gb: number;
+}
+
+export interface SoldPanel {
+  panel_id: string;
+  user_id: number;
+  pg_username: string;
+  title: string;
+  traffic_bytes: number;
+  used_bytes: number;
+  price_toman: number;
+  status: string;
+  created_at: number;
+  expires_at: number;
+  synced_at: number;
+  first_name?: string | null;
+  username?: string | null;
+}

@@ -131,19 +131,22 @@ export const api = {
     panel: "1" | "2" | "pg",
     packages: { kind: "volume" | "unlimited"; title: string; gb: number; days: number; price: number; agent_price: number }[],
   ) => post<Ok>("/panel-packages", { panel, packages }),
-  setTexts: (p: { welcome_text?: string; labels?: Record<string, string> }) => post<Ok>("/texts", p),
-  setPanel2: (p: {
-    enabled: boolean;
-    label: string;
-    base_url: string;
-    username: string;
-    password: string;
-    inbound_id: number;
-    sub_link_base: string;
-    use_proxy: "" | "true" | "false";
-    proxy_url: string;
-    price_per_gb: number;
-  }) => post<Ok>("/panel2", p),
+  content: () => request<import("./types").ContentBundle>("/content"),
+  saveContent: (p: { messages?: Record<string, string>; buttons?: Record<string, string> }) =>
+    post<import("./types").ContentBundle & { ok: boolean; unknown_placeholders: Record<string, string[]> }>("/content", p),
+  previewContent: (key: string, value: string) =>
+    post<{ ok: boolean; rendered: string; unknown_placeholders: string[] }>("/content/preview", { key, value }),
+  reseller: () => request<import("./types").ResellerBundle>("/reseller"),
+  saveResellerSettings: (p: Record<string, unknown>) =>
+    post<{ ok: boolean; settings: import("./types").ResellerSettings }>("/reseller/settings", p),
+  saveResellerPackages: (packages: import("./types").ResellerPackage[]) =>
+    post<{ ok: boolean; packages: import("./types").ResellerPackage[]; problems: Record<string, string[]> }>(
+      "/reseller/packages", { packages }),
+  resellerPanels: (q = "", status = "all", page = 1) =>
+    request<import("./types").Paginated<import("./types").SoldPanel>>(
+      `/reseller/panels?q=${encodeURIComponent(q)}&status=${status}&page=${page}`),
+  syncResellerPanel: (panelId: string) =>
+    post<{ ok: boolean; error?: string }>(`/reseller/panels/${encodeURIComponent(panelId)}/sync`, {}),
 
   // PasarGuard backend (navid: package pricing)
   setPrimaryBackend: (backend: "xui" | "pasarguard") => post<Ok>("/primary-backend", { backend }),

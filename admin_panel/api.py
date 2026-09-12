@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import secrets
 import string
 from pathlib import Path
@@ -20,7 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from async_storefront import catalog, discounts
+from async_storefront import catalog, discounts, reseller, texts
 from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.provisioning import PG_INBOUND_SENTINEL
@@ -732,31 +733,6 @@ async def set_infinite_package(request: Request):
     }
 
 
-_NAV_LABEL_ACTIONS = {
-    "buy", "renew", "subs", "account", "wallet",
-    "support", "test_config", "agent_request", "infinite",
-}
-
-
-@router.post("/texts")
-async def set_texts(request: Request):
-    """Edit the welcome message and the bot's menu-button labels (settings KV,
-    no schema change). Empty label = use the built-in default."""
-    body = await _json_body(request)
-    values: dict[str, str] = {}
-    if "welcome_text" in body:
-        values["welcome_text"] = str(body.get("welcome_text") or "").strip()
-    labels = body.get("labels")
-    if isinstance(labels, dict):
-        for action, label in labels.items():
-            key = str(action).strip()
-            if key in _NAV_LABEL_ACTIONS:
-                values[f"btn_{key}_label"] = str(label or "").strip()
-    if values:
-        await db(request).admin_update_settings(values)
-    return {"ok": True}
-
-
 @router.post("/panel-packages")
 async def set_panel_packages(request: Request):
     """Save a panel's package list (volume / fair-usage 'unlimited') as JSON in
@@ -801,57 +777,6 @@ async def set_panel_primary(request: Request):
     enabled = "1" if bool(body.get("enabled")) else "0"
     await db(request).admin_update_settings({"panel_enabled": enabled})
     return {"ok": True, "enabled": enabled == "1"}
-
-
-@router.post("/panel2")
-async def set_panel2(request: Request):
-    """Configure the optional second 3x-ui panel (stored in settings KV, no
-    schema change). Sold in the bot as a dedicated buy option with its own price
-    and its own proxy on/off switch. Empty password keeps the current one."""
-    body = await _json_body(request)
-    database = db(request)
-    current = {row["key"]: row["value"] for row in await database.admin_list_settings()}
-
-    def _s(key: str) -> str:
-        return str(body.get(key, "") or "").strip()
-
-    def _int(value, default=0, minimum=0):
-        try:
-            n = int(float(value))
-        except (TypeError, ValueError):
-            return default
-        return max(minimum, n)
-
-    # use_proxy tri-state: true / false / "" (auto)
-    raw_use = body.get("use_proxy", None)
-    if raw_use is True or str(raw_use).strip().lower() in {"1", "true", "on", "yes"}:
-        use_proxy = "true"
-    elif raw_use is False or str(raw_use).strip().lower() in {"0", "false", "off", "no"}:
-        use_proxy = "false"
-    else:
-        use_proxy = ""
-
-    new_base = _s("base_url")
-    values: dict[str, str] = {
-        "panel2_enabled": "1" if bool(body.get("enabled")) else "0",
-        "panel2_label": _s("label") or "سرور اختصاصی",
-        "panel2_base_url": new_base,
-        "panel2_username": _s("username"),
-        "panel2_inbound_id": str(_int(body.get("inbound_id"), 0, 0)),
-        "panel2_sub_link_base": _s("sub_link_base"),
-        "panel2_use_proxy": use_proxy,
-        "panel2_proxy_url": _s("proxy_url"),
-        "panel2_price_per_gb": str(_int(body.get("price_per_gb"), 7000, 0) or 7000),
-    }
-    password = str(body.get("password", "") or "")
-    if password.strip():
-        values["panel2_password"] = password
-    # If the base URL changed, drop the stored session cookie so the next call
-    # re-logs in against the new panel.
-    if new_base and new_base.rstrip("/") != str(current.get("panel2_base_url", "")).rstrip("/"):
-        values["panel2_cookie"] = ""
-    await database.admin_update_settings(values)
-    return {"ok": True, "enabled": values["panel2_enabled"] == "1"}
 
 
 # ───────────────────────── PasarGuard backend (navid: package pricing) ─────────────────────────
@@ -1323,3 +1248,221 @@ async def preview_discount(request: Request):
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)[:200]}, status_code=400)
     return {"ok": True, **quote}
+
+
+# ───────────────────────── reseller panels ─────────────────────────
+
+
+def _reseller_settings_from(body: dict, current: dict[str, str]) -> dict[str, str]:
+    """Only the keys the caller actually sent, so a partial save cannot blank
+    the rest of the section."""
+    out: dict[str, str] = {}
+    if "enabled" in body:
+        out[reseller.SETTING_ENABLED] = "1" if _truthy(body.get("enabled")) else "0"
+    if "topup_enabled" in body:
+        out[reseller.SETTING_TOPUP_ENABLED] = "1" if _truthy(body.get("topup_enabled")) else "0"
+    if "login_url" in body:
+        out[reseller.SETTING_LOGIN_URL] = str(body.get("login_url") or "").strip()
+    if "role_name" in body:
+        out[reseller.SETTING_ROLE_NAME] = (
+            str(body.get("role_name") or "").strip() or reseller.DEFAULT_ROLE_NAME
+        )
+    if "username_prefix" in body:
+        prefix = re.sub(r"[^a-z0-9_]", "", str(body.get("username_prefix") or "").lower())
+        out[reseller.SETTING_PREFIX] = prefix[:8] or reseller.DEFAULT_PREFIX
+    return out
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "on", "yes"}
+
+
+@router.get("/reseller")
+async def reseller_overview(request: Request):
+    """Everything the reseller-panel section of the settings page renders."""
+    database = db(request)
+    packages = await reseller.load_packages(database)
+    return {
+        "settings": {
+            "enabled": await reseller.is_enabled(database),
+            "topup_enabled": await reseller.topup_enabled(database),
+            "login_url": await reseller.login_url(database),
+            "role_name": await reseller.role_name(database),
+            "username_prefix": await reseller.username_prefix(database),
+        },
+        "packages": packages,
+        "problems": {
+            p["id"]: reseller.validate_package(p)
+            for p in packages
+            if reseller.validate_package(p)
+        },
+        "overview": await database.reseller_panel_overview(),
+        "bytes_per_gb": reseller.BYTES_PER_GB,
+    }
+
+
+@router.post("/reseller/settings")
+async def reseller_save_settings(request: Request):
+    body = await _json_body(request)
+    database = db(request)
+    current = {row["key"]: row["value"] for row in await database.admin_list_settings()}
+    values = _reseller_settings_from(body, current)
+    if values:
+        await database.admin_update_settings(values)
+    return {"ok": True, "settings": {
+        "enabled": await reseller.is_enabled(database),
+        "topup_enabled": await reseller.topup_enabled(database),
+        "login_url": await reseller.login_url(database),
+        "role_name": await reseller.role_name(database),
+        "username_prefix": await reseller.username_prefix(database),
+    }}
+
+
+@router.post("/reseller/packages")
+async def reseller_save_packages(request: Request):
+    """Replace the package list. Normalised server-side so a malformed package
+    can never reach the buy flow."""
+    body = await _json_body(request)
+    packages = body.get("packages")
+    if not isinstance(packages, list):
+        return JSONResponse({"ok": False, "error": "packages must be a list"}, status_code=400)
+    if len(packages) > 60:
+        return JSONResponse({"ok": False, "error": "too many packages"}, status_code=400)
+    saved = await reseller.save_packages(db(request), packages)
+    return {
+        "ok": True,
+        "packages": saved,
+        "problems": {p["id"]: reseller.validate_package(p) for p in saved
+                     if reseller.validate_package(p)},
+    }
+
+
+@router.get("/reseller/panels")
+async def reseller_list_panels(request: Request, q: str = "", status: str = "all",
+                               page: int = 1, page_size: int = 25):
+    pg_num = max(1, int(page))
+    size = max(1, min(100, int(page_size)))
+    rows = await db(request).admin_list_reseller_panels(
+        search=q, status=status, limit=size + 1, offset=(pg_num - 1) * size
+    )
+    return {"items": rows[:size], "page": pg_num, "page_size": size,
+            "has_more": len(rows) > size}
+
+
+@router.post("/reseller/panels/{panel_id}/sync")
+async def reseller_sync_panel(request: Request, panel_id: str):
+    """Refresh one panel's usage from the server.
+
+    Reports plainly when the account is missing there: a panel sold by the bot
+    but deleted in the dashboard is something the operator needs to know about,
+    not something to paper over with a stale figure.
+    """
+    database = db(request)
+    panel = await database.reseller_panel(panel_id)
+    if not panel:
+        return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+    client = await _pg_client(database)
+    if client is None:
+        return JSONResponse({"ok": False, "error": "پنل پاسارگارد تنظیم نشده است."}, status_code=400)
+    try:
+        live = await client.get_admin(str(panel["pg_username"]))
+        if live is None:
+            await database.set_reseller_panel_status(panel_id, "missing")
+            return {"ok": False, "error": "این حساب در پنل پیدا نشد.", "status": "missing"}
+        await database.sync_reseller_panel_usage(
+            panel_id,
+            used_bytes=int(live.get("used_traffic") or 0),
+            traffic_bytes=int(live.get("data_limit") or 0) or None,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
+    return {"ok": True, "panel": await database.reseller_panel(panel_id)}
+
+
+# ───────────────────────── bot messages ─────────────────────────
+
+
+# ───────────── the bot's wording: messages and button labels ─────────────
+# One place for both, because to the operator they are the same job: changing
+# what the bot says. Each carries its default, so "reset" is a real option and
+# an override is always distinguishable from the built-in text.
+
+
+@router.get("/content")
+async def get_content(request: Request):
+    database = db(request)
+    return {
+        "groups": [{"key": k, "label": v} for k, v in texts.GROUPS.items()],
+        "messages": await texts.overview(database),
+        "buttons": await texts.button_overview(database),
+    }
+
+
+@router.post("/content")
+async def save_content(request: Request):
+    """Save message and button overrides. An empty value restores the default.
+
+    A placeholder the bot does not provide is reported rather than rejected:
+    the operator may be mid-edit, and the bot renders it literally instead of
+    failing, so a typo can never stop a purchase.
+    """
+    body = await _json_body(request)
+    database = db(request)
+    messages = body.get("messages") if isinstance(body.get("messages"), dict) else {}
+    buttons = body.get("buttons") if isinstance(body.get("buttons"), dict) else {}
+    if not messages and not buttons:
+        return JSONResponse({"ok": False, "error": "nothing to save"}, status_code=400)
+
+    unknown: dict[str, list[str]] = {}
+    for key, value in list(messages.items())[:200]:
+        if key not in texts.BY_KEY:
+            return JSONResponse({"ok": False, "error": f"unknown message: {key}"}, status_code=400)
+        text = str(value or "")
+        if len(text) > 4000:
+            return JSONResponse(
+                {"ok": False, "error": f"متن «{texts.BY_KEY[key].label}» از ۴۰۰۰ کاراکتر بیشتر است."},
+                status_code=400,
+            )
+        stray = texts.unknown_placeholders(key, text)
+        if stray:
+            unknown[key] = stray
+        await texts.save(database, key, text)
+
+    for action, label in list(buttons.items())[:50]:
+        if action not in texts.BUTTON_BY_ACTION:
+            return JSONResponse({"ok": False, "error": f"unknown button: {action}"}, status_code=400)
+        clean = str(label or "").strip()
+        if len(clean) > 64:
+            return JSONResponse(
+                {"ok": False, "error": "نام دکمه نمی‌تواند بیشتر از ۶۴ کاراکتر باشد."},
+                status_code=400,
+            )
+        await texts.save_button(database, action, clean)
+
+    return {
+        "ok": True,
+        "messages": await texts.overview(database),
+        "buttons": await texts.button_overview(database),
+        "unknown_placeholders": unknown,
+    }
+
+
+@router.post("/content/preview")
+async def preview_content(request: Request):
+    """Render a draft message the way the bot would, without saving it."""
+    body = await _json_body(request)
+    key = str(body.get("key") or "")
+    if key not in texts.BY_KEY:
+        return JSONResponse({"ok": False, "error": "unknown message"}, status_code=400)
+    sample = {name: f"«{name}»" for name in texts.BY_KEY[key].placeholders}
+    sample.update({"balance": "120,000", "name": "علی", "support": "@support",
+                   "support_id": "@support"})
+    template = str(body.get("value") or "").strip() or texts.default_for(key)
+    return {
+        "ok": True,
+        "rendered": texts.fill(template, **sample),
+        "unknown_placeholders": texts.unknown_placeholders(key, template),
+    }

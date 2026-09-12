@@ -8,6 +8,7 @@ import {
   Megaphone,
   Activity,
   SlidersHorizontal,
+  MessageSquareText,
   Ticket,
   ShieldCheck,
   type LucideIcon,
@@ -33,6 +34,7 @@ export const NAV: NavItem[] = [
   { to: "/broadcast", label: "پیام همگانی", icon: Megaphone, group: "ops" },
   { to: "/pasarguard", label: "مدیریت PasarGuard", icon: ShieldCheck, group: "ops" },
   { to: "/events", label: "رویدادها", icon: Activity, group: "system" },
+  { to: "/content", label: "متن‌ها و دکمه‌ها", icon: MessageSquareText, group: "system" },
   { to: "/settings", label: "تنظیمات", icon: SlidersHorizontal, group: "system" },
 ];
 
@@ -47,5 +49,6 @@ export const PAGE_TITLES: Record<string, string> = {
   "/broadcast": "پیام همگانی",
   "/pasarguard": "مدیریت PasarGuard",
   "/events": "رویدادها",
+  "/content": "متن‌ها و دکمه‌های ربات",
   "/settings": "تنظیمات",
 };

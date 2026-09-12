@@ -124,28 +124,22 @@ class _NavFilter(filters.MessageFilter):
 
 _nav_filter = _NavFilter()
 
-WELCOME_TEXT = (
-    "⚡️ <b>NavidVPN</b>\n"
-    "<i>نویدِ یک اینترنت آزاد و پرسرعت — هر لحظه، همه‌جا.</i>\n"
-    "<code>─────────────────────</code>\n"
-    "🚀 سرعت بالا و اتصال پایدار و بی‌وقفه\n"
-    "👥 کانفیگ <b>۳ کاربره</b> — ایده‌آل برای خانواده و دوستان\n"
-    "🇩🇪 <b>آیپی ثابت آلمان</b> — مطمئن و باکیفیت\n"
-    "🛡 امنیت کامل و حفظ کامل حریم خصوصی\n"
-    "🎯 تحویل آنی سرویس + پشتیبانی واقعی انسانی\n"
-    "<code>─────────────────────</code>\n"
-    "🛟 پشتیبانی: {support}\n\n"
-    "✨ برای شروع، یکی از گزینه‌های زیر را انتخاب کنید 👇"
-)
 
 
-async def render_welcome(db: AsyncDatabase) -> str:
-    """Welcome text with the support id injected from settings. The admin can
-    override the whole message from the panel (``welcome_text``); the optional
-    ``{support}`` placeholder is still filled in. Falls back to the built-in."""
-    template = (await db.get_setting("welcome_text", "") or "").strip() or WELCOME_TEXT
+async def render_welcome(db: AsyncDatabase, user_id: int = 0) -> str:
+    """The welcome message, from the editable registry.
+
+    One source of wording: the registry holds the default, the panel holds the
+    override, and the placeholders are filled here.
+    """
     support = (await db.get_setting("support_id", "") or "").strip()
-    return template.replace("{support}", html.escape(support) if support else "—")
+    balance = await db.get_wallet_balance(int(user_id)) if user_id else 0
+    return await texts.render(
+        db, "welcome",
+        support=html.escape(support) if support else "—",
+        balance=f"{int(balance):,}",
+        name="",
+    )
 
 BAN_TEXT = (
     "⛔️ <b>دسترسی شما به ربات محدود شده است.</b>\n\n"
@@ -1519,7 +1513,7 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     old_flow_id = context.user_data.get(FLOW_PROMPT_KEY)
     clear_flow_state(context)
     db: AsyncDatabase = context.application.bot_data["db"]
-    welcome = await render_welcome(db)
+    welcome = await render_welcome(db, update.effective_user.id)
     if update.callback_query:
         keyboard = await menu_for_user(update, context)
         query = update.callback_query

@@ -31,16 +31,6 @@ const PANEL_FIELDS: { key: string; label: string; type?: string }[] = [
   { key: "sub_link_base", label: "آدرس پایه لینک اشتراک" },
 ];
 // action -> default label (must match async_storefront/handlers.py NAV_ACTIONS)
-const NAV_LABEL_FIELDS: { action: string; label: string; def: string }[] = [
-  { action: "buy", label: "خرید سرویس", def: "⚡ خرید سرویس پرسرعت" },
-  { action: "renew", label: "تمدید", def: "🔄 تمدید سرویس" },
-  { action: "subs", label: "سرویس‌های من", def: "📦 سرویس‌های من" },
-  { action: "account", label: "حساب کاربری", def: "🪪 حساب کاربری" },
-  { action: "wallet", label: "کیف پول", def: "💎 کیف پول من" },
-  { action: "support", label: "پشتیبانی", def: "🛟 تماس با پشتیبانی" },
-  { action: "test_config", label: "تست رایگان", def: "🆓 دریافت تست رایگان" },
-  { action: "agent_request", label: "درخواست نمایندگی", def: "🤝 درخواست نمایندگی" },
-];
 
 function SalesRow({ title, audience, status, onToggle, busy }: {
   title: string; audience: Audience; status: string;
@@ -403,13 +393,7 @@ export function Settings() {
   const [tab, setTab] = React.useState("general");
   const [form, setForm] = React.useState<Record<string, string>>({});
   const [cards, setCards] = React.useState<{ number: string; name: string }[]>([]);
-  const [p2, setP2] = React.useState({
-    enabled: false, label: "سرور اختصاصی", base_url: "", username: "", password: "",
-    inbound_id: "0", sub_link_base: "", use_proxy: "" as Tri, proxy_url: "", price_per_gb: "7000",
-  });
   const [p1Enabled, setP1Enabled] = React.useState(true);
-  const [welcome, setWelcome] = React.useState("");
-  const [navLabels, setNavLabels] = React.useState<Record<string, string>>({});
   const inited = React.useRef(false);
   React.useEffect(() => {
     if (data && !inited.current) {
@@ -422,48 +406,19 @@ export function Settings() {
       } catch {
         setCards([]);
       }
-      const rawUse = items.panel2_use_proxy ?? "";
-      setP2({
-        enabled: (items.panel2_enabled ?? "0") === "1",
-        label: items.panel2_label || "سرور اختصاصی",
-        base_url: items.panel2_base_url ?? "",
-        username: items.panel2_username ?? "",
-        password: "",
-        inbound_id: items.panel2_inbound_id ?? "0",
-        sub_link_base: items.panel2_sub_link_base ?? "",
-        use_proxy: (rawUse === "true" || rawUse === "false" ? rawUse : "") as Tri,
-        proxy_url: items.panel2_proxy_url ?? "",
-        price_per_gb: items.panel2_price_per_gb ?? "7000",
-      });
       setP1Enabled((items.panel_enabled ?? "1") !== "0");
-      setWelcome(items.welcome_text ?? "");
-      setNavLabels(Object.fromEntries(NAV_LABEL_FIELDS.map((f) => [f.action, items[`btn_${f.action}_label`] ?? ""])));
       inited.current = true;
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveCards = useMutation({ mutationFn: () => api.setPaymentCards(cards.filter((c) => c.number.trim())), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const save = useMutation({ mutationFn: () => api.updateSettings(form), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
-  const savePanel2 = useMutation({
-    mutationFn: () => api.setPanel2({
-      enabled: p2.enabled, label: p2.label.trim() || "سرور اختصاصی", base_url: p2.base_url.trim(),
-      username: p2.username.trim(), password: p2.password, inbound_id: Number(p2.inbound_id) || 0,
-      sub_link_base: p2.sub_link_base.trim(), use_proxy: p2.use_proxy, proxy_url: p2.proxy_url.trim(),
-      price_per_gb: Number(p2.price_per_gb) || 7000,
-    }),
-    onSuccess: () => { setP2((s) => ({ ...s, password: "" })); qc.invalidateQueries({ queryKey: ["settings"] }); },
-  });
   const savePanelPrimary = useMutation({
     mutationFn: (enabled: boolean) => api.setPanelPrimary(enabled),
     onSuccess: (_r, enabled) => { setP1Enabled(enabled); qc.invalidateQueries({ queryKey: ["settings"] }); },
   });
-  const saveTexts = useMutation({
-    mutationFn: () => api.setTexts({ welcome_text: welcome, labels: navLabels }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
-  });
   const toggle = useMutation({ mutationFn: ({ a, s }: { a: Audience; s: "open" | "closed" }) => api.setSales(a, s), onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }) });
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
-  const setp = (k: keyof typeof p2, v: string | boolean) => setP2((s) => ({ ...s, [k]: v }));
 
   if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-12 w-72" /><Skeleton className="h-72" /></div>;
 
@@ -471,7 +426,6 @@ export function Settings() {
     { v: "general", label: "عمومی" },
     { v: "sales", label: "فروش" },
     { v: "payment", label: "پرداخت" },
-    { v: "texts", label: "متن‌ها و دکمه‌ها" },
     { v: "catalog", label: "پلن‌های فروش" },
     { v: "panels", label: "پنل‌ها" },
     { v: "backup", label: "بکاپ" },
@@ -554,49 +508,6 @@ export function Settings() {
 
       {/* ───────────── Panels ───────────── */}
       {/* ───────────── Texts & button labels ───────────── */}
-      <TabsContent value="texts" className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>پیام خوش‌آمدگویی</CardTitle>
-            <p className="text-sm text-muted-foreground">
-              متن صفحه‌ی شروع ربات. می‌توانید از <code className="rounded bg-white/10 px-1">{"{support}"}</code> برای درج خودکار آیدی پشتیبانی و از تگ‌های ساده‌ی HTML تلگرام (<code className="rounded bg-white/10 px-1">&lt;b&gt;</code>، <code className="rounded bg-white/10 px-1">&lt;i&gt;</code>، <code className="rounded bg-white/10 px-1">&lt;code&gt;</code>) استفاده کنید. خالی بگذارید تا متن پیش‌فرض نمایش داده شود.
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <Textarea value={welcome} onChange={(e) => setWelcome(e.target.value)} rows={10} placeholder="خالی = متن پیش‌فرض" className="font-mono text-sm leading-7" dir="rtl" />
-            <div className="flex justify-end">
-              <Button size="sm" disabled={saveTexts.isPending} onClick={() => saveTexts.mutate()}>
-                <Save className="h-4 w-4" /> {saveTexts.isPending ? "در حال ذخیره…" : saveTexts.isSuccess ? "ذخیره شد ✓" : "ذخیره متن‌ها و دکمه‌ها"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>نام دکمه‌های منوی ربات</CardTitle>
-            <p className="text-sm text-muted-foreground">
-              نام نمایشی هر دکمه‌ی منو را تغییر دهید (ایموجی هم می‌توانید بگذارید). خالی بگذارید تا نام پیش‌فرض استفاده شود. تغییرات تا چند لحظه بعد در ربات اعمال می‌شوند؛ کاربران با زدن /start منوی به‌روز را می‌بینند.
-            </p>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            {NAV_LABEL_FIELDS.map((f) => (
-              <Field key={f.action} label={f.label} hint={`پیش‌فرض: ${f.def}`}>
-                <Input
-                  value={navLabels[f.action] ?? ""}
-                  placeholder={f.def}
-                  onChange={(e) => setNavLabels((s) => ({ ...s, [f.action]: e.target.value }))}
-                />
-              </Field>
-            ))}
-            <div className="sm:col-span-2 flex justify-end">
-              <Button size="sm" disabled={saveTexts.isPending} onClick={() => saveTexts.mutate()}>
-                <Save className="h-4 w-4" /> {saveTexts.isPending ? "در حال ذخیره…" : saveTexts.isSuccess ? "ذخیره شد ✓" : "ذخیره متن‌ها و دکمه‌ها"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </TabsContent>
 
       <TabsContent value="panels" className="space-y-6">
         <PrimaryPanelCard items={items} />
@@ -629,64 +540,6 @@ export function Settings() {
           </CardContent>
         </Card>
 
-        <Card className="border-brand/20">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Server className="h-5 w-5 text-brand" /> پنل دوم (سرور اختصاصی)</CardTitle>
-            <p className="text-sm text-muted-foreground">
-              یک پنل 3x-ui دیگر اضافه کنید که در ربات به‌عنوان یک گزینه‌ی خرید مجزا با قیمت اختصاصی نمایش داده می‌شود. می‌توانید اتصال این پنل را با پروکسی یا بدون پروکسی تنظیم کنید. پسورد خالی = بدون تغییر.
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/[0.02] p-4">
-              <div className="flex items-center gap-3">
-                <span className="font-bold text-white">وضعیت پنل دوم</span>
-                <Badge variant={p2.enabled ? "success" : "danger"}>{p2.enabled ? "فعال" : "غیرفعال"}</Badge>
-              </div>
-              <div className="flex gap-2">
-                <Button size="sm" disabled={p2.enabled} onClick={() => setp("enabled", true)}><LockOpen className="h-4 w-4" /> فعال</Button>
-                <Button size="sm" variant="destructive" disabled={!p2.enabled} onClick={() => setp("enabled", false)}><Lock className="h-4 w-4" /> غیرفعال</Button>
-              </div>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="نام دکمه‌ی خرید" hint="در منوی ربات نمایش داده می‌شود"><Input value={p2.label} onChange={(e) => setp("label", e.target.value)} placeholder="سرور اختصاصی" /></Field>
-              <Field label="قیمت هر گیگ (تومان)" hint="قیمت اختصاصی این پنل"><Input value={p2.price_per_gb} inputMode="numeric" onChange={(e) => setp("price_per_gb", e.target.value)} placeholder="7000" /></Field>
-              <Field label="آدرس پنل 3x-ui"><Input value={p2.base_url} onChange={(e) => setp("base_url", e.target.value)} placeholder="http://ip:port/path" /></Field>
-              <Field label="آدرس پایه لینک اشتراک"><Input value={p2.sub_link_base} onChange={(e) => setp("sub_link_base", e.target.value)} placeholder="http://domain:port/sub" /></Field>
-              <Field label="یوزرنیم پنل"><Input value={p2.username} onChange={(e) => setp("username", e.target.value)} /></Field>
-              <Field label="پسورد پنل"><Input type="password" value={p2.password} onChange={(e) => setp("password", e.target.value)} placeholder="بدون تغییر" /></Field>
-              <Field label="Inbound ID"><Input value={p2.inbound_id} inputMode="numeric" onChange={(e) => setp("inbound_id", e.target.value)} /></Field>
-              <Field label="آدرس پروکسی" hint="نمونه: socks5h://user:pass@127.0.0.1:1080"><Input value={p2.proxy_url} onChange={(e) => setp("proxy_url", e.target.value)} placeholder="خالی = بدون پروکسی" /></Field>
-            </div>
-
-            <div className="rounded-xl border border-border bg-white/[0.02] p-4">
-              <div className="mb-2 text-sm font-bold text-white">اتصال از طریق پروکسی</div>
-              <div className="flex flex-wrap gap-2">
-                {([
-                  { v: "" as Tri, label: "خودکار", icon: Wifi, hint: "اگر آدرس پروکسی پر باشد استفاده می‌شود" },
-                  { v: "true" as Tri, label: "با پروکسی", icon: Wifi },
-                  { v: "false" as Tri, label: "بدون پروکسی", icon: WifiOff },
-                ]).map((opt) => {
-                  const active = p2.use_proxy === opt.v;
-                  const Icon = opt.icon;
-                  return (
-                    <button key={opt.v || "auto"} onClick={() => setp("use_proxy", opt.v)}
-                      className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-bold transition ${active ? "border-brand/50 bg-brand/15 text-white" : "border-border text-muted-foreground hover:text-white"}`}>
-                      <Icon className="h-4 w-4" /> {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="mt-2 text-xs text-muted-foreground">تغییر این گزینه پس از یک بار ری‌استارت ربات اعمال می‌شود.</p>
-            </div>
-
-            <div className="flex justify-end">
-              <Button size="sm" disabled={savePanel2.isPending} onClick={() => savePanel2.mutate()}>
-                <Save className="h-4 w-4" /> {savePanel2.isPending ? "در حال ذخیره…" : savePanel2.isSuccess ? "ذخیره شد ✓" : "ذخیره پنل دوم"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
 
         <PasarGuardCard items={items} />
       </TabsContent>
