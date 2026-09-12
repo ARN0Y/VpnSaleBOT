@@ -1,7 +1,10 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LockOpen, Lock, Save, Plus, Trash2, Server, Wifi, WifiOff, Settings2, DatabaseBackup } from "lucide-react";
-import { api } from "@/lib/api";
+import {
+  LockOpen, Lock, Save, Plus, Trash2, Server, Wifi, WifiOff, Settings2, DatabaseBackup,
+  Bot, KeyRound,
+} from "lucide-react";
+import { api, setCsrf } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,18 +13,17 @@ import { Field } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useToast } from "@/components/ui/toast";
 import { CatalogTab } from "./settings/CatalogTab";
 
 type Audience = "all" | "user" | "agent";
 type Tri = "" | "true" | "false";
 
 const RUNTIME_FIELDS: { key: string; label: string; hint?: string }[] = [
-  { key: "price_per_gb", label: "قیمت هر گیگ (تومان)" },
-  { key: "minimum_purchase_gb", label: "حداقل خرید (گیگ)" },
-  { key: "crypto_address", label: "آدرس تتر" },
   { key: "support_id", label: "آیدی پشتیبانی", hint: "با @ ، مثل @YourSupport" },
-  { key: "admin_user_ids", label: "ادمین‌ها", hint: "آیدی‌ها با کاما" },
-  { key: "default_agent_price_per_gb", label: "قیمت پیش‌فرض نماینده" },
+  { key: "price_per_gb", label: "نرخ تمدید هر گیگ (تومان)", hint: "قیمت خرید در «پلن‌های فروش» تعیین می‌شود." },
+  { key: "minimum_purchase_gb", label: "حداقل حجم تمدید (گیگ)" },
+  { key: "default_agent_price_per_gb", label: "نرخ پیش‌فرض نماینده (هر گیگ)" },
 ];
 const PANEL_FIELDS: { key: string; label: string; type?: string }[] = [
   { key: "panel_base_url", label: "آدرس پنل 3x-ui" },
@@ -384,6 +386,200 @@ function BackupCard({ items }: { items: Record<string, string> }) {
   );
 }
 
+/** The bot's own connection. Separate from the shop because it is the one
+ *  section that decides whether the bot runs at all. */
+function BotCard({ items }: { items: Record<string, string> }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [f, setF] = React.useState(() => ({
+    bot_token: items.bot_token ?? "",
+    bot_username: items.bot_username ?? "",
+    admin_user_ids: items.admin_user_ids ?? "",
+    proxy_url: items.proxy_url ?? "",
+    proxy_enabled: (items.proxy_enabled ?? "") === "1",
+  }));
+  const set = (k: keyof typeof f, v: unknown) => setF((s) => ({ ...s, [k]: v }));
+
+  const save = useMutation({
+    mutationFn: () => api.updateSettings({
+      bot_token: f.bot_token.trim(),
+      bot_username: f.bot_username.trim().replace(/^@/, ""),
+      admin_user_ids: f.admin_user_ids,
+      proxy_url: f.proxy_url.trim(),
+      proxy_enabled: f.proxy_enabled ? "1" : "0",
+    }),
+    onSuccess: () => {
+      toast({
+        title: "تنظیمات ربات ذخیره شد",
+        description: "برای اعمال توکن یا پروکسی جدید، سرویس ربات باید یک بار ری‌استارت شود.",
+        variant: "success",
+      });
+      qc.invalidateQueries({ queryKey: ["settings"] });
+    },
+    onError: (e: Error) => toast({ title: "ذخیره نشد", description: e.message, variant: "error" }),
+  });
+
+  const hasToken = Boolean(f.bot_token.trim());
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2"><Bot className="h-5 w-5 text-muted-foreground" /> اتصال ربات</CardTitle>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              توکن از BotFather. تا وقتی توکن ثبت نشده باشد، سرویس ربات منتظر می‌ماند و
+              به‌محض ذخیره‌شدن خودش شروع می‌کند.
+            </p>
+          </div>
+          <Badge variant={hasToken ? "success" : "danger"}>{hasToken ? "توکن ثبت شده" : "بدون توکن"}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <Field label="توکن ربات" hint="مثل 123456789:AAH… — از @BotFather">
+          <Input type="password" value={f.bot_token} dir="ltr"
+                 onChange={(e) => set("bot_token", e.target.value)} placeholder="123456789:AAH…" />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="یوزرنیم ربات" hint="بدون @ — فقط برای نمایش">
+            <Input value={f.bot_username} dir="ltr"
+                   onChange={(e) => set("bot_username", e.target.value)} placeholder="MyShopBot" />
+          </Field>
+          <Field label="ادمین‌های ربات" hint="آیدی عددی تلگرام، جدا با کاما. تنها منبع تعیین ادمین.">
+            <Input value={f.admin_user_ids} dir="ltr"
+                   onChange={(e) => set("admin_user_ids", e.target.value)} placeholder="123456789,987654321" />
+          </Field>
+        </div>
+        <div className="space-y-3 rounded-xl border border-border bg-white/[0.02] p-4">
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" checked={f.proxy_enabled}
+                   onChange={(e) => set("proxy_enabled", e.target.checked)}
+                   className="mt-0.5 h-4 w-4 accent-[hsl(var(--brand))]" />
+            <span>
+              <span className="font-bold text-white">اتصال از طریق پروکسی</span>
+              <span className="block text-[11px] leading-5 text-muted-foreground">
+                فقط اگر سرور به تلگرام دسترسی مستقیم ندارد. آدرس با خاموش‌کردن پاک نمی‌شود.
+              </span>
+            </span>
+          </label>
+          <Field label="آدرس پروکسی">
+            <Input value={f.proxy_url} dir="ltr" placeholder="socks5h://user:pass@127.0.0.1:1080"
+                   onChange={(e) => set("proxy_url", e.target.value)} />
+          </Field>
+        </div>
+        <div className="flex justify-end">
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : "ذخیره تنظیمات ربات"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** The panel's own account. Kept apart from everything else because getting it
+ *  wrong locks the operator out of the thing they are editing. */
+function AccountCard() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const { data } = useQuery({ queryKey: ["account"], queryFn: () => api.account() });
+  const [username, setUsername] = React.useState<string | null>(null);
+  const [current, setCurrent] = React.useState("");
+  const [next, setNext] = React.useState("");
+  const [confirm, setConfirm] = React.useState("");
+
+  const save = useMutation({
+    mutationFn: () => api.saveAccount({
+      username: username ?? data?.username ?? "",
+      current_password: current,
+      new_password: next,
+    }),
+    onSuccess: (r) => {
+      if (r.csrf) setCsrf(r.csrf);
+      toast({ title: "حساب پنل به‌روزرسانی شد", variant: "success" });
+      setCurrent(""); setNext(""); setConfirm(""); setUsername(null);
+      qc.invalidateQueries({ queryKey: ["account"] });
+    },
+    onError: (e: Error) => toast({ title: "تغییر نکرد", description: e.message, variant: "error" }),
+  });
+
+  const saveSession = useMutation({
+    mutationFn: (hours: number) => api.saveAccount({ session_hours: hours }),
+    onSuccess: () => {
+      toast({ title: "مدت نشست ذخیره شد", variant: "success" });
+      qc.invalidateQueries({ queryKey: ["account"] });
+    },
+    onError: (e: Error) => toast({ title: "ذخیره نشد", description: e.message, variant: "error" }),
+  });
+
+  if (!data) return <Skeleton className="h-64" />;
+  const mismatch = Boolean(next) && Boolean(confirm) && next !== confirm;
+  const canSave = Boolean(current) && !mismatch &&
+    (Boolean(next) || (username !== null && username !== data.username));
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><KeyRound className="h-5 w-5 text-muted-foreground" /> حساب مدیر پنل</CardTitle>
+          <p className="text-sm leading-6 text-muted-foreground">
+            رمز به‌صورت هش ذخیره می‌شود و در هیچ فایلی نوشته نمی‌شود. برای تغییر نام کاربری
+            یا رمز، رمز فعلی لازم است — نشستِ باز به‌تنهایی کافی نیست.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="نام کاربری">
+              <Input value={username ?? data.username} dir="ltr"
+                     onChange={(e) => setUsername(e.target.value)} />
+            </Field>
+            <Field label="رمز فعلی" hint="برای تایید هویت لازم است.">
+              <Input type="password" value={current} dir="ltr"
+                     onChange={(e) => setCurrent(e.target.value)} />
+            </Field>
+            <Field label="رمز جدید" hint={`حداقل ${data.min_password_length} کاراکتر. خالی = بدون تغییر.`}>
+              <Input type="password" value={next} dir="ltr"
+                     onChange={(e) => setNext(e.target.value)} />
+            </Field>
+            <Field label="تکرار رمز جدید">
+              <Input type="password" value={confirm} dir="ltr"
+                     onChange={(e) => setConfirm(e.target.value)} />
+            </Field>
+          </div>
+          {mismatch && (
+            <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              رمز جدید و تکرارش یکی نیستند.
+            </div>
+          )}
+          <div className="flex justify-end">
+            <Button size="sm" disabled={!canSave || save.isPending} onClick={() => save.mutate()}>
+              <Save className="h-4 w-4" /> {save.isPending ? "در حال ذخیره…" : "ذخیره حساب"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-sm">نشست</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <Field label="مدت اعتبار نشست (ساعت)" hint="بعد از این مدت باید دوباره وارد شوید.">
+            <div className="flex gap-2">
+              <Input defaultValue={String(data.session_hours)} inputMode="decimal" dir="ltr"
+                     id="session-hours" className="max-w-40" />
+              <Button size="sm" variant="outline" disabled={saveSession.isPending}
+                      onClick={() => {
+                        const el = document.getElementById("session-hours") as HTMLInputElement | null;
+                        saveSession.mutate(Number(el?.value) || data.session_hours);
+                      }}>
+                ذخیره
+              </Button>
+            </div>
+          </Field>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export function Settings() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["settings"], queryFn: () => api.settings() });
@@ -423,12 +619,14 @@ export function Settings() {
   if (isLoading || !data) return <div className="space-y-5"><Skeleton className="h-12 w-72" /><Skeleton className="h-72" /></div>;
 
   const TABS = [
-    { v: "general", label: "عمومی" },
+    { v: "bot", label: "ربات" },
+    { v: "general", label: "فروشگاه" },
     { v: "sales", label: "فروش" },
     { v: "payment", label: "پرداخت" },
     { v: "catalog", label: "پلن‌های فروش" },
     { v: "panels", label: "پنل‌ها" },
     { v: "backup", label: "بکاپ" },
+    { v: "account", label: "حساب پنل" },
   ];
 
   return (
@@ -442,6 +640,14 @@ export function Settings() {
       </div>
 
       {/* ───────────── General ───────────── */}
+      <TabsContent value="bot" className="space-y-6">
+        <BotCard items={items} />
+      </TabsContent>
+
+      <TabsContent value="account" className="space-y-6">
+        <AccountCard />
+      </TabsContent>
+
       <TabsContent value="general" className="space-y-6">
         <Card>
           <CardHeader><CardTitle>تنظیمات فروشگاه</CardTitle></CardHeader>

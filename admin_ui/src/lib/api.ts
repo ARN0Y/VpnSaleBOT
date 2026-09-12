@@ -131,12 +131,11 @@ export const api = {
   setPriceTiers: (tiers: { min_gb: number; price_per_gb: number }[]) =>
     post<Ok>("/price-tiers", { tiers }),
   setPanelPrimary: (enabled: boolean) => post<Ok>("/panel-primary", { enabled }),
-  setPanelPackages: (
-    panel: "1" | "2" | "pg",
-    packages: { kind: "volume" | "unlimited"; title: string; gb: number; days: number; price: number; agent_price: number }[],
-  ) => post<Ok>("/panel-packages", { panel, packages }),
   content: () => request<import("./types").ContentBundle>("/content"),
   appearance: () => request<import("./types").Appearance>("/appearance"),
+  account: () => request<{ username: string; session_hours: number; cookie_secure: boolean; min_password_length: number }>("/account"),
+  saveAccount: (p: Record<string, unknown>) =>
+    post<{ ok: boolean; username: string; session_hours: number; csrf?: string }>("/account", p),
   saveAppearance: (p: Record<string, unknown>) => post<import("./types").Appearance>("/appearance", p),
   saveContent: (p: { messages?: Record<string, string>; buttons?: Record<string, string> }) =>
     post<import("./types").ContentBundle & { ok: boolean; unknown_placeholders: Record<string, string[]> }>("/content", p),

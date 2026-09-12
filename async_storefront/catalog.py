@@ -43,11 +43,6 @@ CATALOG_SETTING = "catalog"
 CATALOG_VERSION = 1
 
 # Legacy package lists, still read once to build the first catalog.
-LEGACY_PACKAGE_KEYS = {
-    "1": "panel_packages",
-    "2": "panel2_packages",
-    "pg": "pg_packages",
-}
 
 TARGET_PASARGUARD = "pasarguard"
 TARGET_XUI = "xui"
@@ -466,91 +461,6 @@ def validate_plan(plan: dict) -> list[str]:
 
 # ───────────────────────── migration from legacy ─────────────────────────
 
-def migrate_legacy_packages(
-    legacy: dict[str, str],
-    *,
-    pg_group: str = "",
-    labels: dict[str, str] | None = None,
-) -> dict:
-    """Build a catalog from the old per-panel package lists.
-
-    One category per panel that actually had packages, preserving order, prices,
-    titles and — critically — the hidden fair-usage caps: an old ``unlimited``
-    package advertised "نامحدود" while provisioning ``gb``, so the migrated plan
-    keeps gb as the real quota and pins the display label to "نامحدود".
-    """
-    labels = labels or {}
-    categories: list[dict] = []
-    plans: list[dict] = []
-    default_titles = {
-        "1": labels.get("1") or "سرور اصلی",
-        "2": labels.get("2") or "سرور دوم",
-        "pg": labels.get("pg") or "سرور اختصاصی",
-    }
-
-    for order, (panel_key, raw) in enumerate(legacy.items()):
-        try:
-            items = json.loads(raw or "[]")
-        except Exception:
-            items = []
-        if not isinstance(items, list) or not items:
-            continue
-        cat_id = f"cat_{_slug(panel_key, 'panel')}"
-        categories.append({
-            "id": cat_id,
-            "title": default_titles.get(panel_key, f"سرور {panel_key}"),
-            "emoji": "🌐",
-            "description": "",
-            "enabled": True,
-            "sort": order,
-        })
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            title = _str(item.get("title"))
-            price = _int(item.get("price"), 0, minimum=0)
-            if not title or price <= 0:
-                continue
-            kind = _str(item.get("kind"), "volume").lower()
-            gb = _int(item.get("gb") or item.get("cap_gb"), 0, minimum=0)
-            if kind == "volume" and gb <= 0:
-                continue
-            plans.append({
-                "id": f"plan_{_slug(panel_key, 'p')}_{index}",
-                "category_id": cat_id,
-                "title": title,
-                "enabled": True,
-                "sort": index,
-                "target": (
-                    {"kind": TARGET_PASARGUARD, "group": pg_group}
-                    if panel_key == "pg"
-                    else {"kind": TARGET_XUI, "panel": panel_key}
-                ),
-                "volume": {
-                    "mode": VOLUME_FIXED,
-                    "gb": gb,
-                    "days": _int(item.get("days"), 0, minimum=0),
-                    "min_gb": 0, "max_gb": 0, "step_gb": 0,
-                },
-                "display": {
-                    # The old "unlimited" kind is exactly this: show نامحدود,
-                    # provision the cap in gb.
-                    "volume_label": "نامحدود" if kind == "unlimited" else "",
-                    "hide_volume": kind == "unlimited",
-                    "note": "",
-                    "badge": "",
-                },
-                "pricing": {
-                    "mode": PRICING_FIXED,
-                    "price": price,
-                    "agent_price": _int(item.get("agent_price"), 0, minimum=0),
-                    "base": 0, "agent_base": 0, "per_gb": 0, "agent_per_gb": 0,
-                    "tiers": [], "round_to": 0,
-                },
-            })
-    return {"version": CATALOG_VERSION, "categories": categories, "plans": plans}
-
-
 def legacy_equivalent(plan: dict, gb: int | None = None) -> dict:
     """Shape a plan like an old package dict.
 
@@ -575,33 +485,9 @@ def legacy_equivalent(plan: dict, gb: int | None = None) -> dict:
 # ───────────────────────── storage helpers ─────────────────────────
 
 async def load_catalog(db) -> dict:
-    """Read the catalog, building it from the legacy package lists on first use.
-
-    The migration runs once and is persisted, so an operator upgrading mid-day
-    never sees an empty shop: the plans they already sell are there, priced
-    identically, before they open the panel.
-    """
+    """The sales catalog, or an empty one when nothing has been authored yet."""
     raw = await db.get_setting(CATALOG_SETTING, "")
-    if str(raw or "").strip():
-        return parse_catalog(raw)
-
-    legacy = {key: (await db.get_setting(setting, "") or "") for key, setting in LEGACY_PACKAGE_KEYS.items()}
-    if not any(str(v).strip() not in ("", "[]") for v in legacy.values()):
-        return parse_catalog("")
-    catalog = migrate_legacy_packages(
-        legacy,
-        pg_group=str(await db.get_setting("pg_group", "") or "").strip(),
-        labels={
-            "1": str(await db.get_setting("panel_label", "") or "").strip(),
-            "2": str(await db.get_setting("panel2_label", "") or "").strip(),
-            "pg": str(await db.get_setting("pg_label", "") or "").strip(),
-        },
-    )
-    catalog = parse_catalog(dump_catalog(catalog))
-    await db.set_setting(CATALOG_SETTING, dump_catalog(catalog))
-    # Keep the legacy keys untouched as a rollback path.
-    await db.set_setting("catalog_migrated_from_packages", "1")
-    return catalog
+    return parse_catalog(raw if str(raw or "").strip() else "")
 
 
 async def save_catalog(db, catalog: dict) -> dict:

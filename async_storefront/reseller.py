@@ -171,10 +171,30 @@ def button_label(package: dict) -> str:
 
 
 def generate_username(prefix: str, user_id: int) -> str:
-    """A panel username that is unique, valid, and says nothing about the buyer
-    beyond their id — no phone numbers or names end up in the panel."""
+    """A panel username that is valid and says nothing about the buyer beyond
+    their id — no phone numbers or names end up in the panel.
+
+    Eight hex characters of randomness, not four: panel usernames are unique,
+    so a collision is not a cosmetic accident but a purchase that fails for no
+    reason the buyer can see. Four was enough to collide twenty-six times in
+    two thousand draws.
+    """
     clean = re.sub(r"[^a-z0-9_]", "", _str(prefix).lower()) or DEFAULT_PREFIX
-    return f"{clean[:8]}_{int(user_id)}_{secrets.token_hex(2)}"[:32]
+    return f"{clean[:8]}_{int(user_id)}_{secrets.token_hex(4)}"[:32]
+
+
+async def allocate_username(db, prefix: str, user_id: int, *, attempts: int = 5) -> str:
+    """A username no sale of ours already holds.
+
+    The panel is the final authority on uniqueness and a clash there is rolled
+    back safely, but checking our own records first means the buyer does not
+    have to see that happen.
+    """
+    for _ in range(max(1, attempts)):
+        name = generate_username(prefix, user_id)
+        if not await db.reseller_username_taken(name):
+            return name
+    raise RuntimeError("could not allocate a free panel username")
 
 
 def generate_password(length: int = 16) -> str:

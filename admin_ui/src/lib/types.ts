@@ -140,7 +140,6 @@ export type CatalogBundle = {
   groups_error: string;
   panels: { key: string; label: string }[];
   problems: Record<string, string[]>;
-  migrated_from_packages: boolean;
 };
 
 export type DiscountKind = "percent" | "fixed";

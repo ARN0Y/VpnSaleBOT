@@ -3006,7 +3006,8 @@ async def reseller_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user_id=update.effective_user.id,
             package=package,
             role_id=role_id,
-            username=reseller.generate_username(await reseller.username_prefix(db), update.effective_user.id),
+            username=await reseller.allocate_username(
+                db, await reseller.username_prefix(db), update.effective_user.id),
             password=reseller.generate_password(),
             login_url=await reseller.login_url(db),
             idempotency_key=idem,

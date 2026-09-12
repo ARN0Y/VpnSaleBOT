@@ -745,42 +745,6 @@ async def set_infinite_package(request: Request):
     }
 
 
-@router.post("/panel-packages")
-async def set_panel_packages(request: Request):
-    """Save a panel's package list (volume / fair-usage 'unlimited') as JSON in
-    settings KV. panel='1' → primary, '2' → second. Empty list clears packages
-    (panel falls back to the per-GB flow)."""
-    import json as _json
-
-    body = await _json_body(request)
-    panel = str(body.get("panel")) if str(body.get("panel")) in {"1", "2", "pg"} else "1"
-    raw = body.get("packages")
-
-    def _i(value) -> int:
-        try:
-            return max(0, int(float(value)))
-        except (TypeError, ValueError):
-            return 0
-
-    cleaned: list[dict] = []
-    if isinstance(raw, list):
-        for item in raw[:30]:
-            kind = "unlimited" if str((item or {}).get("kind")) == "unlimited" else "volume"
-            title = str((item or {}).get("title") or "").strip()[:64]
-            gb = _i((item or {}).get("gb"))
-            days = _i((item or {}).get("days"))
-            price = _i((item or {}).get("price"))
-            agent_price = _i((item or {}).get("agent_price"))
-            if not title or price <= 0:
-                continue
-            if kind == "volume" and gb <= 0:
-                continue
-            cleaned.append({"kind": kind, "title": title, "gb": gb, "days": days, "price": price, "agent_price": agent_price})
-    key = {"1": "panel_packages", "2": "panel2_packages", "pg": "pg_packages"}[panel]
-    await db(request).admin_update_settings({key: _json.dumps(cleaned, ensure_ascii=False) if cleaned else ""})
-    return {"ok": True, "panel": panel, "count": len(cleaned)}
-
-
 @router.post("/panel-primary")
 async def set_panel_primary(request: Request):
     """Enable/disable selling from the primary 3x-ui panel (settings KV, no
@@ -856,7 +820,6 @@ async def get_catalog(request: Request):
         "groups_error": groups_error,
         "panels": panels,
         "problems": {k: v for k, v in problems.items() if v},
-        "migrated_from_packages": str(await database.get_setting("catalog_migrated_from_packages", "0")) == "1",
     }
 
 
@@ -931,7 +894,7 @@ async def set_primary_backend(request: Request):
 @router.post("/pasarguard")
 async def set_pasarguard(request: Request):
     """Configure the PasarGuard panel (settings KV). Empty password keeps the
-    current one. Pricing is per-package (set via /panel-packages panel='pg')."""
+    current one. What is sold on it is defined by the plans in the catalog."""
     body = await _json_body(request)
     database = db(request)
 
@@ -1561,3 +1524,82 @@ async def get_branding(request: Request):
     appearance — a title, a tagline, an image address and a layout.
     """
     return await branding.login_look(db(request))
+
+
+# ───────────────────────── the panel's own account ─────────────────────────
+
+
+@router.get("/account")
+async def get_account(request: Request):
+    credentials = request.app.state.credentials
+    return {
+        "username": credentials.username,
+        "session_hours": round(credentials.ttl_seconds / 3600, 1),
+        "cookie_secure": credentials.cookie_secure,
+        "min_password_length": credentials_mod.MIN_PASSWORD_LENGTH,
+    }
+
+
+@router.post("/account")
+async def save_account(request: Request):
+    """Change the panel's own username, password or session length.
+
+    Changing either half of the credentials requires the current password. The
+    session cookie alone is not enough: a signed-in tab left open on a shared
+    machine should not be able to lock the owner out of their own panel.
+    """
+    body = await _json_body(request)
+    credentials = request.app.state.credentials
+    database = db(request)
+
+    username = str(body.get("username") or "").strip()
+    new_password = str(body.get("new_password") or "")
+    wants_credentials = bool(new_password) or (username and username != credentials.username)
+
+    if wants_credentials:
+        if not credentials.verify(credentials.username, str(body.get("current_password") or "")):
+            return JSONResponse({"ok": False, "error": "رمز فعلی نادرست است."}, status_code=403)
+        try:
+            await credentials.store(
+                database,
+                username=username or credentials.username,
+                password=new_password or str(body.get("current_password") or ""),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    values: dict[str, str] = {}
+    if "session_hours" in body:
+        try:
+            hours = float(body.get("session_hours"))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "مدت نشست معتبر نیست."}, status_code=400)
+        values[credentials_mod.SETTING_TTL] = str(int(max(0.25, min(720, hours)) * 3600))
+    if "cookie_secure" in body:
+        values[credentials_mod.SETTING_COOKIE_SECURE] = "1" if _truthy(body.get("cookie_secure")) else "0"
+    if values:
+        await database.admin_update_settings(values)
+        await credentials.load(database)
+
+    response = JSONResponse({
+        "ok": True,
+        "username": credentials.username,
+        "session_hours": round(credentials.ttl_seconds / 3600, 1),
+        "cookie_secure": credentials.cookie_secure,
+        "password_changed": bool(new_password),
+    })
+    if wants_credentials:
+        # The old session was signed for the old username; re-issue so the
+        # operator is not signed out by their own change.
+        token, csrf, max_age = issue_session(credentials, credentials.username)
+        set_session_cookie(response, credentials, token, max_age)
+        response = JSONResponse({
+            "ok": True,
+            "username": credentials.username,
+            "session_hours": round(credentials.ttl_seconds / 3600, 1),
+            "cookie_secure": credentials.cookie_secure,
+            "password_changed": bool(new_password),
+            "csrf": csrf,
+        })
+        set_session_cookie(response, credentials, token, max_age)
+    return response

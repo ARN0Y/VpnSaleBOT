@@ -760,7 +760,6 @@ class AsyncDatabase:
             # per-panel package lists on first read, then owned by the panel.
             # KV-only: the .db schema must stay untouched.
             "catalog": "",
-            "catalog_migrated_from_packages": "0",
         }
         await self.conn.executemany(
             "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
@@ -2176,6 +2175,12 @@ class AsyncDatabase:
             (int(user_id),),
         )
         return [dict(r) for r in rows]
+
+    async def reseller_username_taken(self, username: str) -> bool:
+        row = await self.fetchone(
+            "SELECT 1 AS x FROM reseller_panels WHERE pg_username=? LIMIT 1", (str(username),)
+        )
+        return bool(row)
 
     async def reseller_panel(self, panel_id: str) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM reseller_panels WHERE panel_id=?", (str(panel_id),))
