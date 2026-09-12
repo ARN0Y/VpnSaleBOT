@@ -216,6 +216,27 @@ class AsyncDatabase:
               status TEXT NOT NULL DEFAULT 'created'
             );
 
+            -- A reseller panel is an admin account sold inside the connected
+            -- PasarGuard panel. The row is the bot's own record of it: what was
+            -- sold, to whom, and what the panel reported back the last time we
+            -- looked. The panel itself stays the authority on live usage.
+            CREATE TABLE IF NOT EXISTS reseller_panels (
+              panel_id TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              pg_username TEXT NOT NULL,
+              package_id TEXT NOT NULL DEFAULT '',
+              title TEXT NOT NULL DEFAULT '',
+              traffic_bytes INTEGER NOT NULL DEFAULT 0,
+              used_bytes INTEGER NOT NULL DEFAULT 0,
+              price_toman INTEGER NOT NULL DEFAULT 0,
+              order_id TEXT,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at INTEGER NOT NULL DEFAULT 0,
+              expires_at INTEGER NOT NULL DEFAULT 0,
+              synced_at INTEGER NOT NULL DEFAULT 0,
+              note TEXT NOT NULL DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS discount_codes (
               code TEXT PRIMARY KEY,
               title TEXT NOT NULL DEFAULT '',
@@ -475,6 +496,8 @@ class AsyncDatabase:
             CREATE INDEX IF NOT EXISTS idx_test_configs_user     ON agent_test_configs(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_admin_events_status   ON admin_events(status, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_discount_red_code     ON discount_redemptions(code, status);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_reseller_pg_user  ON reseller_panels(pg_username);
+            CREATE INDEX IF NOT EXISTS idx_reseller_owner         ON reseller_panels(user_id, status);
             CREATE INDEX IF NOT EXISTS idx_discount_red_user     ON discount_redemptions(code, user_id, status);
             CREATE INDEX IF NOT EXISTS idx_discount_red_created  ON discount_redemptions(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_orders_discount_code  ON orders(discount_code);
@@ -2141,6 +2164,134 @@ class AsyncDatabase:
                 "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [(str(k), str(v)) for k, v in values.items()],
             )
+
+    # ───────────────────── reseller panels ─────────────────────
+    # The bot's record of the admin accounts it sold inside PasarGuard. Live
+    # traffic always comes from the panel; these rows are what was sold, to
+    # whom, and the last figure the panel gave us.
+
+    async def reseller_panels_for_user(self, user_id: int) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            "SELECT * FROM reseller_panels WHERE user_id=? ORDER BY created_at DESC",
+            (int(user_id),),
+        )
+        return [dict(r) for r in rows]
+
+    async def reseller_panel(self, panel_id: str) -> dict[str, Any] | None:
+        row = await self.fetchone("SELECT * FROM reseller_panels WHERE panel_id=?", (str(panel_id),))
+        return dict(row) if row else None
+
+    async def reseller_panel_for_user(self, user_id: int, panel_id: str) -> dict[str, Any] | None:
+        """Scoped by owner on purpose: a panel id from someone else's callback
+        must not resolve, or one reseller could top up another's account."""
+        row = await self.fetchone(
+            "SELECT * FROM reseller_panels WHERE panel_id=? AND user_id=?",
+            (str(panel_id), int(user_id)),
+        )
+        return dict(row) if row else None
+
+    async def record_reseller_panel(self, conn, **fields: Any) -> None:
+        await conn.execute(
+            """
+            INSERT INTO reseller_panels
+              (panel_id,user_id,pg_username,package_id,title,traffic_bytes,
+               price_toman,order_id,status,created_at,expires_at,note)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                str(fields["panel_id"]), int(fields["user_id"]), str(fields["pg_username"]),
+                str(fields.get("package_id") or ""), str(fields.get("title") or ""),
+                int(fields.get("traffic_bytes") or 0), int(fields.get("price_toman") or 0),
+                fields.get("order_id"), str(fields.get("status") or "active"),
+                now_ts(), int(fields.get("expires_at") or 0), str(fields.get("note") or ""),
+            ),
+        )
+
+    async def forget_reseller_panel(self, panel_id: str) -> None:
+        """Drop the record of a panel whose creation was rolled back."""
+        await self.execute("DELETE FROM reseller_panels WHERE panel_id=?", (str(panel_id),))
+
+    async def add_reseller_traffic(self, conn, panel_id: str, delta_bytes: int) -> int:
+        """Move a panel's allowance by ``delta_bytes`` and return the new total.
+        A negative delta gives traffic back, which is how a failed top-up is
+        undone.
+
+        The arithmetic happens in SQL so two top-ups cannot read the same
+        starting figure and both write their own sum back, and the floor is on
+        the RESULT rather than on the delta — clamping the delta instead would
+        silently turn a rollback into a no-op.
+        """
+        await conn.execute(
+            "UPDATE reseller_panels SET traffic_bytes = MAX(0, traffic_bytes + ?) WHERE panel_id=?",
+            (int(delta_bytes), str(panel_id)),
+        )
+        row = await self.fetchone(
+            "SELECT traffic_bytes FROM reseller_panels WHERE panel_id=?", (str(panel_id),)
+        )
+        return int(row["traffic_bytes"]) if row else 0
+
+    async def set_reseller_panel_status(self, panel_id: str, status: str) -> None:
+        await self.execute(
+            "UPDATE reseller_panels SET status=? WHERE panel_id=?",
+            (str(status), str(panel_id)),
+        )
+
+    async def sync_reseller_panel_usage(self, panel_id: str, *, used_bytes: int,
+                                        traffic_bytes: int | None = None) -> None:
+        if traffic_bytes is None:
+            await self.execute(
+                "UPDATE reseller_panels SET used_bytes=?, synced_at=? WHERE panel_id=?",
+                (max(0, int(used_bytes)), now_ts(), str(panel_id)),
+            )
+            return
+        await self.execute(
+            "UPDATE reseller_panels SET used_bytes=?, traffic_bytes=?, synced_at=? WHERE panel_id=?",
+            (max(0, int(used_bytes)), max(0, int(traffic_bytes)), now_ts(), str(panel_id)),
+        )
+
+    async def admin_list_reseller_panels(
+        self, *, search: str = "", status: str = "all", limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        query = str(search or "").strip()
+        if query:
+            clauses.append(
+                "(p.pg_username LIKE ? OR p.title LIKE ?"
+                " OR CAST(p.user_id AS TEXT) LIKE ?"
+                " OR COALESCE(u.first_name,'') LIKE ? OR COALESCE(u.username,'') LIKE ?)"
+            )
+            params.extend([f"%{query}%"] * 5)
+        if str(status or "all") in {"active", "expired", "disabled"}:
+            clauses.append("p.status=?")
+            params.append(str(status))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = await self.fetchall(
+            f"""
+            SELECT p.*, u.first_name, u.username
+              FROM reseller_panels p
+              LEFT JOIN users u ON u.user_id = p.user_id
+              {where}
+             ORDER BY p.created_at DESC
+             LIMIT ? OFFSET ?
+            """,
+            (*params, max(1, min(500, int(limit))), max(0, int(offset))),
+        )
+        return [dict(r) for r in rows]
+
+    async def reseller_panel_overview(self) -> dict[str, int]:
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN status='active' THEN 1 ELSE 0 END),0) AS active,
+                   COALESCE(SUM(traffic_bytes),0) AS sold_bytes,
+                   COALESCE(SUM(used_bytes),0) AS used_bytes,
+                   COALESCE(SUM(price_toman),0) AS revenue
+              FROM reseller_panels
+            """
+        )
+        keys = ("total", "active", "sold_bytes", "used_bytes", "revenue")
+        return {k: int(row[k] or 0) if row else 0 for k in keys}
 
     # ───────────────────────── discount codes ─────────────────────────
     # Quoting a code and spending it are deliberately separate. The quote runs
