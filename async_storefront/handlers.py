@@ -24,12 +24,13 @@ from telegram.ext import (
     filters,
 )
 
-from . import catalog
+from . import catalog, reseller, texts
 from .db import AsyncDatabase
 from . import discounts
 from .pasarguard import PasarGuardClient
 from .provisioning import ProvisioningService, package_price, PG_INBOUND_SENTINEL
 from .qr import QRService
+from .util import now_ts
 
 try:
     import jdatetime
@@ -1163,7 +1164,7 @@ async def main_menu_keyboard(user_id: int, db: AsyncDatabase) -> InlineKeyboardM
         if "test" in permissions:
             rows.append([InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config")])
     else:
-        last = [InlineKeyboardButton(lbl["agent_request"], callback_data="menu:agent_request")]
+        last = [InlineKeyboardButton(lbl["agent_request"], callback_data="menu:reseller")]
         # Regular users: a one-time free test, when enabled.
         if await free_test_enabled(db):
             last.insert(0, InlineKeyboardButton(lbl["test_config"], callback_data="menu:test_config"))
@@ -2855,6 +2856,363 @@ async def topup_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
+# ───────────────────────── Reseller panels ─────────────────────────
+# Buying an administrator account inside the connected PasarGuard panel. These
+# are plain callback handlers rather than a conversation: every step carries
+# what it needs in its own callback data, so a stale button from an hour ago
+# either still works or says so, and never half-resumes someone else's flow.
+
+
+def _reseller_bytes_label(value: int) -> str:
+    """Bytes as the buyer reads them."""
+    total = max(0, int(value or 0))
+    if total <= 0:
+        return "۰"
+    gigabytes = total / reseller.BYTES_PER_GB
+    if gigabytes >= 1024:
+        return f"{gigabytes / 1024:.2f} ترابایت"
+    if gigabytes >= 1:
+        return f"{gigabytes:.1f} گیگابایت"
+    return f"{total / (1024 * 1024):.0f} مگابایت"
+
+
+def _reseller_panel_lines(panel: dict) -> str:
+    total = int(panel.get("traffic_bytes") or 0)
+    used = int(panel.get("used_bytes") or 0)
+    remaining = max(0, total - used)
+    share = int(used * 100 / total) if total > 0 else 0
+    lines = [
+        f"🪪 یوزرنیم: <code>{html.escape(str(panel.get('pg_username') or ''))}</code>",
+        f"📦 حجم کل: <b>{_reseller_bytes_label(total)}</b>",
+        f"📉 مصرف‌شده: <b>{_reseller_bytes_label(used)}</b> ({share}٪)",
+        f"📈 باقی‌مانده: <b>{_reseller_bytes_label(remaining)}</b>",
+    ]
+    expires = int(panel.get("expires_at") or 0)
+    if expires > 0:
+        lines.append(f"⏳ اعتبار تا: <b>{format_join_date(expires)}</b>")
+    status = str(panel.get("status") or "active")
+    if status != "active":
+        lines.append("⚠️ وضعیت: <b>غیرفعال</b>")
+    return "\n".join(lines)
+
+
+async def reseller_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """The reseller section: apply to become one, or buy a panel outright."""
+    await ensure_user(update, context)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
+    clear_flow_state(context)
+
+    # With panel sales switched off this section has nothing extra to offer, so
+    # the button keeps doing exactly what it did before.
+    if not await reseller.is_enabled(db):
+        return await agent_request_start(update, context)
+
+    rows = [[InlineKeyboardButton("🌐 خرید پنل نمایندگی", callback_data="res:buy")]]
+    owned = await db.reseller_panels_for_user(update.effective_user.id)
+    if owned:
+        rows.append([InlineKeyboardButton(f"🖥 پنل‌های من ({len(owned)})", callback_data="res:mine")])
+    rows.append([InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="menu:agent_request")])
+    rows.append([InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")])
+    await new_flow_card(update, context, await texts.render(db, "reseller_hub"), InlineKeyboardMarkup(rows))
+    return ConversationHandler.END
+
+
+async def reseller_packages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    if not await reseller.is_enabled(db):
+        await edit_text(query, "این بخش در حال حاضر فعال نیست.", back_keyboard())
+        return
+    packages = reseller.on_sale(await reseller.load_packages(db))
+    if not packages:
+        await edit_text(query, "هنوز بسته‌ای برای فروش تعریف نشده است.", back_keyboard())
+        return
+    balance = await db.get_wallet_balance(update.effective_user.id)
+    rows = [[InlineKeyboardButton(reseller.button_label(p), callback_data=f"res:pkg:{p['id']}")]
+            for p in packages]
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="res:hub")])
+    await edit_flow_query(
+        update, context,
+        await texts.render(db, "reseller_packages", balance=f"{balance:,}"),
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def reseller_package_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    package_id = (query.data or "").rsplit(":", 1)[-1]
+    packages = reseller.on_sale(await reseller.load_packages(db))
+    package = reseller.find_package(packages, package_id)
+    if package is None:
+        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست.", back_keyboard())
+        return
+    balance = await db.get_wallet_balance(update.effective_user.id)
+    price = int(package["price"])
+    short = max(0, price - balance)
+    rows = [[InlineKeyboardButton("✅ تایید و خرید پنل", callback_data=f"res:ok:{package['id']}")]]
+    if short > 0:
+        rows = [[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")]]
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="res:buy")])
+    note = str(package.get("note") or "").strip()
+    text = (
+        "🧾 <b>تایید خرید پنل نمایندگی</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"📦 بسته: <b>{html.escape(str(package['title']))}</b>\n"
+        f"💾 حجم: <b>{html.escape(reseller.traffic_label(int(package['traffic_gb'])))}</b>\n"
+        f"⏳ اعتبار: <b>{html.escape(reseller.duration_label(package))}</b>\n"
+        + (f"ℹ️ {html.escape(note)}\n" if note else "")
+        + "<code>─────────────────────</code>\n"
+        f"💰 مبلغ: <b>{price:,}</b> تومان\n"
+        f"💎 موجودی شما: <b>{balance:,}</b> تومان\n"
+    )
+    if short > 0:
+        text += f"\n⚠️ <b>{short:,}</b> تومان کسری دارید."
+    else:
+        text += "\n✅ با تایید، پنل ساخته و مشخصات ورود برای شما ارسال می‌شود."
+    await edit_flow_query(update, context, text, InlineKeyboardMarkup(rows))
+
+
+async def reseller_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create the panel and hand over the credentials."""
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    package_id = (query.data or "").rsplit(":", 1)[-1]
+    if not await reseller.is_enabled(db):
+        await edit_text(query, "این بخش در حال حاضر فعال نیست.", back_keyboard())
+        return
+    packages = reseller.on_sale(await reseller.load_packages(db))
+    package = reseller.find_package(packages, package_id)
+    if package is None:
+        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست.", back_keyboard())
+        return
+
+    pg_client = await get_pg_client(context)
+    if pg_client is None:
+        await edit_text(query, "🌐 سرور در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید.", back_keyboard())
+        return
+
+    # One key per buyer per package per minute: a double tap cannot buy two
+    # panels, and a genuine second purchase a minute later still can.
+    idem = f"rpanel-{update.effective_user.id}-{package['id']}-{now_ts() // 60}"
+    await edit_flow_query(update, context, "⏳ <b>در حال ساخت پنل...</b>\n\nلطفاً چند لحظه صبر کنید.")
+    try:
+        role_id = await pg_client.ensure_reseller_role(await reseller.role_name(db))
+        provisioning = context.application.bot_data["provisioning"]
+        result = await provisioning.process_reseller_panel_purchase(
+            pg_client=pg_client,
+            user_id=update.effective_user.id,
+            package=package,
+            role_id=role_id,
+            username=reseller.generate_username(await reseller.username_prefix(db), update.effective_user.id),
+            password=reseller.generate_password(),
+            login_url=await reseller.login_url(db),
+            idempotency_key=idem,
+        )
+    except ValueError as exc:
+        await edit_text(
+            query,
+            f"⚠️ <b>خرید انجام نشد.</b>\n\n{html.escape(str(exc))}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")],
+                [InlineKeyboardButton("↩️ بازگشت", callback_data="res:hub")],
+            ]),
+        )
+        return
+    except Exception as exc:
+        if "duplicate purchase request" in str(exc):
+            await _answer_query(query, "این خرید در حال پردازش است…")
+            return
+        LOG.exception("reseller panel purchase failed user_id=%s", update.effective_user.id)
+        await edit_text(query, "❌ ساخت پنل انجام نشد. مبلغی کسر نشده است؛ با پشتیبانی تماس بگیرید.",
+                        back_keyboard())
+        return
+
+    await edit_text(query, "✅ <b>پنل نمایندگی شما ساخته شد.</b>\n\nمشخصات ورود در پیام بعدی ارسال می‌شود.")
+    login = str(result.get("login_url") or "").strip()
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=(
+            "🎉 <b>پنل نمایندگی شما آماده است</b>\n"
+            "<code>─────────────────────</code>\n"
+            + (f"🔗 آدرس ورود:\n<code>{html.escape(login)}</code>\n" if login else "")
+            + f"👤 یوزرنیم: <code>{html.escape(result['username'])}</code>\n"
+            f"🔑 رمز عبور: <code>{html.escape(result['password'])}</code>\n"
+            "<code>─────────────────────</code>\n"
+            f"💾 حجم پنل: <b>{html.escape(reseller.traffic_label(int(result['traffic_gb'])))}</b>\n"
+            + (f"⏳ اعتبار تا: <b>{format_join_date(int(result['expires_at']))}</b>\n"
+               if int(result.get("expires_at") or 0) > 0 else "")
+            + "\n⚠️ <b>این پیام را نگه دارید.</b> رمز عبور فقط همین یک بار نمایش داده می‌شود؛ "
+            "پس از ورود می‌توانید آن را از داخل پنل تغییر دهید."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🖥 پنل‌های من", callback_data="res:mine")],
+            [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")],
+        ]),
+    )
+    clear_flow_state(context)
+
+
+async def reseller_my_panels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    panels = await db.reseller_panels_for_user(update.effective_user.id)
+    if not panels:
+        await edit_text(query, "شما هنوز پنل نمایندگی ندارید.",
+                        InlineKeyboardMarkup([[InlineKeyboardButton("🌐 خرید پنل", callback_data="res:buy")],
+                                              [InlineKeyboardButton("🏠 بازگشت", callback_data="menu:main")]]))
+        return
+    rows = [[InlineKeyboardButton(
+        f"🖥 {panel.get('pg_username')} — {_reseller_bytes_label(int(panel.get('traffic_bytes') or 0))}",
+        callback_data=f"res:view:{panel['panel_id']}")] for panel in panels[:20]]
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="res:hub")])
+    await edit_flow_query(update, context, "🖥 <b>پنل‌های نمایندگی شما</b>\n\nبرای دیدن جزئیات انتخاب کنید:",
+                          InlineKeyboardMarkup(rows))
+
+
+async def reseller_panel_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One panel, with live usage read from the server."""
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    panel_id = (query.data or "").rsplit(":", 1)[-1]
+    panel = await db.reseller_panel_for_user(update.effective_user.id, panel_id)
+    if panel is None:
+        await edit_text(query, "⚠️ این پنل پیدا نشد.", back_keyboard())
+        return
+
+    # The panel is the authority on usage; our row is only the last figure we
+    # were given. Refresh it here so the buyer sees the truth, and fall back to
+    # the stored figure when the server cannot be reached.
+    pg_client = await get_pg_client(context)
+    if pg_client is not None:
+        try:
+            live = await pg_client.get_admin(str(panel["pg_username"]))
+            if live is not None:
+                await db.sync_reseller_panel_usage(
+                    panel_id,
+                    used_bytes=int(live.get("used_traffic") or 0),
+                    traffic_bytes=int(live.get("data_limit") or 0) or None,
+                )
+                panel = await db.reseller_panel_for_user(update.effective_user.id, panel_id)
+        except Exception:
+            LOG.exception("could not refresh reseller panel %s", panel_id)
+
+    login = await reseller.login_url(db)
+    rows = []
+    if await reseller.topup_enabled(db):
+        rows.append([InlineKeyboardButton("➕ افزایش حجم پنل", callback_data=f"res:top:{panel_id}")])
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data="res:mine")])
+    await edit_flow_query(
+        update, context,
+        "🖥 <b>پنل نمایندگی</b>\n"
+        "<code>─────────────────────</code>\n"
+        + _reseller_panel_lines(panel) + "\n"
+        + (f"\n🔗 آدرس ورود:\n<code>{html.escape(login)}</code>" if login else ""),
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def reseller_topup_packages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    panel_id = (query.data or "").rsplit(":", 1)[-1]
+    panel = await db.reseller_panel_for_user(update.effective_user.id, panel_id)
+    if panel is None:
+        await edit_text(query, "⚠️ این پنل پیدا نشد.", back_keyboard())
+        return
+    if not await reseller.topup_enabled(db):
+        await edit_text(query, "افزایش حجم در حال حاضر فعال نیست.", back_keyboard())
+        return
+    packages = reseller.on_sale(await reseller.load_packages(db))
+    if not packages:
+        await edit_text(query, "بسته‌ای برای افزایش حجم تعریف نشده است.", back_keyboard())
+        return
+    balance = await db.get_wallet_balance(update.effective_user.id)
+    rows = [[InlineKeyboardButton(reseller.button_label(p),
+                                  callback_data=f"res:topok:{panel_id}:{p['id']}")] for p in packages]
+    rows.append([InlineKeyboardButton("↩️ بازگشت", callback_data=f"res:view:{panel_id}")])
+    await edit_flow_query(
+        update, context,
+        "➕ <b>افزایش حجم پنل</b>\n"
+        f"🪪 <code>{html.escape(str(panel.get('pg_username') or ''))}</code>\n"
+        "<code>─────────────────────</code>\n"
+        f"💎 موجودی شما: <b>{balance:,}</b> تومان\n\n"
+        "حجم خریداری‌شده به حجم فعلی پنل <b>اضافه</b> می‌شود.",
+        InlineKeyboardMarkup(rows),
+    )
+
+
+async def reseller_topup_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await _answer_query(query)
+    db: AsyncDatabase = context.application.bot_data["db"]
+    try:
+        _, _, panel_id, package_id = (query.data or "").split(":", 3)
+    except ValueError:
+        await edit_text(query, "⚠️ این دکمه منقضی شده است.", back_keyboard())
+        return
+    panel = await db.reseller_panel_for_user(update.effective_user.id, panel_id)
+    if panel is None:
+        await edit_text(query, "⚠️ این پنل پیدا نشد.", back_keyboard())
+        return
+    if not await reseller.topup_enabled(db):
+        await edit_text(query, "افزایش حجم در حال حاضر فعال نیست.", back_keyboard())
+        return
+    package = reseller.find_package(reseller.on_sale(await reseller.load_packages(db)), package_id)
+    if package is None:
+        await edit_text(query, "⚠️ این بسته دیگر در دسترس نیست.", back_keyboard())
+        return
+
+    pg_client = await get_pg_client(context)
+    if pg_client is None:
+        await edit_text(query, "🌐 سرور در حال حاضر در دسترس نیست.", back_keyboard())
+        return
+
+    idem = f"rtop-{update.effective_user.id}-{panel_id}-{package['id']}-{now_ts() // 60}"
+    await edit_flow_query(update, context, "⏳ <b>در حال افزایش حجم...</b>")
+    try:
+        provisioning = context.application.bot_data["provisioning"]
+        result = await provisioning.process_reseller_topup(
+            pg_client=pg_client, user_id=update.effective_user.id,
+            panel=panel, package=package, idempotency_key=idem,
+        )
+    except ValueError as exc:
+        await edit_text(
+            query, f"⚠️ <b>انجام نشد.</b>\n\n{html.escape(str(exc))}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("💳 شارژ کیف پول", callback_data="menu:wallet")],
+                                  [InlineKeyboardButton("↩️ بازگشت", callback_data=f"res:view:{panel_id}")]]),
+        )
+        return
+    except Exception as exc:
+        if "duplicate purchase request" in str(exc):
+            await _answer_query(query, "این درخواست در حال پردازش است…")
+            return
+        LOG.exception("reseller top-up failed panel=%s", panel_id)
+        await edit_text(query, "❌ افزایش حجم انجام نشد. مبلغی کسر نشده است؛ با پشتیبانی تماس بگیرید.",
+                        back_keyboard())
+        return
+
+    await edit_text(
+        query,
+        "✅ <b>حجم پنل افزایش یافت.</b>\n"
+        "<code>─────────────────────</code>\n"
+        f"🪪 <code>{html.escape(result['username'])}</code>\n"
+        f"➕ اضافه‌شده: <b>{html.escape(reseller.traffic_label(int(result['added_gb'])))}</b>\n"
+        f"📦 حجم کل: <b>{_reseller_bytes_label(int(result['total_bytes']))}</b>\n"
+        f"💰 پرداختی: <b>{int(result['price']):,}</b> تومان",
+        InlineKeyboardMarkup([[InlineKeyboardButton("🖥 پنل‌های من", callback_data="res:mine")],
+                              [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="menu:main")]]),
+    )
+
+
 async def agent_request_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await ensure_user(update, context)
     await remove_keyboard(context, update.effective_chat.id, context.user_data.get(FLOW_PROMPT_KEY))
@@ -3240,7 +3598,7 @@ async def handle_nav_btn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await agent_test_config(update, context)
         return ConversationHandler.END
     if action == "agent_request":
-        return await agent_request_start(update, context)
+        return await reseller_hub(update, context)
     return ConversationHandler.END
 
 
@@ -3539,6 +3897,15 @@ def register_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pkg_name_input_standalone))
     # Standalone menu callbacks (outside conversation)
     app.add_handler(CallbackQueryHandler(send_main_menu, pattern=r"^menu:main$"))
+    app.add_handler(CallbackQueryHandler(reseller_hub, pattern=r"^menu:reseller$"))
+    app.add_handler(CallbackQueryHandler(reseller_hub, pattern=r"^res:hub$"))
+    app.add_handler(CallbackQueryHandler(reseller_packages, pattern=r"^res:buy$"))
+    app.add_handler(CallbackQueryHandler(reseller_package_selected, pattern=r"^res:pkg:[A-Za-z0-9_\-]+$"))
+    app.add_handler(CallbackQueryHandler(reseller_buy, pattern=r"^res:ok:[A-Za-z0-9_\-]+$"))
+    app.add_handler(CallbackQueryHandler(reseller_my_panels, pattern=r"^res:mine$"))
+    app.add_handler(CallbackQueryHandler(reseller_panel_view, pattern=r"^res:view:[A-Za-z0-9_\-]+$"))
+    app.add_handler(CallbackQueryHandler(reseller_topup_packages, pattern=r"^res:top:[A-Za-z0-9_\-]+$"))
+    app.add_handler(CallbackQueryHandler(reseller_topup_buy, pattern=r"^res:topok:[A-Za-z0-9_\-]+:[A-Za-z0-9_\-]+$"))
     app.add_handler(CallbackQueryHandler(account_info, pattern=r"^menu:account$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions, pattern=r"^menu:subs$"))
     app.add_handler(CallbackQueryHandler(my_subscriptions_page, pattern=r"^subs:page:\d+$"))
