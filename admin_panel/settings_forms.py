@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import Request
 
-from async_storefront.env_sync import sync_env_from_admin
 
-from ..backup import DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS, normalize_xui_backup_timeout
+from .backup import DEFAULT_XUI_BACKUP_TIMEOUT_SECONDS, normalize_xui_backup_timeout
 
 LOG = logging.getLogger(__name__)
 
@@ -174,12 +172,3 @@ def sales_broadcast(new_sales_status: str, audience: str = "all") -> tuple[str, 
         ),
     )
 
-
-def sync_env(request: Request, *, settings: dict[str, str] | None = None, panel: dict[str, str | int] | None = None) -> None:
-    env_path = getattr(request.app.state, "env_path", None)
-    if not env_path:
-        return
-    try:
-        sync_env_from_admin(env_path, settings=settings, panel=panel)
-    except Exception:
-        LOG.exception("failed to sync admin settings to .env")

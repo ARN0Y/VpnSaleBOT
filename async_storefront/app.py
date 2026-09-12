@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import logging
 from io import BytesIO
 import warnings
 
@@ -12,21 +14,20 @@ try:
 except Exception:  # pragma: no cover - depends on PTB minor version
     PTBUserWarning = UserWarning
 
-try:
-    from dotenv import load_dotenv
-except Exception:  # pragma: no cover - optional at import time
-    load_dotenv = None
-
 from .agent import AgentService
-from .config import Settings
+from .config import Runtime
 from .db import AsyncDatabase
 from .handlers import register_handlers
 from .panel import PanelClient
 from .provisioning import ProvisioningService
 from .qr import QRService
+from . import settings_source
 
-if load_dotenv:
-    load_dotenv()
+
+LOG = logging.getLogger(__name__)
+
+# How long to wait between checks while the bot has no token.
+TOKEN_WAIT_SECONDS = 10
 
 warnings.filterwarnings(
     "ignore",
@@ -36,24 +37,24 @@ warnings.filterwarnings(
 
 
 async def post_init(app: Application) -> None:
-    settings: Settings = app.bot_data["settings"]
-    db = AsyncDatabase(settings.db_path)
+    runtime: Runtime = app.bot_data["runtime"]
+    db = AsyncDatabase(runtime.db_path)
     await db.connect()
     await db.init_schema()
     panel = PanelClient(
         db,
-        pool_size=settings.panel_pool_size,
-        timeout_seconds=settings.panel_timeout_seconds,
+        pool_size=runtime.panel_pool_size,
+        timeout_seconds=runtime.panel_timeout_seconds,
     )
     agents = AgentService(db)
-    qr = QRService(settings.qr_workers)
+    qr = QRService(runtime.qr_workers)
     app.bot_data.update(
         db=db,
         panel=panel,
         agents=agents,
         provisioning=ProvisioningService(db, panel, agents),
         qr=qr,
-        backup_dir=settings.backup_dir,
+        backup_dir=runtime.backup_dir,
         backup_chat_id=0,
     )
     # Warm the renamable menu-button routing index so custom labels route
@@ -71,9 +72,6 @@ async def post_shutdown(app: Application) -> None:
     panel: PanelClient | None = app.bot_data.get("panel")
     if panel:
         await panel.close()
-    panel2: PanelClient | None = app.bot_data.get("panel2")
-    if panel2:
-        await panel2.close()
     pg_client = app.bot_data.get("pg_client")
     if pg_client is not None:
         try:
@@ -107,18 +105,18 @@ async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_photo(photo=BytesIO(png), caption="QR generated off the event loop")
 
 
-def build_application(settings: Settings) -> Application:
+def build_application(runtime: Runtime, *, token: str, proxy_url: str) -> Application:
     request = HTTPXRequest(
-        proxy=settings.proxy_url or None,
-        connection_pool_size=settings.telegram_pool_size,
+        proxy=proxy_url or None,
+        connection_pool_size=runtime.telegram_pool_size,
         connect_timeout=20,
         read_timeout=30,
         write_timeout=30,
         pool_timeout=20,
     )
     updates_request = HTTPXRequest(
-        proxy=settings.proxy_url or None,
-        connection_pool_size=max(8, settings.telegram_pool_size // 4),
+        proxy=proxy_url or None,
+        connection_pool_size=max(8, runtime.telegram_pool_size // 4),
         connect_timeout=20,
         read_timeout=30,
         write_timeout=30,
@@ -126,7 +124,7 @@ def build_application(settings: Settings) -> Application:
     )
     app = (
         Application.builder()
-        .token(settings.bot_token)
+        .token(token)
         .request(request)
         .get_updates_request(updates_request)
         .post_init(post_init)
@@ -134,7 +132,7 @@ def build_application(settings: Settings) -> Application:
         .concurrent_updates(256)
         .build()
     )
-    app.bot_data["settings"] = settings
+    app.bot_data["runtime"] = runtime
     register_handlers(app)
     app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("panel_ping", panel_ping))
@@ -143,9 +141,38 @@ def build_application(settings: Settings) -> Application:
 
 
 def main() -> None:
-    settings = Settings.from_env()
-    app = build_application(settings)
+    """Start polling, once the bot has a token to poll with.
+
+    The token lives in the database and is set from the admin panel, so on a
+    fresh install the panel comes up first and the bot waits here instead of
+    crash-looping. Waiting rather than exiting keeps the service log readable
+    and means the bot starts by itself the moment the token is saved.
+    """
+    runtime = Runtime.load().prepare()
+    token, proxy_url = asyncio.run(_read_connection(runtime))
+    app = build_application(runtime, token=token, proxy_url=proxy_url)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+async def _read_connection(runtime: Runtime) -> tuple[str, str]:
+    db = AsyncDatabase(runtime.db_path)
+    await db.connect()
+    try:
+        await db.init_schema()
+        announced = False
+        while True:
+            token = await settings_source.bot_token(db)
+            if token:
+                return token, await settings_source.resolve_proxy_url(db)
+            if not announced:
+                LOG.warning(
+                    "No bot token configured yet. Open the admin panel, set the "
+                    "token under Settings, and this will start on its own."
+                )
+                announced = True
+            await asyncio.sleep(TOKEN_WAIT_SECONDS)
+    finally:
+        await db.close()
 
 
 if __name__ == "__main__":

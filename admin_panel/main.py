@@ -9,28 +9,22 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from async_storefront.db import AsyncDatabase
 from async_storefront.panel import PanelClient
-from async_storefront.util import resolve_proxy_url
+from async_storefront.config import Runtime, WebRuntime
+from async_storefront.settings_source import resolve_proxy_url
 
 from . import api
 
-try:
-    from dotenv import load_dotenv
-except Exception:  # pragma: no cover - optional at import time
-    load_dotenv = None
-
-from .auth import AuthConfig, install_auth
+from .auth import install_auth
 from .backup import backup_scheduler
+from .credentials import PanelCredentials
 from .event_worker import event_worker
-from .routers import files
+from . import files
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-if load_dotenv:
-    load_dotenv(PROJECT_ROOT / ".env")
 
 
 def _float_env(name: str, default: float) -> float:
@@ -47,6 +41,9 @@ async def lifespan(app: FastAPI):
     await db.init_schema()
     await db.ensure_admin_runtime_schema()
     app.state.db = db
+    await app.state.credentials.load(db)
+    app.state.bot_token = str(await db.get_setting("bot_token", "") or "").strip()
+    app.state.proxy_url = await resolve_proxy_url(db)
     app.state.panel = PanelClient(
         db,
         pool_size=16,
@@ -119,17 +116,18 @@ def _mount_spa(app: FastAPI) -> None:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NavidVPN Admin", docs_url=None, redoc_url=None, lifespan=lifespan)
-    # Only the login page is still server-rendered; the panel itself is the SPA.
-    app.state.templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-    install_auth(app, AuthConfig.from_env())
-    app.state.db_path = Path(os.getenv("BOT_DB_PATH", "navidvpn.db")).resolve()
-    app.state.bot_token = os.getenv("BOT_TOKEN", "").strip()
-    app.state.proxy_url = resolve_proxy_url()
-    app.state.panel_timeout_seconds = _float_env("ADMIN_PANEL_TIMEOUT_SECONDS", 45.0)
-    app.state.env_path = PROJECT_ROOT / ".env"
-    app.state.backup_dir = Path(os.getenv("BOT_BACKUP_DIR", str(PROJECT_ROOT / "backup"))).resolve()
-    app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+    app = FastAPI(title="Panel", docs_url=None, redoc_url=None, lifespan=lifespan)
+    runtime = Runtime.load().prepare()
+    app.state.runtime = runtime
+    app.state.db_path = runtime.db_path
+    app.state.backup_dir = runtime.backup_dir
+    app.state.panel_timeout_seconds = runtime.panel_timeout_seconds
+    # Filled in by the lifespan, once the database is open: the bot token, the
+    # proxy and the panel account all live there now, not in a file.
+    app.state.credentials = PanelCredentials()
+    app.state.bot_token = ""
+    app.state.proxy_url = ""
+    install_auth(app)
 
     @app.get("/")
     async def root() -> RedirectResponse:
@@ -149,14 +147,14 @@ app = create_app()
 
 
 def main() -> None:
-    access_log = os.getenv("ADMIN_ACCESS_LOG", "0").strip().lower() in {"1", "true", "yes", "on"}
+    web = WebRuntime.load()
     uvicorn.run(
         "admin_panel.main:app",
-        host=os.getenv("ADMIN_HOST", "127.0.0.1"),
-        port=int(os.getenv("ADMIN_PORT", "8080")),
+        host=web.host,
+        port=web.port,
         reload=False,
-        access_log=access_log,
-        log_level=os.getenv("ADMIN_LOG_LEVEL", "info"),
+        access_log=web.access_log,
+        log_level=web.log_level,
     )
 
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import shutil
 import sqlite3
 import uuid
@@ -13,7 +12,6 @@ from typing import Any, AsyncIterator, Iterable
 import aiosqlite
 
 from . import discounts
-from .env_sync import BUSINESS_ENV_TO_SETTING, INFRA_ENV_TO_SETTING, PANEL_ENV_TO_COLUMN
 from .models import AgentAccess, PaymentMethod
 from .util import iran_day_bounds_ts, now_ts
 
@@ -410,7 +408,6 @@ class AsyncDatabase:
             "UPDATE panel_settings SET created_at=COALESCE(NULLIF(created_at,0),?), updated_at=COALESCE(NULLIF(updated_at,0),?) WHERE id=1",
             (now_ts(), now_ts()),
         )
-        await self.apply_env_overrides()   # env seeds first → wins over code defaults on fresh DB
         await self._seed_settings()         # INSERT OR IGNORE → fills remaining gaps
         await self._seed_stats()
         await self._ensure_indexes()
@@ -765,73 +762,6 @@ class AsyncDatabase:
                 }.items(),
             )
 
-    async def apply_env_overrides(self) -> None:
-        """Apply .env values to the settings table.
-
-        BUSINESS settings (card_number, price_per_gb, crypto_address, support_id):
-          - Written with INSERT OR IGNORE → only seed on first run.
-          - Admin panel edits persist through every subsequent restart.
-          - Empty env vars are silently ignored.
-
-        INFRASTRUCTURE settings (admin_user_ids, panel credentials):
-          - Written with ON CONFLICT DO UPDATE → env is always authoritative.
-          - Ops team manages these; empty values are ignored.
-        """
-        # ── Business settings: seed-only, admin panel owns them after first run ──
-        seed_values: dict[str, str] = {}
-        for env_key, db_key in BUSINESS_ENV_TO_SETTING.items():
-            val = os.getenv(env_key, "").strip()
-            if val:                         # never apply empty strings
-                seed_values[db_key] = val
-        if seed_values:
-            await self.conn.executemany(
-                "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",
-                seed_values.items(),
-            )
-
-        # ── Infrastructure settings: env is always authoritative (if non-empty) ──
-        infra_values: dict[str, str] = {}
-        for env_key, db_key in INFRA_ENV_TO_SETTING.items():
-            val = os.getenv(env_key, "").strip()
-            if val:
-                infra_values[db_key] = val
-        if infra_values:
-            await self.conn.executemany(
-                "INSERT INTO settings(key,value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                infra_values.items(),
-            )
-
-        panel_env_keys = tuple(PANEL_ENV_TO_COLUMN)
-        if not any(key in os.environ and os.getenv(key, "").strip() for key in panel_env_keys):
-            return
-
-        current = await self.get_panel_settings()
-        base_url = self._env_or_current("PANEL_BASE_URL", current, "base_url")
-        username = self._env_or_current("PANEL_USERNAME", current, "username")
-        password = os.getenv("PANEL_PASSWORD") if os.getenv("PANEL_PASSWORD", "").strip() else (str(current["password"] or "") if current else "")
-        inbound_raw = os.getenv("PANEL_INBOUND_ID", "").strip()
-        inbound_id = self._safe_int(inbound_raw, int(current["inbound_id"] or 0) if current else 0)
-        sub_link_base = self._env_or_current("SUB_LINK_BASE", current, "sub_link_base")
-        cookie = str(current["cookie"] or "") if current else ""
-        cookie_ts = int(current["cookie_ts"] or 0) if current else 0
-        await self.upsert_panel_settings(
-            base_url=base_url,
-            username=username,
-            password=password,
-            inbound_id=inbound_id,
-            sub_link_base=sub_link_base,
-            cookie=cookie,
-            cookie_ts=cookie_ts,
-        )
-
-    @staticmethod
-    def _env_or_current(env_key: str, current: aiosqlite.Row | None, column: str) -> str:
-        value = os.getenv(env_key, "").strip()
-        if value:
-            return value
-        return str(current[column] or "") if current else ""
-
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
         try:
@@ -913,17 +843,19 @@ class AsyncDatabase:
             )
         return card
 
-    async def get_admin_user_ids(self, fallback: int | None = None) -> list[int]:
+    async def get_admin_user_ids(self) -> list[int]:
+        """Telegram ids allowed to use the bot's own admin commands.
+
+        The panel is the only source: there is no environment fallback, so
+        "who is an admin" has exactly one answer, and changing it is a
+        setting rather than a redeploy.
+        """
         raw = await self.get_setting("admin_user_ids", "")
         ids: list[int] = []
         for part in str(raw or "").replace("\n", ",").split(","):
             value = part.strip()
-            if value.isdigit():
-                item = int(value)
-                if item not in ids:
-                    ids.append(item)
-        if not ids and fallback:
-            ids.append(int(fallback))
+            if value.isdigit() and int(value) not in ids:
+                ids.append(int(value))
         return ids
 
     async def get_panel_settings(self) -> aiosqlite.Row | None:

@@ -32,30 +32,15 @@ def env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-def resolve_proxy_url() -> str:
-    """Decide the proxy URL the bot should use to reach Telegram.
-
-    Behaviour is controlled by two env vars:
-      * ``BOT_PROXY_URL`` (or legacy ``TELEGRAM_PROXY``) — the proxy address.
-      * ``BOT_USE_PROXY`` — explicit on/off switch.
-
-    When ``BOT_USE_PROXY`` is unset we stay backward compatible: the proxy is
-    used whenever a URL is configured. When it is set, it wins — so an operator
-    can keep the URL on file but turn the proxy off (or on) without deleting it.
-    """
-    return resolve_proxy_value(
-        os.getenv("BOT_PROXY_URL", os.getenv("TELEGRAM_PROXY", "")),
-        os.getenv("BOT_USE_PROXY"),
-    )
-
-
 def resolve_proxy_value(proxy_url: str | None, use_proxy_raw: str | None) -> str:
-    """Same on/off/auto logic as ``resolve_proxy_url`` but for values that come
-    from anywhere (e.g. the settings table for a second panel), not just env.
+    """Decide whether to route through a proxy, from a pair of stored settings.
 
-    * ``use_proxy_raw`` truthy  → use the proxy URL.
-    * ``use_proxy_raw`` falsy   → no proxy (direct), even if a URL is set.
-    * unset / blank / unknown   → auto: use the proxy iff a URL is present.
+    * switch on    → use the address.
+    * switch off   → connect directly, even though an address is stored.
+    * unset        → use the address if one is stored.
+
+    Keeping the address while the switch is off is deliberate: turning the
+    proxy back on should not mean typing the address again.
     """
     url = (proxy_url or "").strip()
     raw = (use_proxy_raw or "").strip().lower()

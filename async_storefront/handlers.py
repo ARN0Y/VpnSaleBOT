@@ -24,7 +24,6 @@ from telegram.ext import (
     filters,
 )
 
-from .config import Settings
 from . import catalog
 from .db import AsyncDatabase
 from . import discounts
@@ -1663,8 +1662,7 @@ async def show_sales_closed(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def admin_ids(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
     db: AsyncDatabase = context.application.bot_data["db"]
-    settings: Settings = context.application.bot_data["settings"]
-    return await db.get_admin_user_ids(settings.admin_id)
+    return await db.get_admin_user_ids()
 
 
 async def is_bot_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:

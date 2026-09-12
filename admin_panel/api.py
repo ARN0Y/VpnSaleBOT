@@ -15,7 +15,6 @@ import contextlib
 import logging
 import secrets
 import string
-import time
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -26,16 +25,23 @@ from async_storefront.models import AgentAccess
 from async_storefront.pasarguard import PasarGuardClient
 from async_storefront.provisioning import PG_INBOUND_SENTINEL
 
-from .auth import COOKIE_NAME, current_admin_username, csrf_token, sign_session
-from .routers.common import db, notify_telegram_user, panel
-from .routers.settings import (
+from . import credentials as credentials_mod
+from .auth import (
+    COOKIE_NAME,
+    client_key,
+    current_admin_username,
+    csrf_token,
+    issue_session,
+    set_session_cookie,
+)
+from .deps import db, notify_telegram_user, panel
+from .settings_forms import (
     SALES_AUDIENCES,
     backup_values_from_form,
     normalize_sales_audience,
     panel_values_from_form,
     sales_broadcast,
     settings_values_from_form,
-    sync_env,
 )
 
 router = APIRouter(prefix="/admin/api/v1")
@@ -49,51 +55,77 @@ async def _json_body(request: Request) -> dict:
     except Exception:
         return {}
 
-# Paths the auth middleware must let through unauthenticated (see auth.py).
-PUBLIC_API_PATHS = {"/admin/api/v1/login"}
+# Paths the auth middleware lets through unauthenticated (see auth.OPEN_PATHS).
+PUBLIC_API_PATHS = {"/admin/api/v1/login", "/admin/api/v1/setup"}
+
+
+@router.get("/setup")
+async def setup_status(request: Request):
+    """Whether this install still needs its first administrator.
+
+    The panel asks this before showing a sign-in form, so a fresh server leads
+    the operator into creating an account instead of asking for a password that
+    does not exist yet.
+    """
+    credentials = request.app.state.credentials
+    return {"needs_setup": not credentials.configured,
+            "min_password_length": credentials_mod.MIN_PASSWORD_LENGTH}
+
+
+@router.post("/setup")
+async def setup_submit(request: Request):
+    """Create the first administrator, once, against the code from the log."""
+    credentials = request.app.state.credentials
+    limiter = request.app.state.auth_limiter
+    ip = client_key(request)
+    if limiter.is_blocked(ip):
+        return JSONResponse({"ok": False, "error": "too_many_attempts"}, status_code=429)
+    if credentials.configured:
+        # Not an error worth explaining in detail: if an admin exists, this
+        # door is closed for good and the caller should just sign in.
+        return JSONResponse({"ok": False, "error": "already_configured"}, status_code=409)
+
+    body = await _json_body(request)
+    if not credentials.verify_setup_token(str(body.get("token", ""))):
+        limiter.record_failure(ip)
+        return JSONResponse({"ok": False, "error": "bad_setup_code"}, status_code=401)
+
+    try:
+        await credentials.store(
+            db(request),
+            username=str(body.get("username", "")),
+            password=str(body.get("password", "")),
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    limiter.record_success(ip)
+    token, csrf, max_age = issue_session(credentials, credentials.username)
+    response = JSONResponse({"ok": True, "username": credentials.username, "csrf": csrf})
+    set_session_cookie(response, credentials, token, max_age)
+    return response
 
 
 @router.post("/login")
 async def login(request: Request):
-    config = request.app.state.auth_config
+    credentials = request.app.state.credentials
     limiter = request.app.state.auth_limiter
-    from .auth import client_key
-
     ip = client_key(request)
     if limiter.is_blocked(ip):
-        return JSONResponse(
-            {"ok": False, "error": "too_many_attempts"}, status_code=429
-        )
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    username = str(payload.get("username", "")).strip()
-    password = str(payload.get("password", ""))
-    valid = secrets.compare_digest(username, config.username) and secrets.compare_digest(
-        password, config.password
-    )
-    if not valid:
+        return JSONResponse({"ok": False, "error": "too_many_attempts"}, status_code=429)
+    if not credentials.configured:
+        return JSONResponse({"ok": False, "error": "needs_setup"}, status_code=409)
+
+    body = await _json_body(request)
+    username = str(body.get("username", "")).strip()
+    if not credentials.verify(username, str(body.get("password", ""))):
         limiter.record_failure(ip)
         return JSONResponse({"ok": False, "error": "invalid_credentials"}, status_code=401)
 
     limiter.record_success(ip)
-    csrf = secrets.token_urlsafe(32)
-    expires_at = int(time.time()) + config.ttl_seconds
-    token = sign_session(
-        {"u": username, "exp": expires_at, "csrf": csrf, "n": secrets.token_urlsafe(12)},
-        config.secret,
-    )
+    token, csrf, max_age = issue_session(credentials, username)
     response = JSONResponse({"ok": True, "username": username, "csrf": csrf})
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        max_age=config.ttl_seconds,
-        httponly=True,
-        secure=config.cookie_secure,
-        samesite="lax",
-        path="/",
-    )
+    set_session_cookie(response, credentials, token, max_age)
     return response
 
 
@@ -537,7 +569,6 @@ async def update_settings(request: Request):
             cookie=str(current_panel["cookie"] or "") if current_panel else "",
             cookie_ts=int(current_panel["cookie_ts"] or 0) if current_panel else 0,
         )
-    sync_env(request, settings=values, panel=panel_values)
     return {"ok": True}
 
 
